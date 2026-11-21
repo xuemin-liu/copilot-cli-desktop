@@ -69,6 +69,8 @@ if (!process.versions.electron) {
       if (mode === 'missing') return { ok: false, reason: 'missing' }
       if (mode === 'outside') return { ok: false, reason: 'outside-workspace' }
       if (mode === 'throw') throw new Error('Fixture reveal failure')
+      // An answered error whose text happens to end the way a progress notice does.
+      if (mode === 'throw-ellipsis') throw new Error('Still waiting…')
       if (mode === 'pending') await new Promise((_, reject) => { rejectPending = reject })
       return { ok: true }
     })
@@ -167,6 +169,12 @@ if (!process.versions.electron) {
       mode = 'throw'
       await clickLink('src/missing.txt')
       assert.equal(await until(notice, 'IPC error'), 'Could not open file: Fixture reveal failure×')
+      // An answered error leaves by itself whatever its text ends with; only a pending open stays.
+      mode = 'throw-ellipsis'
+      await clickLink('src/missing.txt')
+      assert.equal(await until(notice, 'IPC error ending in an ellipsis'), 'Could not open file: Still waiting…×')
+      await delay(6500)
+      await until(async () => (await notice()) === null, 'an answered error ending in an ellipsis still leaves by itself')
       mode = 'success'
       await clickLink('./folder with spaces/example.txt')
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: './folder with spaces/example.txt' })

@@ -63,7 +63,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
-  const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info' } | null>(null)
+  // `pending`: the open it describes has not answered yet. Only an answered one leaves by itself.
+  const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info'; pending?: true } | null>(null)
   const linkRequestRef = useRef(0)
   const linkClickRef = useRef<LinkClickGate | null>(null)
 
@@ -234,7 +235,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       setLinkNotice(null)
       // An open that answers at once shows nothing; only one that takes a while says it is still working.
       const slow = setTimeout(() => {
-        if (request === linkRequestRef.current) setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : reveal ? 'Revealing file…' : 'Opening file…', tone: 'info' })
+        if (request === linkRequestRef.current) setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : reveal ? 'Revealing file…' : 'Opening file…', tone: 'info', pending: true })
       }, LINK_PROGRESS_DELAY_MS)
       try {
         const result = link.type === 'url'
@@ -456,7 +457,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
   useEffect(() => {
     // "Opening…" stays for as long as the open is pending; what it ends in is shown for a while, then removed.
-    if (!linkNotice || linkNotice.message.endsWith('…')) return
+    if (!linkNotice || linkNotice.pending) return
     const timer = setTimeout(() => setLinkNotice(current => current === linkNotice ? null : current), LINK_NOTICE_SHOWN_MS)
     return () => clearTimeout(timer)
   }, [linkNotice])
