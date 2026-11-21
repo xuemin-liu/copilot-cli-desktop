@@ -108,7 +108,7 @@ import {
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
-import { fileOpenable, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
+import { fileOpenable, isSameFolder, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
@@ -5524,9 +5524,14 @@ async function trustedFile(profileId: unknown, toolTabId: unknown): Promise<{ fi
   if (typeof profileId !== 'string' || typeof toolTabId !== 'string') throw new Error('Invalid file tab')
   const profile = desktopConfig.profiles.find(item => item.id === profileId)
   if (!profile) throw new Error('The workspace is unavailable')
-  const file = projectTools().fileTab(profileId, toolTabId)
-  const trusted = samePath(file.root, profile.path) || (await fileRoots(profile, [file.root])).some(root => root !== profile.path && samePath(root, file.root))
-  return { file, trusted }
+  const saved = projectTools().fileTab(profileId, toolTabId)
+  // The saved root is only a claim. It is accepted when it is, on disk, the project folder or one of its worktrees, and
+  // the read then uses that approved folder, never the saved spelling: on a file system that tells names apart by case,
+  // a saved path can come to name another folder than the one it was saved for.
+  for (const root of await fileRoots(profile, [saved.root])) {
+    if (await isSameFolder(saved.root, root)) return { file: { ...saved, root }, trusted: true }
+  }
+  return { file: saved, trusted: false }
 }
 function assertMainWindowSender(event: IpcMainInvokeEvent): void {
   assertTrustedIpcSender(event)
@@ -5588,7 +5593,8 @@ ipcMain.handle('desktop:open-file', async (event, source: unknown, candidate: un
   const position = (value: unknown): number | undefined => typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 10_000_000 ? value : undefined
   const line = position(where?.line), column = position(where?.column)
   try {
-    projectTools().openFile(profile.id, { ...located, ...(line === undefined ? {} : { line, ...(column === undefined ? {} : { column }) }) })
+    // The tab is kept under the file system's own spelling of the path, so another spelling finds the same tab.
+    projectTools().openFile(profile.id, { root: located.root, path: resolved.canonical, ...(line === undefined ? {} : { line, ...(column === undefined ? {} : { column }) }) })
   } catch (error) {
     if (error instanceof Error && error.message.includes('files are already open')) return { ok: false, reason: 'limit', message: error.message }
     throw error

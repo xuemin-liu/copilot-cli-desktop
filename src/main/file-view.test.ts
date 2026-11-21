@@ -5,7 +5,7 @@ import { appendFile, mkdir, mkdtemp, readdir, realpath, rename, rm, symlink, tru
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, isInsideFolder, locateInRoots,
+  canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, isInsideFolder, isSameFolder, locateInRoots,
   normalizeRelativePath, openInRoot, readFileAsset, readFileView, readOpened, resolveInRoot,
 } from './file-view.js'
 
@@ -58,9 +58,40 @@ test('programs and scripts are never offered Open with default app', () => {
   for (const name of ['report.pdf', 'notes.docx', 'photo.png', 'data.csv', 'readme.md', 'archive.zip']) assert.equal(canOpenWithDefaultApp(name), true, name)
 })
 
-test('one key per file, whatever the spelling of its root', () => {
+test('one tab key per file: spellings of one file share it, files that differ only by case do not', async () => {
   assert.equal(fileTabKey(join('C:', 'repo'), 'src/app.ts'), fileTabKey(join('C:', 'repo', '.'), 'src/app.ts'))
   assert.notEqual(fileTabKey(join('C:', 'repo'), 'src/app.ts'), fileTabKey(join('C:', 'repo-worktree'), 'src/app.ts'), 'the same path in two worktrees is two files')
+  assert.notEqual(fileTabKey(join('C:', 'repo'), 'Example.ts'), fileTabKey(join('C:', 'repo'), 'example.ts'), 'the key itself never folds case')
+  const { base, root } = await fixture()
+  try {
+    const key = async (path: string): Promise<string> => {
+      const resolved = await resolveInRoot(root, path)
+      assert.ok(resolved.ok, path)
+      return fileTabKey(root, resolved.canonical)
+    }
+    await writeFile(join(root, 'Example.ts'), 'upper\n')
+    await writeFile(join(root, 'example.ts'), 'lower\n')
+    await mkdir(join(root, 'real'))
+    await writeFile(join(root, 'real', 'note.txt'), 'note\n')
+    await symlink(join(root, 'real'), join(root, 'alias'), 'junction')
+    const names = await readdir(root)
+    assert.equal(await key('./docs//readme.md'), await key('docs/readme.md'))
+    assert.equal(await key('alias/note.txt'), await key('real/note.txt'), 'a path through a link is the file it leads to')
+    if (['Example.ts', 'example.ts'].every(name => names.includes(name))) {
+      // The file system tells the two names apart: two files, two tabs.
+      assert.notEqual(await key('Example.ts'), await key('example.ts'))
+    } else {
+      // It does not: any spelling is the one file, under the name the file system gives it.
+      assert.equal(await key('EXAMPLE.TS'), await key('example.ts'))
+      assert.equal(await key('DOCS/README.MD'), await key('docs/readme.md'))
+      assert.equal((await resolveInRoot(root, 'DOCS/README.MD') as { canonical: string }).canonical, 'docs/readme.md')
+    }
+    assert.equal(await isSameFolder(root, join(root, 'docs', '..')), true)
+    assert.equal(await isSameFolder(join(root, 'alias'), join(root, 'real')), true)
+    assert.equal(await isSameFolder(root, join(root, 'docs')), false)
+    assert.equal(await isSameFolder(root, join(root, 'app.ts')), false, 'a file is not a folder')
+    assert.equal(await isSameFolder(root, join(base, 'gone')), false)
+  } finally { await rm(base, { recursive: true, force: true }) }
 })
 
 test('a clicked path belongs to the first root that holds it', async () => {
@@ -79,7 +110,7 @@ test('a clicked path belongs to the first root that holds it', async () => {
 test('a file is read only when it is really inside its root', async () => {
   const { base, root, outside } = await fixture()
   try {
-    assert.deepEqual(await resolveInRoot(root, 'app.ts'), { ok: true, absolute: join(root, 'app.ts') })
+    assert.deepEqual(await resolveInRoot(root, 'app.ts'), { ok: true, absolute: join(root, 'app.ts'), canonical: 'app.ts' })
     assert.deepEqual(await resolveInRoot(root, '../outside/secret.txt'), { ok: false, reason: 'outside' })
     assert.deepEqual(await resolveInRoot(root, 'nope.txt'), { ok: false, reason: 'missing' })
     assert.deepEqual(await resolveInRoot(join(base, 'gone'), 'app.ts'), { ok: false, reason: 'root-missing' })
@@ -90,7 +121,7 @@ test('a file is read only when it is really inside its root', async () => {
     assert.equal(await readFileAsset(root, 'docs/readme.md', '../escape/secret.png'), null)
     // A root that is itself reached through a link still works.
     await symlink(root, join(base, 'linked-root'), 'junction')
-    assert.deepEqual(await resolveInRoot(join(base, 'linked-root'), 'app.ts'), { ok: true, absolute: join(base, 'linked-root', 'app.ts') })
+    assert.deepEqual(await resolveInRoot(join(base, 'linked-root'), 'app.ts'), { ok: true, absolute: join(base, 'linked-root', 'app.ts'), canonical: 'app.ts' })
   } finally { await rm(base, { recursive: true, force: true }) }
 })
 

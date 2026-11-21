@@ -106,9 +106,21 @@ export function normalizeRelativePath(value: unknown): string | null {
   return parts.join('/')
 }
 
-/** One key per file for finding its open tab: the root and the path, compared the way this platform compares names. */
+/**
+ * One key per file for finding its open tab. Nothing is folded to lower case here: `path` must be the spelling the file
+ * system itself gives (`resolveInRoot(...).canonical`), so two spellings of one file get one key, and two files whose
+ * names differ only by case, where the file system allows that, get two.
+ */
 export function fileTabKey(root: string, path: string): string {
-  return JSON.stringify([pathKey(root), caseInsensitivePaths ? path.toLowerCase() : path])
+  return JSON.stringify([hostPath.resolve(root), path])
+}
+
+/** Whether two paths are the same folder on disk, told by device and file number, not by how the names are spelled. */
+export async function isSameFolder(left: string, right: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([stat(left, { bigint: true }), stat(right, { bigint: true })])
+    return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino
+  } catch { return false }
 }
 
 /**
@@ -126,7 +138,8 @@ export async function isInsideFolder(path: string, folder: string): Promise<bool
   }
 }
 
-export type ResolvedFile = { ok: true; absolute: string } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' }
+/** `canonical` is the path under the root as the file system spells it, through links: the name a tab is kept under. */
+export type ResolvedFile = { ok: true; absolute: string; canonical: string } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' }
 
 /**
  * The real file behind `relative` under `root`. Both are resolved through links first, so a link inside the root that
@@ -143,7 +156,9 @@ export async function resolveInRoot(root: string, relative: string): Promise<Res
   let real: string
   try { real = await realpath(lexical) } catch { return { ok: false, reason: 'missing' } }
   if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot) || !(await isInsideFolder(real, realRoot))) return { ok: false, reason: 'outside' }
-  return { ok: true, absolute: lexical }
+  const canonical = normalizeRelativePath(hostPath.relative(realRoot, real))
+  if (!canonical) return { ok: false, reason: 'outside' }
+  return { ok: true, absolute: lexical, canonical }
 }
 
 /** A file opened for reading whose place under its root was checked against the open file itself. */

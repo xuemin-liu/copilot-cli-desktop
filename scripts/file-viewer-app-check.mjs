@@ -165,6 +165,11 @@ if (!process.versions.electron) {
     assert.equal((await fileTabs()).length, 1)
     assert.deepEqual(await open(join(workspace, 'src', 'app.ts')), { ok: true }, 'an absolute path to the same file')
     assert.equal((await fileTabs()).length, 1)
+    if (process.platform === 'win32') {
+      // Windows does not tell names apart by case: another spelling is the same file, kept under its real name.
+      assert.deepEqual(await open('SRC/APP.TS'), { ok: true })
+      assert.deepEqual((await fileTabs()).map(tab => tab.file.path), ['src/app.ts'])
+    }
 
     // --- Find in the file, across colored spans. ---
     await click('Find')
