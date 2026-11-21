@@ -407,21 +407,44 @@ export async function sameFolderOnDisk(left: string, right: string): Promise<boo
   } catch { return false }
 }
 
+/** Whether two paths are the same file or folder on disk, told by device and file number. */
+export async function sameOnDisk(left: string, right: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([stat(left, { bigint: true }), stat(right, { bigint: true })])
+    return a.dev === b.dev && a.ino === b.ino && a.isDirectory() === b.isDirectory()
+  } catch { return false }
+}
+
+/** Where a git pointer file (`gitdir`, `commondir`) leads, resolved through links; null when it is unreadable or not local. */
+async function pointerTarget(file: string, base: string): Promise<string | null> {
+  const pointer = await readPointerFile(file, GIT_POINTER_MAX_BYTES)
+  const named = pointer.kind === 'text' ? localAbsolute(base, pointer.text) : null
+  if (!named) return null
+  try { return await realPathNative(named) } catch { return null }
+}
+
 /**
  * `resolveLinkedWorktree`, for callers that go on to read files from the worktree. The lookup above matches the
  * repository a worktree names against the project's repository by name, which on a file system that tells names apart by
  * case could accept a worktree of another repository whose path differs only by case. Here the repository the worktree
  * names must also be, on disk, the project's repository (whether the project is the main checkout, a folder in it, or
- * itself a worktree). `same` is replaceable for tests.
+ * itself a worktree). The two pointers that tie a worktree to its repository are checked the same way: `commondir` must
+ * lead to the project's repository's own `.git`, and the registration's `gitdir` must lead back to this folder's `.git`
+ * file, so a stale registration cannot stand for another checkout. `same` is replaceable for tests.
  */
 export async function resolveProjectWorktree(projectPath: string, path: string,
-  same: (left: string, right: string) => Promise<boolean> = sameFolderOnDisk): Promise<SessionWorktree | null> {
+  same: (left: string, right: string) => Promise<boolean> = sameOnDisk): Promise<SessionWorktree | null> {
   if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || !isLocalFilesystemPath(path)) return null
   const repository = await projectRepository(projectPath)
   if (!repository) return null
   const worktree = await linkedWorktreeOf(path, repository.mainRoot, repository.project)
   if (!worktree) return null
-  return await same(worktree.mainRoot, repository.mainRoot) && await same(hostPath.join(worktree.gitDir, '..', '..'), hostPath.join(repository.mainRoot, '.git')) ? worktree : null
+  const repositoryGit = hostPath.join(repository.mainRoot, '.git')
+  if (!(await same(worktree.mainRoot, repository.mainRoot)) || !(await same(hostPath.join(worktree.gitDir, '..', '..'), repositoryGit))) return null
+  const common = await pointerTarget(hostPath.join(worktree.gitDir, 'commondir'), worktree.gitDir)
+  if (!common || !(await same(common, repositoryGit))) return null
+  const back = await pointerTarget(hostPath.join(worktree.gitDir, 'gitdir'), worktree.gitDir)
+  return back && await same(back, hostPath.join(worktree.root, '.git')) ? worktree : null
 }
 
 /** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
