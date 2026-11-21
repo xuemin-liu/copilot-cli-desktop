@@ -5269,9 +5269,10 @@ ipcMain.handle('desktop:automation-configure',async(event,projectId:unknown,repo
 })
 ipcMain.handle('desktop:automation-action',async(event,id:unknown,action:unknown):Promise<void>=>{
   assertTrustedIpcSender(event)
-  if(typeof id!=='string'||!isValidSessionId(id)||!['off','preview','automatic','start'].includes(String(action)))throw new Error('Invalid automation action')
+  if(typeof id!=='string'||!isValidSessionId(id)||!['off','preview','automatic','start','delete'].includes(String(action)))throw new Error('Invalid automation action')
   const controller=openAutomations()
   if(action==='start')await controller.startPreview(id)
+  else if(action==='delete')await controller.remove(id)
   else await controller.setMode(id,action as 'off'|'preview'|'automatic')
   broadcastState()
 })
