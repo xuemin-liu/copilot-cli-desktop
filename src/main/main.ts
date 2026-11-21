@@ -117,6 +117,7 @@ import { GitTrustStore } from './git-trust.js'
 import { registerGitIpc } from './git-ipc.js'
 import type { GitIpcEvent } from './git-ipc.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
+import { describeProcessExit, observeProcessFailures, ReloadBudget } from './process-diagnostics.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import { describeSessionPermission, type SessionPermissionMode } from './permission-modes.js'
 import {
@@ -4593,6 +4594,7 @@ function createWindow(
     event.preventDefault()
     observe(promptForWindowClose(window), 'Could not show close confirmation')
   })
+  recoverMainWindowPage(window)
   window.on('closed', () => {
     finishClosePrompt(window, closePromptAbort)
     mainWindow = null
@@ -4602,6 +4604,45 @@ function createWindow(
   })
   observe(window.loadFile(rendererPath('index.html')), 'Could not load application window')
   return window
+}
+
+/**
+ * The sessions live in this process, so when the main window's page process dies they are still running behind a dead
+ * window. Load the page again, which reads everything back, but only a few times: a page that dies on every load asks
+ * first. A window that only stopped responding is left alone, since it usually recovers and a reload would lose typing.
+ */
+function recoverMainWindowPage(window: BrowserWindow): void {
+  let reloads = new ReloadBudget()
+  const reload = (): void => observe(window.loadFile(rendererPath('index.html')), 'Could not reload application window')
+  window.webContents.on('render-process-gone', (_event, details) => {
+    const exit = describeProcessExit(details)
+    if (window.isDestroyed() || shuttingDown() || details?.reason === 'clean-exit') {
+      void writeAppLog(`Main window page process ended: ${exit}`)
+      return
+    }
+    if (reloads.take()) {
+      void writeAppLog(`Main window page process ended (${exit}); loading the page again`)
+      reload()
+      return
+    }
+    void writeAppLog(`Main window page process ended (${exit}); it keeps ending, so asking before another reload`)
+    observe(dialog.showMessageBox(window, {
+      type: 'error',
+      buttons: ['Reload', 'Not Now'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      message: 'This window keeps stopping',
+      detail: 'Your sessions are still running. Reload to show them again. Help > Show Application Log has the details.',
+    }).then(({ response }) => {
+      if (response !== 0 || window.isDestroyed() || shuttingDown()) return
+      reloads = new ReloadBudget()
+      reloads.take()
+      reload()
+    }), 'Could not ask about reloading the window')
+  })
+  window.on('unresponsive', () => { void writeAppLog('Main window stopped responding') })
+  window.on('responsive', () => { void writeAppLog('Main window is responding again') })
 }
 
 async function showSettingsWindow(): Promise<void> {
@@ -6115,6 +6156,8 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => restoreMainWindow())
   app.on('activate', restoreMainWindow)
+  observeProcessFailures(process, line => { void writeAppLog(line) }, line => console.error(line))
+  app.on('child-process-gone', (_event, details) => { void writeAppLog(`Helper process ended: ${describeProcessExit(details)}`) })
 
   app.whenReady().then(async () => {
     workflows()
