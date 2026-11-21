@@ -349,8 +349,24 @@ if (!process.versions.electron) {
     await writeFile(report, same)
     await utimes(report, stamp, stamp)
     assert.equal(await revisionOf(), stamped, 'new bytes, same size and time: the same revision')
+    // An open find is run again in the reloaded document: "delta" is gone from it.
+    await click('Find')
+    await findFor('delta')
+    await until(findStatus('1 of 1'), 'find in the old document')
     await click('Reload')
     await until(`(${pdfText}).includes('Second page sigma')`, 'Reload opens the fresh bytes')
+    await until(findStatus('No results'), 'the open find is run again in the reloaded document')
+    // And a query the next version still holds is found again there, without typing it again.
+    await findFor('Second page')
+    await until(findStatus('1 of 1'), 'find before the second reload')
+    await writeFile(report, makePdf([['Quarterly report alpha'], ['Second page omega'], ['Third page gamma'], ['Fourth page']]))
+    await utimes(report, stamp, stamp)
+    await click('Reload')
+    await until(`(${pdfText}).includes('Second page omega')`, 'second reload')
+    await delay(600)
+    await until(findStatus('1 of 1'), 'the open find is run again and finds its match in the new document')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-pdf .textLayer .highlight`)})`, 'the match is marked in the new document')
+    await click('×')
     // A refresh replaces the view; it does not pile listeners and pages on top of the old one.
     for (const word of ['one', 'two', 'three']) {
       await writeFile(report, makePdf([['Quarterly report alpha'], [`Second page ${word}`], ['Third page gamma'], ['Fourth page']]))

@@ -66,6 +66,8 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   // Counts accepted reads of a PDF. The view is opened once for each, so Reload opens the fresh bytes even when the
   // file's time and size are what they were, and a view that failed to open is tried again.
   const [pdfRead, setPdfRead] = useState(0)
+  // Counts views that became ready. An open find is run again in each new view, which starts with no matches.
+  const [pdfReady, setPdfReady] = useState(0)
   const pdfBox = useRef<HTMLDivElement>(null)
   const pdfView = useRef<PdfHandle | null>(null)
   const jumped = useRef(0)
@@ -110,7 +112,10 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       const page = pdfView.current?.page ?? 1
       pdfView.current?.close()
       setPdfProblem(null)
+      // The old view's matches belong to the old document.
+      setMatch({ index: 0, count: 0 })
       pdfView.current = loaded.open(container, bytes, {
+        ready: () => { if (current) setPdfReady(count => count + 1) },
         page: (now, total) => { if (current) setPdfPage({ current: now, total }) },
         found: (now, total) => { if (current) setMatch({ index: Math.max(0, now - 1), count: total }) },
         failed: reason => { if (current) { setPdfProblem(reason); setPdfPage(null) } },
@@ -212,7 +217,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     if (!pdfRevision || pdfProblem) return
     const timer = setTimeout(() => pdfView.current?.find(finding ? query : ''), 150)
     return () => clearTimeout(timer)
-  }, [pdfRevision, pdfProblem, finding, query])
+  }, [pdfRevision, pdfProblem, pdfReady, finding, query])
   useEffect(() => {
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
     const range = ranges.current[match.index]

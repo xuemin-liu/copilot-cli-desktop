@@ -56,6 +56,7 @@ function open(container: HTMLDivElement, bytes: Uint8Array, events: PdfViewerEve
     viewer.currentScaleValue = 'page-width'
     if (startPage > 1 && startPage <= viewer.pagesCount) viewer.currentPageNumber = startPage
     events.page(viewer.currentPageNumber, viewer.pagesCount)
+    events.ready()
   })
   eventBus.on('pagechanging', ({ pageNumber }: { pageNumber: number }) => events.page(pageNumber, viewer.pagesCount))
   const found = ({ matchesCount }: { matchesCount?: { current: number; total: number } }): void => {

@@ -7,6 +7,8 @@ export interface TextViewer {
 }
 /** What the PDF view reports back: the page in view, find results, and why a document could not be shown. */
 export interface PdfViewerEvents {
+  /** The document is loaded and its pages are laid out: find can be used from now on. */
+  ready(): void
   page(current: number, total: number): void
   found(current: number, total: number): void
   failed(reason: 'password' | 'invalid' | 'too-large' | 'failed'): void
