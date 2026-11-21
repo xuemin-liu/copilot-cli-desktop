@@ -1495,14 +1495,18 @@ async function buildSessionSpawnPlan(
   // the true resume id is known) agrees with this guess.
   const likelyFreshSession = !connectSessionId
     && (resumeMode === 'new' || (resumeMode === 'auto-resume' && buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }).length === 0))
-  validateLaunchOptions(profile.launch, connectSessionId, likelyFreshSession)
   // A connected session takes no permission flags. For the others, Restricted mode must not start on a guess: ask the
-  // CLI once more, then refuse, here, before a restart has stopped the tab's process.
+  // CLI once more, then refuse, here, before a restart has stopped the tab's process. This comes before the launch
+  // options are checked, which refuse a failed probe too, so a probe that only failed at startup can recover for both.
   if (!connectSessionId && profile.permissionPreset === 'read-only' && copilotCapabilities.probeFailed) {
     await recheckCopilotCapabilities()
     if (state.resolution !== resolution) throw new Error('The copilot CLI changed while the session was starting. Try again.')
   }
-  if (!connectSessionId) assertPermissionPresetSupported(profile.permissionPreset, copilotCapabilities)
+  // What was checked here is what the session is started with: a probe that finishes during the awaits below must not
+  // change the flags after a restart has stopped the old process.
+  const permissionCapabilities: PermissionCapabilities = { toolAllowlist: copilotCapabilities.toolAllowlist, probeFailed: copilotCapabilities.probeFailed }
+  if (!connectSessionId) assertPermissionPresetSupported(profile.permissionPreset, permissionCapabilities)
+  validateLaunchOptions(profile.launch, connectSessionId, likelyFreshSession)
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const inheritedEnvironment = { ...process.env, ...vaultEnvironment }
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, inheritedEnvironment)
@@ -1519,7 +1523,7 @@ async function buildSessionSpawnPlan(
     attachmentPaths,
     launch: profile.launch,
     permissionPreset: profile.permissionPreset,
-    permissionCapabilities: { toolAllowlist: copilotCapabilities.toolAllowlist, probeFailed: copilotCapabilities.probeFailed },
+    permissionCapabilities,
     // This must receive the full environment that PtySession will pass to
     // Copilot, not only provider/vault overrides. Ambient credentials also
     // reach Copilot through PtySession's process.env merge and must be named

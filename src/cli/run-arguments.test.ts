@@ -22,7 +22,7 @@ test('programmatic run arguments parse a complete request', () => {
   )
   // `run --preset read-only` never starts on a failed probe.
   assert.throws(
-    () => buildProgrammaticCopilotArgs(parsed, 'D:\work\project', { toolAllowlist: false, probeFailed: true }),
+    () => buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project', { toolAllowlist: false, probeFailed: true }),
     /Restricted mode was not started/,
   )
 })

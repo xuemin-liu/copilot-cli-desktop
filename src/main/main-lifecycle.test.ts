@@ -48,6 +48,8 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  /** What the next capability recheck finds, in place of asking a real CLI. Returns how many rechecks ran. */
+  recheckFinds(capabilities: CopilotCapabilities): { count: number }
   blockSessionStop(tabId:string,work:Promise<void>,started:()=>void):void
   /** Like blockSpawnPlan, but only plans for a profile the predicate accepts wait; the others run at once. */
   blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
@@ -305,6 +307,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
+          recheckFinds(capabilities) { const calls = { count: 0 }; recheckCopilotCapabilities = async () => { calls.count++; copilotCapabilities = capabilities; }; return calls; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSessionStop(tabId,work,started) { const session=managedTabs.get(tabId).session; const original=session.stop.bind(session);session.stop=async()=>{started();await work;return original()}; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
@@ -1601,6 +1604,25 @@ test('Restricted mode is refused when capability detection failed, and a restart
     assert.equal(harness.spawns[0]!.stopped, false)
     await assert.rejects(harness.createMain(), /Restricted mode was not started/)
     assert.equal(harness.spawns.length, 1)
+  })
+})
+
+test('a probe that failed at startup is asked again at launch, for Restricted mode with launch options too', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.permissionPreset = 'read-only'
+    profile.launch.mode = 'plan'
+    const working = { ...capabilities, supportedOptions: [...capabilities.supportedOptions] }
+    capabilities.probeFailed = true
+    capabilities.toolAllowlist = false
+    const rechecks = harness.recheckFinds(working)
+    await harness.createMain()
+    assert.equal(rechecks.count, 1)
+    assert.ok(harness.spawns[0]!.args.includes('--available-tools=view,glob,grep,ask_user'))
+    assert.ok(!harness.spawns[0]!.args.includes('--deny-tool=write'))
+    // Detection works now, so the next launch does not ask again.
+    await harness.createMain()
+    assert.equal(rechecks.count, 1)
   })
 })
 
