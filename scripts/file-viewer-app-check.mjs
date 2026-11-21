@@ -439,11 +439,11 @@ if (!process.versions.electron) {
 
     // Excel: every sheet, values only, dates as dates.
     await writeFile(join(workspace, 'budget.xlsx'), await makeXlsx([
-      { name: 'Sales', rows: [['Region', 'Amount', 'When'], ['North <b>bold</b>', 1200.5, { date: 45292 }], ['South', { formula: 'B2*2', value: 2401 }, null]] },
+      { name: 'Sales', rows: [['Region', 'Amount', 'When'], ['North <b>bold</b>', 1200.5, { date: 45292 }], ['South', { formula: 'B2*2', value: 2401 }, { number: 1.5, style: 3 }]] },
       { name: 'Notes', rows: [['Second sheet text']] }]))
     assert.deepEqual(await open('budget.xlsx'), { ok: true })
     await until(`(${cells}).includes('1200.5')`, 'Excel sheet')
-    assert.equal(await ui(cells), 'Region|Amount|When;North <b>bold</b>|1200.5|2024-01-01;South|2401|')
+    assert.equal(await ui(cells), 'Region|Amount|When;North <b>bold</b>|1200.5|2024-01-01;South|2401|36:00:00')
     assert.equal(await ui(`[...${view}.querySelectorAll('thead th')].map(cell => cell.textContent).join('|')`), '|A|B|C')
     assert.equal(await ui(`${view}.querySelectorAll('b').length`), 0)
     assert.equal(await ui(`[...document.querySelectorAll(${JSON.stringify(`${panel} .file-sheet-tabs [role=tab]`)})].map(tab => tab.textContent).join('|')`), 'Sales|Notes')
@@ -488,6 +488,19 @@ if (!process.versions.electron) {
     await writeFile(join(workspace, 'bomb.docx'), await makeZip({ 'word/document.xml': Buffer.alloc(120 * 1024 * 1024, 0x20) }))
     assert.deepEqual(await open('bomb.docx'), { ok: true })
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('too large')`, 'card for a document that unpacks too large')
+    // The same holds for every part the converter reads, not only the main one: styles and pictures too.
+    const small = await makeDocx([{ heading: 'Small text' }, { picture: true }])
+    const { ZipReader } = await import('../dist/src/renderer/viewers/zip-reader.js')
+    const parts = {}
+    const reader = new ZipReader(small, { entries: 100, totalBytes: 10_000_000 })
+    for (const name of reader.entries.keys()) parts[name] = Buffer.from(await reader.read(name, 1_000_000))
+    await writeFile(join(workspace, 'styles-bomb.docx'), await makeZip({ ...parts, 'word/styles.xml': Buffer.alloc(120 * 1024 * 1024, 0x20) }))
+    assert.deepEqual(await open('styles-bomb.docx'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('too large')`, 'card for a document whose styles unpack too large')
+    await writeFile(join(workspace, 'picture-bomb.docx'), await makeZip({ ...parts, 'word/media/image1.png': Buffer.alloc(40 * 1024 * 1024) }))
+    assert.deepEqual(await open('picture-bomb.docx'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('too large')`, 'card for a document whose picture unpacks too large')
+    await closeTab('styles-bomb.docx'); await closeTab('picture-bomb.docx')
     // A tab closed while its document is still being read ends the work.
     await writeFile(join(workspace, 'slow.docx'), await makeDocx(Array.from({ length: 4000 }, (_, index) => ({ text: `Paragraph ${index}` }))))
     assert.deepEqual(await open('slow.docx'), { ok: true })

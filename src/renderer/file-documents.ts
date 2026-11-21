@@ -4,7 +4,8 @@ import type { SheetData } from './viewers/xlsx-reader.js'
 
 export type { OfficeProblem, OfficeReply, SheetData }
 
-export const TABLE_LIMITS = { rows: 5_000, columns: 200, cellChars: 2_000 }
+/** `cells`: most cells put in the page for one table, blanks included; rows beyond it are left out and counted in the note. */
+export const TABLE_LIMITS = { rows: 5_000, columns: 200, cellChars: 2_000, cells: 50_000 }
 /** A Word or Excel file that has not been read after this long is given up on, and its worker ended. */
 export const OFFICE_TIMEOUT_MS = 30_000
 
@@ -30,7 +31,7 @@ export function guessDelimiter(text: string): string {
  */
 export function parseDelimited(text: string, delimiter: string): SheetData {
   const rows: string[][] = []
-  let row: string[] = [], field = '', quoted = false, totalRows = 0, totalColumns = 0, fields = 0
+  let row: string[] = [], field = '', quoted = false, started = false, totalRows = 0, totalColumns = 0, fields = 0
   const endField = (): void => {
     fields++
     if (row.length < TABLE_LIMITS.columns) row.push(field.length > TABLE_LIMITS.cellChars ? `${field.slice(0, TABLE_LIMITS.cellChars)}…` : field)
@@ -41,7 +42,7 @@ export function parseDelimited(text: string, delimiter: string): SheetData {
     totalColumns = Math.max(totalColumns, fields)
     totalRows++
     if (rows.length < TABLE_LIMITS.rows) rows.push(row)
-    row = []; fields = 0
+    row = []; fields = 0; started = false
   }
   const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
   for (let index = 0; index < body.length; index++) {
@@ -49,13 +50,14 @@ export function parseDelimited(text: string, delimiter: string): SheetData {
     if (quoted) {
       if (char === '"') { if (body[index + 1] === '"') { field += '"'; index++ } else quoted = false }
       else if (field.length <= TABLE_LIMITS.cellChars) field += char
-    } else if (char === '"' && field === '') quoted = true
+    } else if (char === '"' && field === '') { quoted = true; started = true }
     else if (char === delimiter) endField()
     else if (char === '\n' || char === '\r') { if (char === '\r' && body[index + 1] === '\n') index++; endRow() }
     else if (field.length <= TABLE_LIMITS.cellChars) field += char
   }
   // The last line counts unless the text ended with a line end.
-  if (field !== '' || fields > 0 || quoted) endRow()
+  // A quoted empty field ("") is a field too, so a last line holding only that is a row.
+  if (field !== '' || fields > 0 || started) endRow()
   return { name: '', rows, totalRows, totalColumns }
 }
 
@@ -86,10 +88,12 @@ export function sheetHtml(sheet: SheetData, header: boolean): string {
   const letters = Array.from({ length: width }, (_, column) => columnName(column))
   const head = header && sheet.rows.length > 0 ? cells(sheet.rows[0]!, 'th') : cells(letters, 'th')
   const first = header ? 1 : 0
+  // A wide sheet shows fewer rows: the page holds a bounded number of cells however the sheet is shaped.
+  const shown = Math.min(sheet.rows.length, Math.max(1, Math.floor(TABLE_LIMITS.cells / width)))
   let body = ''
-  for (let index = first; index < sheet.rows.length; index++) body += `<tr><th class="file-row-number">${index + 1}</th>${cells(sheet.rows[index]!, 'td')}</tr>`
-  const clipped = sheet.totalRows > sheet.rows.length || sheet.totalColumns > width
-  const note = clipped ? `<p class="file-sheet-note">Showing ${sheet.rows.length.toLocaleString('en-US')} of ${sheet.totalRows.toLocaleString('en-US')} rows`
+  for (let index = first; index < shown; index++) body += `<tr><th class="file-row-number">${index + 1}</th>${cells(sheet.rows[index]!, 'td')}</tr>`
+  const clipped = sheet.totalRows > shown || sheet.totalColumns > width
+  const note = clipped ? `<p class="file-sheet-note">Showing ${shown.toLocaleString('en-US')} of ${sheet.totalRows.toLocaleString('en-US')} rows`
     + `${sheet.totalColumns > width ? ` and ${width} of ${sheet.totalColumns.toLocaleString('en-US')} columns` : ''}.</p>` : ''
   return `${note}<table class="file-sheet"><thead><tr><th class="file-row-number"></th>${head}</tr></thead><tbody>${body}</tbody></table>`
 }

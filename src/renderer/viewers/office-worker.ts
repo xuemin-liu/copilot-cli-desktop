@@ -5,6 +5,7 @@ import './worker-lockdown.js'
 import mammoth from 'mammoth'
 import { readWorkbook, type SheetData } from './xlsx-reader.js'
 import { ZipError, ZipReader } from './zip-reader.js'
+import { docxArchive } from './mammoth-unzip.js'
 
 export type OfficeRequest = { kind: 'docx' | 'xlsx'; bytes: Uint8Array }
 export type OfficeProblem = 'invalid' | 'too-large' | 'protected' | 'failed'
@@ -12,8 +13,8 @@ export type OfficeReply = { ok: true; kind: 'docx'; html: string; warnings: numb
 
 export const DOCX_LIMITS = {
   entries: 5_000,
-  /** What the archive says its parts unpack to, all together; and the main document part alone. */
-  declaredBytes: 300 * 1024 * 1024, documentBytes: 100 * 1024 * 1024,
+  /** All parts the converter reads, unpacked, together. Counted while unpacking, whatever the archive claims. */
+  unpackedBytes: 200 * 1024 * 1024,
   /** Pictures kept in the result, counted in base64 characters; more than this are left out. */
   imageChars: 40 * 1024 * 1024,
   /** The HTML handed back to the window. */
@@ -22,23 +23,29 @@ export const DOCX_LIMITS = {
 const PICTURES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/bmp', 'image/webp'])
 
 async function convertDocument(bytes: Uint8Array): Promise<OfficeReply> {
-  // The converter unpacks the archive itself and holds every part in memory, so refuse what is too big before it starts.
-  const zip = new ZipReader(bytes, { entries: DOCX_LIMITS.entries, totalBytes: DOCX_LIMITS.declaredBytes })
+  // The converter never opens the archive itself. Every part it reads comes through this reader (see mammoth-unzip.ts),
+  // which counts bytes as it unpacks them: a limit for each part, and this one for all of them together.
+  const zip = new ZipReader(bytes, { entries: DOCX_LIMITS.entries, totalBytes: DOCX_LIMITS.unpackedBytes })
   const main = zip.entries.get('word/document.xml')
   if (!main) throw new ZipError('invalid', 'Not a Word document')
   if (main.encrypted) throw new ZipError('protected', 'The document is protected with a password')
-  if (zip.declaredBytes > DOCX_LIMITS.declaredBytes || main.size > DOCX_LIMITS.documentBytes) throw new ZipError('too-large', 'The document is too large')
-  // The sizes above are only what the archive claims. Unpack the main part under the same limit to see that it is true.
-  await zip.read('word/document.xml', DOCX_LIMITS.documentBytes)
-  let pictures = 0
-  const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer }, {
-    convertImage: mammoth.images.imgElement(async image => {
-      if (!PICTURES.has(image.contentType)) return { src: '' }
-      const data = await image.readAsBase64String()
-      pictures += data.length
-      return pictures > DOCX_LIMITS.imageChars ? { src: '' } : { src: `data:${image.contentType};base64,${data}` }
-    }),
-  })
+  let pictures = 0, problem: unknown = null
+  const kept = async <Result>(work: Promise<Result>): Promise<Result> => { try { return await work } catch (error) { problem ??= error; throw error } }
+  const archive = docxArchive(zip)
+  const input = { docx: { exists: archive.exists, read: (name: string, encoding?: string) => kept(archive.read(name, encoding)) } }
+  let result
+  try {
+    result = await mammoth.convertToHtml(input as unknown as Parameters<typeof mammoth.convertToHtml>[0], {
+      convertImage: mammoth.images.imgElement(async image => {
+        if (!PICTURES.has(image.contentType)) return { src: '' }
+        const data = await image.readAsBase64String()
+        pictures += data.length
+        return pictures > DOCX_LIMITS.imageChars ? { src: '' } : { src: `data:${image.contentType};base64,${data}` }
+      }),
+    })
+  } catch (error) { throw problem ?? error }
+  // The converter reports some failed reads as warnings and carries on. A part over its limit is not a warning.
+  if (problem instanceof ZipError && problem.reason !== 'invalid') throw problem
   if (result.value.length > DOCX_LIMITS.htmlChars) throw new ZipError('too-large', 'The document is too large')
   return { ok: true, kind: 'docx', html: result.value, warnings: result.messages.length }
 }

@@ -13,27 +13,50 @@ export const SHEET_LIMITS = {
   sharedStrings: 500_000,
 }
 
-/** Number formats that Excel defines as dates or times. */
-const BUILT_IN_DATES = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 45, 46, 47, 50, 51, 52, 53, 54, 55, 56, 57, 58])
+/**
+ * What a number format makes of a number: a calendar date, a time of day, both, or an amount of time that may pass 24
+ * hours (`[h]:mm:ss`). The same number is 1 January, 12:00, or 36:00:00 depending on this.
+ */
+export type TimeKind = 'date' | 'time' | 'datetime' | 'elapsed'
 
-/** A custom format shows a date or time when it has a date letter outside quoted text and brackets. */
-export function isDateFormat(code: string): boolean {
-  const bare = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '').replace(/\\./g, '')
-  return /[dmyhs]/i.test(bare) && !/^general$/i.test(bare.trim())
+/** Number formats Excel defines itself. 14-17 and the East Asian ones are dates, 18-21 and 45, 47 times, 22 both, 46 elapsed. */
+const BUILT_IN: Record<number, TimeKind> = { 22: 'datetime', 45: 'time', 46: 'elapsed', 47: 'time' }
+for (const id of [14, 15, 16, 17, 27, 28, 29, 30, 31, 36, 50, 51, 52, 53, 54, 57, 58]) BUILT_IN[id] = 'date'
+for (const id of [18, 19, 20, 21, 32, 33, 34, 35, 55, 56]) BUILT_IN[id] = 'time'
+
+/** The kind of a custom format, read from its letters outside quoted text; null when it shows a plain number. */
+export function timeKind(code: string): TimeKind | null {
+  const unquoted = code.replace(/"[^"]*"/g, '').replace(/\\./g, '')
+  if (/\[(?:h+|m+|s+)\]/i.test(unquoted)) return 'elapsed'
+  // Brackets otherwise hold colors, conditions and locales, not parts of the date.
+  const bare = unquoted.replace(/\[[^\]]*\]/g, '')
+  if (/^\s*general\s*$/i.test(bare)) return null
+  const day = /[dy]/i.test(bare), clock = /[hs]/i.test(bare) || /AM\/PM|A\/P/i.test(bare)
+  // An "m" is a month next to days and years and minutes next to hours and seconds; alone it is a month.
+  if (day) return clock ? 'datetime' : 'date'
+  if (clock) return 'time'
+  return /m/i.test(bare) ? 'date' : null
 }
 
 const pad = (value: number): string => String(value).padStart(2, '0')
 
-/** An Excel date number as text: a date, a time of day, or both. `date1904`: the workbook counts from 1904 (old Mac files). */
-export function formatSerialDate(serial: number, date1904 = false): string {
+/**
+ * An Excel date number as text, for the kind its format gives it. Without a kind, a whole number is a date, a fraction a
+ * time, and anything else both. `date1904`: the workbook counts from 1904 (old Mac files).
+ */
+export function formatSerialDate(serial: number, date1904 = false, kind?: TimeKind): string {
   if (!Number.isFinite(serial) || serial < 0 || serial > 2_958_465.999) return String(serial)
-  const days = Math.floor(serial)
-  const seconds = Math.round((serial - days) * 86_400)
+  const total = Math.round(serial * 86_400)
+  const days = Math.floor(total / 86_400), seconds = total - days * 86_400
+  const clock = `${pad(Math.floor(seconds / 3_600))}:${pad(Math.floor(seconds % 3_600 / 60))}${seconds % 60 ? `:${pad(seconds % 60)}` : ''}`
+  if (kind === 'elapsed') return `${days * 24 + Math.floor(seconds / 3_600)}:${pad(Math.floor(seconds % 3_600 / 60))}:${pad(seconds % 60)}`
+  if (kind === 'time') return clock
   // Day 0 of the 1900 system is 30 December 1899 (Excel counts a 29 February 1900 that never was; this matches from March 1900 on).
-  const date = new Date(Date.UTC(1899, 11, 30) + (days + (date1904 ? 1_462 : 0)) * 86_400_000 + seconds * 1_000)
+  const date = new Date(Date.UTC(1899, 11, 30) + (days + (date1904 ? 1_462 : 0)) * 86_400_000)
   const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
-  const time = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}${date.getUTCSeconds() ? `:${pad(date.getUTCSeconds())}` : ''}`
-  return days === 0 && !date1904 ? time : seconds === 0 ? day : `${day} ${time}`
+  if (kind === 'date') return day
+  if (kind === 'datetime') return `${day} ${clock}`
+  return days === 0 && !date1904 ? clock : seconds === 0 ? day : `${day} ${clock}`
 }
 
 /** "BC12" to the column's index, 0-based; -1 when it is not a cell reference. */
@@ -74,26 +97,26 @@ async function readSharedStrings(zip: ZipReader, path: string): Promise<string[]
   return strings
 }
 
-async function readDateStyles(zip: ZipReader, path: string): Promise<boolean[]> {
+async function readDateStyles(zip: ZipReader, path: string): Promise<(TimeKind | null)[]> {
   if (!zip.entries.has(path)) return []
-  const custom = new Map<number, boolean>()
-  const styles: boolean[] = []
+  const custom = new Map<number, TimeKind | null>()
+  const styles: (TimeKind | null)[] = []
   let inCellFormats = false
   for (const token of xmlTokens(await zip.text(path, SHEET_LIMITS.stringsBytes))) {
     if (token.type === 'open') {
-      if (token.name === 'numFmt') custom.set(Number(token.attributes.numFmtId), isDateFormat(token.attributes.formatCode ?? ''))
+      if (token.name === 'numFmt') custom.set(Number(token.attributes.numFmtId), timeKind(token.attributes.formatCode ?? ''))
       else if (token.name === 'cellXfs') inCellFormats = !token.selfClosing
-      else if (token.name === 'xf' && inCellFormats) { const id = Number(token.attributes.numFmtId ?? 0); styles.push(custom.get(id) ?? BUILT_IN_DATES.has(id)) }
+      else if (token.name === 'xf' && inCellFormats) { const id = Number(token.attributes.numFmtId ?? 0); styles.push(custom.has(id) ? custom.get(id)! : BUILT_IN[id] ?? null) }
     } else if (token.type === 'close' && token.name === 'cellXfs') inCellFormats = false
   }
   return styles
 }
 
-function readSheet(name: string, xml: string, strings: readonly string[], dateStyles: readonly boolean[], date1904: boolean): SheetData {
+function readSheet(name: string, xml: string, strings: readonly string[], dateStyles: readonly (TimeKind | null)[], date1904: boolean): SheetData {
   const rows: string[][] = []
   let totalRows = 0, totalColumns = 0
   let rowIndex = -1, row: string[] | null = null
-  let cell: { column: number; type: string; date: boolean } | null = null
+  let cell: { column: number; type: string; time: TimeKind | null } | null = null
   let collecting: 'v' | 't' | null = null, value = ''
   let nextColumn = 0
   for (const token of xmlTokens(xml)) {
@@ -109,7 +132,7 @@ function readSheet(name: string, xml: string, strings: readonly string[], dateSt
         const column = token.attributes.r ? columnIndex(token.attributes.r) : nextColumn
         nextColumn = (column < 0 ? nextColumn : column) + 1
         totalColumns = Math.max(totalColumns, nextColumn)
-        cell = token.selfClosing || column < 0 ? null : { column, type: token.attributes.t ?? 'n', date: dateStyles[Number(token.attributes.s ?? -1)] === true }
+        cell = token.selfClosing || column < 0 ? null : { column, type: token.attributes.t ?? 'n', time: dateStyles[Number(token.attributes.s ?? -1)] ?? null }
         value = ''
       } else if (cell && !token.selfClosing && (token.name === 'v' || (token.name === 't' && cell.type === 'inlineStr'))) collecting = token.name
     } else if (token.type === 'text') {
@@ -120,7 +143,7 @@ function readSheet(name: string, xml: string, strings: readonly string[], dateSt
         let text = value
         if (cell.type === 's') text = strings[Number(value)] ?? ''
         else if (cell.type === 'b') text = value === '1' ? 'TRUE' : 'FALSE'
-        else if (cell.type === 'n') text = cell.date ? formatSerialDate(Number(value), date1904) : tidyNumber(value)
+        else if (cell.type === 'n') text = cell.time ? formatSerialDate(Number(value), date1904, cell.time) : tidyNumber(value)
         row[cell.column] = text.length > SHEET_LIMITS.cellChars ? `${text.slice(0, SHEET_LIMITS.cellChars)}…` : text
       }
       cell = null; collecting = null

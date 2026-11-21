@@ -5,7 +5,7 @@ import { makeXlsx, makeZip } from './fixtures/office-fixture.js'
 import { classifyFile } from './file-view.js'
 import { columnName, guessDelimiter, parseDelimited, sheetHtml, TABLE_LIMITS } from '../renderer/file-documents.js'
 import { decodeXml, xmlTokens } from '../renderer/viewers/xml-lite.js'
-import { columnIndex, formatSerialDate, isDateFormat, readWorkbook, SHEET_LIMITS } from '../renderer/viewers/xlsx-reader.js'
+import { columnIndex, formatSerialDate, readWorkbook, SHEET_LIMITS, timeKind } from '../renderer/viewers/xlsx-reader.js'
 import { ZipError, ZipReader } from '../renderer/viewers/zip-reader.js'
 
 const LIMITS = { entries: 100, totalBytes: 10 * 1024 * 1024 }
@@ -25,6 +25,13 @@ test('Word and Excel files are told from other archives and from text by bytes a
   assert.equal(classifyFile('data.TSV', bytes('a\tb\n')).kind, 'csv')
   assert.equal(classifyFile('data.csv', new Uint8Array([1, 0, 2])).kind, 'other')
   assert.deepEqual(classifyFile('analysis.ipynb', bytes('{"cells":[]}')), { kind: 'notebook', language: 'json', mime: null })
+})
+
+test('an archive that lists a name twice is refused', async () => {
+  const archive = Buffer.from(await makeZip({ 'a.xml': 'first', 'b.xml': 'other' }, true))
+  // Rename b.xml to a.xml in its own header and in the directory.
+  for (let at = archive.indexOf('b.xml'); at >= 0; at = archive.indexOf('b.xml', at + 1)) archive.write('a.xml', at, 'latin1')
+  assert.throws(() => new ZipReader(archive, LIMITS), refused('invalid'))
 })
 
 test('a ZIP archive is read entry by entry, and only what its limits allow', async () => {
@@ -88,8 +95,19 @@ test('XML is read without a DOM, and nothing in it is expanded beyond the built-
 test('cell references, date formats and Excel date numbers', () => {
   assert.deepEqual(['A1', 'Z9', 'AA10', 'BC12', 'xfd1', '12', ''].map(columnIndex), [0, 25, 26, 54, 16_383, -1, -1])
   assert.deepEqual([0, 25, 26, 54, 701, 702].map(columnName), ['A', 'Z', 'AA', 'BC', 'ZZ', 'AAA'])
-  for (const code of ['yyyy-mm-dd', 'd/m/yy h:mm', '[$-409]mmmm d, yyyy', 'hh:mm:ss']) assert.equal(isDateFormat(code), true, code)
-  for (const code of ['0.00', '#,##0', '0%', '"days" 0', 'General', '[Red]0.0', '0.00E+00']) assert.equal(isDateFormat(code), false, code)
+  assert.deepEqual(['yyyy-mm-dd', '[$-409]mmmm d, yyyy', 'mmm-yy', 'mmmm'].map(timeKind), ['date', 'date', 'date', 'date'])
+  assert.deepEqual(['hh:mm:ss', 'h:mm AM/PM', 'mm:ss', 'mm:ss.0'].map(timeKind), ['time', 'time', 'time', 'time'])
+  assert.deepEqual(['d/m/yy h:mm', 'yyyy-mm-dd hh:mm:ss'].map(timeKind), ['datetime', 'datetime'])
+  assert.deepEqual(['[h]:mm:ss', '[mm]:ss', '[s]'].map(timeKind), ['elapsed', 'elapsed', 'elapsed'])
+  for (const code of ['0.00', '#,##0', '0%', '"days" 0', 'General', '[Red]0.0', '0.00E+00', '0.0 "hours"']) assert.equal(timeKind(code), null, code)
+  // The same number under each kind.
+  assert.equal(formatSerialDate(1.5, false, 'elapsed'), '36:00:00')
+  assert.equal(formatSerialDate(45_658.5, false, 'time'), '12:00')
+  assert.equal(formatSerialDate(45_658.5, false, 'date'), '2025-01-01')
+  assert.equal(formatSerialDate(45_658.5, false, 'datetime'), '2025-01-01 12:00')
+  assert.equal(formatSerialDate(45_658, false, 'datetime'), '2025-01-01 00:00')
+  assert.equal(formatSerialDate(0.000_011_574, false, 'elapsed'), '0:00:01')
+  assert.equal(formatSerialDate(0.999_999_99, false, 'time'), '00:00', 'a time that rounds up to midnight')
   assert.equal(formatSerialDate(45_292), '2024-01-01')
   assert.equal(formatSerialDate(45_292.5), '2024-01-01 12:00')
   assert.equal(formatSerialDate(0.75), '18:00')
@@ -110,7 +128,7 @@ test('a workbook is read sheet by sheet as text cells', async () => {
   assert.deepEqual(sheets[0]!.rows, [
     ['Region', 'Amount', 'When', 'Paid'],
     ['North <1>', '1200.5', '2024-01-01', 'TRUE'],
-    ['South', '0.3', '2024-01-02 06:00', 'FALSE'],
+    ['South', '0.3', '2024-01-02', 'FALSE'],
     ['kept in the cell', '1200.8', '', 'North <1>!'],
   ])
   assert.equal(sheets[0]!.totalRows, 4)
@@ -118,6 +136,10 @@ test('a workbook is read sheet by sheet as text cells', async () => {
   assert.deepEqual(sheets[1]!.rows, [])
   assert.deepEqual(sheets[2]!.rows, [['', '', 'C1'], [], ['A3']])
   assert.deepEqual((await readWorkbook(await makeXlsx([{ name: 'Old Mac', rows: [[{ date: 43_830 }]] }], { date1904: true })))[0]!.rows, [['2024-01-01']])
+  // A cell's format says whether its number is a date, a time of day, both, or an amount of time.
+  const timed = await readWorkbook(await makeXlsx([{ name: 'Times', rows: [[{ number: 45_658.5, style: 2 }, { number: 1.5, style: 3 }, { number: 45_658.5, style: 4 },
+    { number: 45_658.5, style: 5 }, { number: 1.5, style: 6 }, { number: 1.5, style: 7 }, { number: 45_658.75, style: 8 }, { number: 45_658.5, style: 1 }]] }]))
+  assert.deepEqual(timed[0]!.rows, [['12:00', '36:00:00', '2025-01-01 12:00', '2025-01-01', '36:00:00', '1.5', '18:00', '2025-01-01']])
 
   await assert.rejects(readWorkbook(await makeZip({ 'word/document.xml': '<w:document/>' })), refused('invalid'), 'a ZIP that is not a workbook')
   await assert.rejects(readWorkbook(bytes('not a zip')), refused('invalid'))
@@ -151,6 +173,11 @@ test('separated text becomes rows of cells, with quotes, separators and line end
   assert.deepEqual(rows('a\tb c\n', '\t'), [['a', 'b c']])
   assert.deepEqual(rows(''), [])
   assert.deepEqual(rows('"open quote, never closed\nstill the same cell'), [['open quote, never closed\nstill the same cell']])
+  // A last line that holds only a quoted empty field is a row, with or without a line end after it.
+  assert.deepEqual(rows('Value\n""'), [['Value'], ['']])
+  assert.deepEqual(rows('Value\n""\n'), [['Value'], ['']])
+  assert.deepEqual(rows('a,b\n1,""'), [['a', 'b'], ['1', '']])
+  assert.deepEqual(rows('Value\n'), [['Value']], 'a line end at the end starts no row')
   assert.equal(guessDelimiter('a,b,c\n1,2,3\n'), ',')
   assert.equal(guessDelimiter('a;b;c\n1,5;2;3\n'), ';')
   assert.equal(guessDelimiter('a\tb\n1\t2\n'), '\t')
@@ -178,5 +205,15 @@ test('a table is escaped text only: nothing in a cell becomes markup', () => {
   assert.ok(lettered.includes('<td class="file-cell-number">1</td><td></td>'), 'short rows are filled out')
   assert.match(sheetHtml({ name: 'S', rows: [['a']], totalRows: 9_000, totalColumns: 1 }, false), /Showing 1 of 9,000 rows\./)
   assert.match(sheetHtml({ name: 'S', rows: [], totalRows: 0, totalColumns: 0 }, false), /This sheet is empty/)
+  // The page holds a bounded number of cells, blanks included: a sheet with two cells at opposite corners is still a
+  // full grid, and a wide one shows fewer rows and says so.
+  const corners = Array.from({ length: 5_000 }, (_, row) => row === 0 ? ['first'] : row === 4_999 ? [...Array.from({ length: 199 }, () => ''), 'last'] : [])
+  const grid = sheetHtml({ name: 'S', rows: corners, totalRows: 5_000, totalColumns: 200 }, false)
+  const mounted = (grid.match(/<td/g) ?? []).length
+  assert.equal(mounted, TABLE_LIMITS.cells, `${mounted} cells`)
+  assert.match(grid, /Showing 250 of 5,000 rows\./)
+  const narrow = sheetHtml({ name: 'S', rows: Array.from({ length: 5_000 }, (_, row) => [String(row), 'x']), totalRows: 5_000, totalColumns: 2 }, false)
+  assert.equal((narrow.match(/<td/g) ?? []).length, 10_000, 'a narrow sheet still shows all its rows')
+  assert.ok(!narrow.includes('Showing'))
   assert.match(sheetHtml({ name: 'S', rows: [], totalRows: 0, totalColumns: 0, note: 'Too <big>' }, false), /Too &lt;big&gt;/)
 })

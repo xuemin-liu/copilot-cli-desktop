@@ -20,7 +20,7 @@ const column = (index: number): string => { let name = ''; for (let value = inde
 
 /** A cell: text, a number, true/false, `{ date }` (an Excel date number shown as a date), `{ inline }` text kept in the
  * cell itself, or `{ formula, value }` (a formula with the result Excel saved). */
-export type FixtureCell = string | number | boolean | null | { date: number } | { inline: string } | { formula: string; value: number | string }
+export type FixtureCell = string | number | boolean | null | { date: number } | { inline: string } | { formula: string; value: number | string } | { number: number; style: number }
 
 /** An .xlsx workbook with the given sheets. Text goes through the shared strings table, as Excel writes it. */
 export function makeXlsx(sheets: { name: string; rows: FixtureCell[][] }[], options: { date1904?: boolean } = {}): Promise<Buffer> {
@@ -35,6 +35,7 @@ export function makeXlsx(sheets: { name: string; rows: FixtureCell[][] }[], opti
         if (typeof cell === 'number') return `<c r="${at}"><v>${cell}</v></c>`
         if (typeof cell === 'boolean') return `<c r="${at}" t="b"><v>${cell ? 1 : 0}</v></c>`
         if ('date' in cell) return `<c r="${at}" s="1"><v>${cell.date}</v></c>`
+        if ('number' in cell) return `<c r="${at}" s="${cell.style}"><v>${cell.number}</v></c>`
         if ('inline' in cell) return `<c r="${at}" t="inlineStr"><is><t>${xmlEscape(cell.inline)}</t></is></c>`
         return typeof cell.value === 'number' ? `<c r="${at}"><f>${xmlEscape(cell.formula)}</f><v>${cell.value}</v></c>`
           : `<c r="${at}" t="str"><f>${xmlEscape(cell.formula)}</f><v>${xmlEscape(cell.value)}</v></c>`
@@ -49,8 +50,13 @@ export function makeXlsx(sheets: { name: string; rows: FixtureCell[][] }[], opti
       + `<workbookPr${options.date1904 ? ' date1904="1"' : ''}/><sheets>${sheets.map((sheet, index) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`,
     'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`
       + `${sheets.map((_, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`,
-    // Style 0 is General; style 1 is the built-in date format 14.
-    'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>',
+    // Styles by index: 0 General, 1 date (14), 2 time of day (20, h:mm), 3 elapsed time (46, [h]:mm:ss), 4 date and time (22),
+    // 5 a custom date, 6 a custom elapsed time, 7 a custom number with quoted letters, 8 a custom time.
+    'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      + '<numFmts count="4"><numFmt numFmtId="164" formatCode="[$-409]mmmm d, yyyy"/><numFmt numFmtId="165" formatCode="[mm]:ss"/>'
+      + '<numFmt numFmtId="166" formatCode="0.0 &quot;days&quot;"/><numFmt numFmtId="167" formatCode="h:mm AM/PM"/></numFmts>'
+      + '<cellXfs count="9"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="20"/><xf numFmtId="46"/><xf numFmtId="22"/>'
+      + '<xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="166"/><xf numFmtId="167"/></cellXfs></styleSheet>',
   }
   sheetXml.forEach((xml, index) => { entries[`xl/worksheets/sheet${index + 1}.xml`] = xml })
   entries['xl/sharedStrings.xml'] = `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${strings.length}" uniqueCount="${strings.length}">`

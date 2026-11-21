@@ -44,8 +44,9 @@ export class ZipReader {
       const entry: ZipEntry = { name, method: this.view.getUint16(at + 10, true), compressedSize: this.view.getUint32(at + 20, true),
         size: this.view.getUint32(at + 24, true), offset: this.view.getUint32(at + 42, true), encrypted: (flags & 1) === 1 }
       if (entry.compressedSize === 0xffffffff || entry.size === 0xffffffff || entry.offset === 0xffffffff) throw new ZipError('too-large', 'ZIP64 archives are not supported')
-      // The first entry of a name wins: a second one with the same name cannot replace what was checked.
-      if (!this.entries.has(name)) this.entries.set(name, entry)
+      // Two entries with one name are ambiguous: which one a reader takes depends on the reader. Refuse the archive.
+      if (this.entries.has(name)) throw new ZipError('invalid', 'The archive lists a file twice')
+      this.entries.set(name, entry)
       at += 46 + nameLength + extraLength + commentLength
     }
   }
