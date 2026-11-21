@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import lockfile from 'proper-lockfile'
 import { quarantineCorruptFile, writeFileAtomic } from '../main/atomic-file.js'
-import { constantTimeTokenEqual, isProcessAlive, type CliPaths } from './runtime-core.js'
+import { constantTimeTokenEqual, type CliPaths } from './runtime-core.js'
+import { readProcessStartTime, recordHolderAlive, type ProcessStartReader } from './process-identity.js'
 export { getCliPaths, constantTimeTokenEqual, isProcessAlive, type CliPaths } from './runtime-core.js'
 
 export type DaemonStatus = 'starting' | 'running' | 'restarting' | 'crashed' | 'stopping'
@@ -135,7 +136,7 @@ async function writeControllerLock(paths: CliPaths, lock: ControllerLock, exclus
   }
 }
 
-export async function acquireControllerLock(paths: CliPaths): Promise<string> {
+export async function acquireControllerLock(paths: CliPaths, readStartTime: ProcessStartReader = readProcessStartTime): Promise<string> {
   await mkdir(paths.root, { recursive: true, mode: 0o700 })
   const recoveryPath = `${paths.lockPath}.recovery`
   for (let attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
@@ -163,7 +164,7 @@ export async function acquireControllerLock(paths: CliPaths): Promise<string> {
         // prevents two starters from both unlinking the lock one of them just
         // created (an ABA race around a dead or partially-written lock).
         const existing = await readSettledControllerLock(paths)
-        if (existing && isProcessAlive(existing.pid)) {
+        if (existing && await recordHolderAlive(existing.pid, existing.createdAt, readStartTime)) {
           throw new Error(`Another copilot-desktop controller operation is active (PID ${existing.pid})`)
         }
         if (!existing) {
@@ -187,7 +188,8 @@ export async function acquireControllerLock(paths: CliPaths): Promise<string> {
 export async function claimControllerLock(paths: CliPaths, token: string): Promise<void> {
   const existing = await readControllerLock(paths)
   if (!existing || !constantTimeTokenEqual(existing.token, token)) throw new Error('The controller startup lock is missing or invalid')
-  await writeControllerLock(paths, { ...existing, pid: process.pid }, false)
+  // The time is the claimant's own, so it is never earlier than the claimant's start: see `recordHolderAlive`.
+  await writeControllerLock(paths, { ...existing, pid: process.pid, createdAt: new Date().toISOString() }, false)
 }
 
 export async function releaseControllerLock(paths: CliPaths, token: string, expectedPid: number): Promise<boolean> {
