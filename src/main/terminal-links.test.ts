@@ -192,6 +192,10 @@ test('ratios, versions and dates written with slashes are not paths; a path with
   assert.deepEqual(texts('lib/libfoo.so.1 loaded'), ['lib/libfoo.so.1'])
   assert.deepEqual(texts('build/1.2/app.js:3'), ['build/1.2/app.js'])
   assert.deepEqual(texts('./3.5/4.0'), ['./3.5/4.0'], 'an explicit relative path is a path whatever its names')
+  // The same in inline code.
+  for (const line of ['use `3.5/4.0` here', 'from `v1.2/3.4`', '`10/11/2026.5`']) assert.deepEqual(texts(line), [], line)
+  assert.deepEqual(texts('`./3.5/4.0`'), ['./3.5/4.0'])
+  assert.deepEqual(texts('`build/1.2/app.js`'), ['build/1.2/app.js'])
   assert.deepEqual(texts('C:\\1\\2.0'), ['C:\\1\\2.0'])
 })
 
@@ -201,12 +205,16 @@ test('a bare path is still found after punctuation, and not from the middle of a
   assert.deepEqual(texts('(src/main/main.ts:12)'), ['src/main/main.ts'])
   assert.deepEqual(texts('error in src\\renderer\\App.tsx(4,2): bad'), ['src\\renderer\\App.tsx'])
   assert.deepEqual(texts('@scope/pkg/index.js'), ['scope/pkg/index.js'])
+  assert.deepEqual(texts('see /usr/bin/git and C:\\Windows\\notepad.exe'), ['/usr/bin/git', 'C:\\Windows\\notepad.exe'])
+  assert.deepEqual(texts('a/b/c/app.js'), ['a/b/c/app.js'], 'one link from the start of the path, not one from each folder')
 })
 
 test('scanning a long line with no separators, or a link followed by many brackets, stays fast', () => {
   const timed = (line: string): number => { const started = performance.now(); scanLineForLinks(line); return performance.now() - started }
   // 200,000 characters: about a quarter of a minute before, when every character restarted a scan to the end of the run.
-  for (const run of ['a'.repeat(200_000), 'A1b2C3d4'.repeat(25_000), `${'f'.repeat(100_000)} ${'0'.repeat(100_000)}`]) {
+  // The last two have separators and no file extension: every separator was a place to start again.
+  for (const run of ['a'.repeat(200_000), 'A1b2C3d4'.repeat(25_000), `${'f'.repeat(100_000)} ${'0'.repeat(100_000)}`,
+    'a/'.repeat(100_000), `${'A'.repeat(63)}/`.repeat(3_125), 'ab\\'.repeat(60_000)]) {
     const elapsed = Math.min(timed(run), timed(run))
     assert.ok(elapsed < 500, `${run.slice(0, 8)}… took ${Math.round(elapsed)} ms`)
   }

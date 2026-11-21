@@ -15,12 +15,12 @@ const BACKTICK_PATH_PATTERN = /`([^`\r\n]{1,4096})`/g
 // an absolute macOS/Linux path of two or more names ("/usr/bin/git", not a
 // lone "/tmp" or the "/or" of "and/or"), or a bare relative path that has at
 // least one separator and a file extension (the common shape of paths CLI
-// tools print, e.g. "dist\app.js"). The bare form may only begin where a name
-// begins: without that, on a long run of name characters with no separator
+// tools print, e.g. "dist\app.js"). The bare form may only begin where a path
+// begins, which is neither inside a name nor after a separator: without that, on a long run of name characters with no separator
 // (base64, hex, a minified line) the match is retried from every character and
 // each try reads to the end of the run, which takes a second at 40,000
 // characters.
-const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?::\d+)?)?|(?<![\w.-])(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?|\(\d+(?:,\d+)?\))?/g
+const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?::\d+)?)?|(?<![\w.\\/-])(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?|\(\d+(?:,\d+)?\))?/g
 // Trailing "path:line" or "path:line:column" location suffix many CLIs print
 // (e.g. tsc, eslint) — the number(s) are not part of the filesystem path, but
 // say where in the file the link points. tsc also prints "path(line,column)".
@@ -30,6 +30,8 @@ const EXPLICIT_PATH_PREFIX = /^(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/]|\
 
 function isBacktickPath(text: string): boolean {
   if (/[<>"'`|*?\r\n]/.test(text)) return false
+  // Inline code holds ratios and versions too.
+  if (!EXPLICIT_PATH_PREFIX.test(text) && isNumbersOnly(text)) return false
   // Inline code also contains commands. Spaced paths need an explicit root
   // (C:\, ./, ../) so "node dist/app.js" still links only "dist/app.js".
   return /\s/.test(text) ? EXPLICIT_PATH_PREFIX.test(text) : WHOLE_PATH_PATTERN.test(text)
