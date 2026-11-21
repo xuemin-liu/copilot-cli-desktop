@@ -4855,7 +4855,7 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
   assertTrustedIpcSender(event)
   if (!mainWindow || event.sender !== mainWindow.webContents || typeof tabId !== 'string') throw new Error('Browser controls belong to the main window')
   const resource = projectTools().resource(tabId)
-  if (resource.browser.uiPageId !== resource.tab.pageId) throw new Error('Select this Browser tab first')
+  if (resource.browser.snapshot.activePageId !== resource.tab.pageId) throw new Error('Select this Browser tab first')
   return resource.browser
 }
 

@@ -317,12 +317,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
-          holdMaintenance(work) { const original = retryResolution; retryResolution = async () => { await work; return original(); }; },
+          holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; const original = retryResolution; retryResolution = async () => { await work; return original(); }; },
           async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
             try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
           chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           watchProjectRemovals() { const service = projectTools(), original = service.removeProject.bind(service), seen = []; service.removeProject = async (id) => { seen.push(id); return original(id); }; return seen; },
-          countBrowserSnapshots(resource) { const browser = projectTools().resource(resource).browser, read = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(browser), 'snapshot').get, calls = { count: 0 }; Object.defineProperty(browser, 'snapshot', { configurable: true, get() { calls.count++; return read.call(browser); } }); return calls; },
+          countBrowserSnapshots(resource) { const browser = projectTools().resource(resource).browser, state = browser.snapshot, calls = { count: 0 }; Object.defineProperty(browser, 'snapshot', { configurable: true, get() { calls.count++; return state; } }); return calls; },
           recheckFinds(capabilities) { const calls = { count: 0 }; recheckCopilotCapabilities = async () => { calls.count++; copilotCapabilities = capabilities; }; return calls; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSessionStop(tabId,work,started) { const session=managedTabs.get(tabId).session; const original=session.stop.bind(session);session.stop=async()=>{started();await work;return original()}; },
@@ -1374,7 +1374,9 @@ test('at the workspace limit a workspace with saved sessions or open tools is ne
 
   // With nothing in it, it makes room, and is cleaned up like a workspace removed by hand.
   const tools = await harness.request<any>('desktop:tools-state')
-  for (const tab of tools.projects.find((project: any) => project.id === last.id)?.tabs ?? []) await harness.request('desktop:tools-action', last.id, { type: 'close', id: tab.id })
+  const open = tools.projects.find((project: any) => project.profileId === last.id)?.tabs ?? []
+  assert.ok(open.length > 0)
+  for (const tab of open) await harness.request('desktop:tools-action', last.id, { type: 'close', id: tab.id })
   state = await harness.request('desktop:select-workspace')
   assert.equal(asked.length, 2, 'no refusal this time')
   assert.equal(state.profiles.length, 20)
@@ -1392,7 +1394,8 @@ test('saving a captured browser log copies the browser state once, however long 
   harness.configureBrowserExportDialog({ canceled: false, filePath: join(directory, 'log.json') })
   const copies = harness.countBrowserSnapshots(tab)
   await harness.request('desktop:browser-export', tab, 'console')
-  assert.equal(copies.count, 1)
+  // One to check that this tab is the one shown, one for the log. It was one more for every entry in the log.
+  assert.equal(copies.count, 2)
   assert.equal(JSON.parse(await readFile(join(directory, 'log.json'), 'utf8')).length, 300)
 }))
 
