@@ -13,6 +13,7 @@ import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliver
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises'
+import { LogAppender } from './log-appender.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
 import { existsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -645,20 +646,20 @@ function writeAppLog(line: string): Promise<void> {
 const MAX_SESSION_LOG_BYTES = 5 * 1024 * 1024
 const sessionLogBytesWritten = new Map<string, number>()
 const sessionLogWriteQueues = new Map<string, Promise<void>>()
+const sessionLogAppender = new LogAppender()
 
 async function appendSessionLog(tabId: string, chunk: string): Promise<void> {
   const written = sessionLogBytesWritten.get(tabId) ?? 0
   if (written >= MAX_SESSION_LOG_BYTES) return
   const filename = sessionLogPath(tabId)
-  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
   const chunkBytes = Buffer.byteLength(chunk, 'utf8')
   if (written + chunkBytes <= MAX_SESSION_LOG_BYTES) {
-    await appendFile(filename, chunk, { encoding: 'utf8', mode: 0o600 })
+    await sessionLogAppender.append(filename, chunk)
     sessionLogBytesWritten.set(tabId, written + chunkBytes)
     return
   }
   const truncated = truncateUtf8(chunk, MAX_SESSION_LOG_BYTES - written)
-  await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, { encoding: 'utf8', mode: 0o600 })
+  await sessionLogAppender.append(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`)
   sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
 }
 

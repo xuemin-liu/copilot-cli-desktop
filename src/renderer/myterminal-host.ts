@@ -8,6 +8,16 @@ type Listener = (id: string, value: string) => void
 
 /** Translate the project-scoped bridge to MyTerminal's transport contract.
  * Terminal input, paste, focus, filtering and reconnect remain in MyTerminal. */
+/**
+ * How long to wait between reads of a tool terminal. Its output is pushed as it arrives; the read is the recovery path
+ * and the status check, so a terminal nobody is looking at (another project's, or a hidden or minimized window) is read
+ * less often, never not at all.
+ */
+export function toolTerminalPollDelay(active: boolean, pageHidden: boolean, settling = false): number {
+  // A pane still waiting for its first history is read quickly wherever it is: that read is what fills it.
+  return settling || (active && !pageHidden) ? 200 : 1000
+}
+
 export function createMyTerminalHost(profileId: string, id: string, changed: (state: Snapshot) => void, failed: (message: string) => void) {
   let active = false, stopped = false, cursor = 0, generation = '', status = '', connecting = false
   let epoch = 0, topologyRevision = 0, initialized = false
@@ -109,8 +119,13 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
         if (child) replay(child, channel)
       }
     } catch (error) { if (!stopped && active) report(error) }
-    finally { if (!stopped) timer = setTimeout(() => { void poll() }, 200) }
+    finally { if (!stopped) timer = setTimeout(() => { timer = undefined; void poll() }, toolTerminalPollDelay(active, pageHidden(), settling())) }
   }
+  const pageHidden = (): boolean => typeof document !== 'undefined' && document.hidden
+  const settling = (): boolean => (terminal !== null && !initialized) || [...children.values()].some(child => !child.initialized)
+  // Shown again: read now, not at the end of a slow wait. A read already in flight schedules the next one itself.
+  const wake = (): void => { if (timer && !stopped) { clearTimeout(timer); timer = undefined; void poll() } }
+  const visibilityChanged = (): void => { if (!pageHidden()) wake() }
   const send = (request: Record<string, unknown>, channel = id): void => {
     if (!active && request.action !== 'resize') return
     const requestEpoch = epoch
@@ -171,8 +186,8 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     list: async () => (await project.api.tunnel.list()).filter((item: { channelId: string }) => item.channelId === id).map((item: { id: string }) => ({ ...item, id: item.id.slice(id.length + 1) })),
     stopByChannel: disconnect,
   }
-  return { api, store, openExternal: (url: string) => { void window.copilotDesktop.openExternalUrl(url).catch(report) }, backgroundLifecycle: true, cancelReconnect: () => send({ action: 'cancel-reconnect' }), broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
-    setActive(value: boolean) { if (active !== value) { epoch++; if (value) void project?.load().catch(report) }; active = value }, connect,
+  return { api, store, openExternal: (url: string) => { void window.copilotDesktop.openExternalUrl(url).catch(report) }, backgroundLifecycle: true, cancelReconnect: () => send({ action: 'cancel-reconnect' }), broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term; if (term) wake() }, getTerminal: () => terminal,
+    setActive(value: boolean) { if (active !== value) { epoch++; if (value) void project?.load().catch(report) }; const shown = value && !active; active = value; if (shown) wake() }, connect,
     start() {
       stopped = false
       unsubscribeOutput = window.copilotDesktop.onToolTerminalOutput?.((profile, next) => {
@@ -184,8 +199,9 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
           const queued = pendingOutput.get(next.id) ?? []; queued.push(next); pendingOutput.set(next.id, queued)
         } else consume(next, next.id)
       })
+      if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibilityChanged)
       void poll()
     },
-    stop() { stopped = true; unsubscribeOutput?.(); pendingOutput.clear(); if (timer) clearTimeout(timer) },
+    stop() { stopped = true; unsubscribeOutput?.(); pendingOutput.clear(); if (timer) clearTimeout(timer); timer = undefined; if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visibilityChanged) },
   }
 }

@@ -303,3 +303,60 @@ test('parent and split replay need no quiet interval and reject an obsolete tran
     else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
   }
 })
+
+test('a tool terminal nobody is looking at is read less often, and at once when it is shown again', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost, toolTerminalPollDelay } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  assert.equal(toolTerminalPollDelay(true, false), 200)
+  assert.ok(toolTerminalPollDelay(true, true) >= 1000 && toolTerminalPollDelay(false, false) >= 1000 && toolTerminalPollDelay(false, true) >= 1000)
+  assert.equal(toolTerminalPollDelay(false, true, true), 200, 'a pane still waiting for its first history is read quickly')
+  const previous = globalThis.window, previousDocument = (globalThis as { document?: unknown }).document
+  let reads = 0
+  const listeners = new Set<() => void>()
+  const page = { hidden: true, addEventListener: (_name: string, listener: () => void) => listeners.add(listener), removeEventListener: (_name: string, listener: () => void) => listeners.delete(listener) }
+  Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+    toolTerminal: async () => { reads++; return { id: 'terminal', generation: 'first', status: 'running', output: '', cursor: 0, start: 0 } },
+  } } })
+  Object.defineProperty(globalThis, 'document', { configurable: true, writable: true, value: page })
+  const host = createMyTerminalHost('project', 'terminal', () => {}, message => assert.fail(message))
+  const pause = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+  try {
+    host.setActive(true); host.start()
+    await pause(650)
+    assert.equal(reads, 1, 'a hidden window: the first read, then a slow wait')
+    // Its view is mounted while hidden: read now, to fill it, then slowly again.
+    host.onTerminal({} as import('@xterm/xterm').Terminal)
+    await pause(50)
+    assert.equal(reads, 2, 'read at once when the view is mounted')
+    await pause(600)
+    assert.equal(reads, 2, 'filled: slow again while hidden')
+    // Shown: the waiting read happens now, and reading is quick again.
+    page.hidden = false
+    for (const listener of listeners) listener()
+    await pause(50)
+    assert.equal(reads, 3, 'read at once when the window is shown')
+    await pause(650)
+    assert.ok(reads >= 5, `quick reads while shown: ${reads}`)
+    // Another project is shown instead: slow again, and quick the moment this one is back.
+    host.setActive(false)
+    await pause(300)
+    const whileAway = reads
+    await pause(600)
+    assert.ok(reads - whileAway <= 1, `slow reads while another project is shown: ${reads - whileAway}`)
+    const back = reads
+    host.setActive(true)
+    await pause(50)
+    assert.equal(reads, back + 1, 'read at once when the project is shown again')
+    host.stop()
+    assert.equal(listeners.size, 0, 'stopping removes the page listener')
+    const stoppedAt = reads
+    await pause(300)
+    assert.equal(reads, stoppedAt, 'no reads after stopping')
+  } finally {
+    host.stop()
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+    if (previousDocument === undefined) Reflect.deleteProperty(globalThis, 'document')
+    else Object.defineProperty(globalThis, 'document', { configurable: true, writable: true, value: previousDocument })
+  }
+})
