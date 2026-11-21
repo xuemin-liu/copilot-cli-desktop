@@ -426,6 +426,9 @@ does not infer the cause.
 Content assertions (numericValue/value/text/attribute) refuse private regions,
 aggregates containing private content, password inputs, and autocomplete fields
 for passwords, one-time codes or payment details. Use public state indicators.
+The value of a field a person can type in (a text input, a textarea, an editor)
+is compared only when the same run filled it, or when the app marks the field
+data-public; read-only and disabled fields, lists and other text are compared.
 consoleMessage takes expected (an anchored glob where only * is special, e.g.
 "viewer ready*"), optional level debug/info/warning/error, and no target. It passes
 once the test page has logged a matching message during this run, recorded or not;

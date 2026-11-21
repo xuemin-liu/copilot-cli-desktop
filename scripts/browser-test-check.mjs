@@ -358,6 +358,12 @@ if (!process.versions.electron) {
         step('assert', 'Shadow value', { selector: '#shadow-field', condition: 'value', expected: 'shadow value' }),
         step('click', 'Shadow click', { selector: '#shadow-button' }), step('assert', 'Shadow result', { selector: '#shadow-result', condition: 'text', expected: 'Shadow passed' })])
       assert.equal(shadow.status, 'passed', JSON.stringify(shadow))
+      // An editor holds what a person typed as well: its text is not compared before the run has filled it.
+      for (const probe of [{ condition: 'text', expected: 'private-editor-value' }, { condition: 'numericValue', expected: 1, tolerance: 1e9 }]) {
+        const peeked = await execute([step('assert', 'Read an editor a person typed in', { selector: '#editor', ...probe })])
+        assert.equal(peeked.status, 'failed', JSON.stringify(peeked))
+        assert.match(JSON.stringify(peeked), /this test did not fill is private/)
+      }
       const editable = await execute([step('fill', 'Edit rich text', { selector: '#editor', value: 'edited content' }),
         step('assert', 'Rich text updated', { selector: '#editor', condition: 'text', expected: 'edited content' })])
       assert.equal(editable.status, 'passed', JSON.stringify(editable))

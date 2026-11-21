@@ -102,9 +102,18 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     // when this run filled it, or when the application itself marks the field `data-public` (its author's statement
     // that the field holds nothing private, as `data-private` is the opposite one). A read-only or disabled field
     // shows the application's own state, like text does, and a list offers the page's own options.
+    // An editor made with contenteditable is such a field too. The run fills the editor itself, and what is asserted may
+    // be an element inside it, so the editor and every editable element around the target are looked at.
+    const editorCleared = (element: Element): boolean => {
+      for (let node: Element | null = element; node; node = parent(node)) {
+        if (node instanceof HTMLElement && node.isContentEditable && (node.hasAttribute('data-public') || scalarState().filled.has(node))) return true
+      }
+      return false
+    }
     const typedByPerson = (element: Element): boolean =>
       (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement && !/^(checkbox|radio|button|submit|reset|image|file|hidden|range|color)$/.test(element.type))
-      && !element.readOnly && !element.disabled && !element.hasAttribute('data-public') && !scalarState().filled.has(element)
+        ? !element.readOnly && !element.disabled && !element.hasAttribute('data-public') && !scalarState().filled.has(element)
+        : element instanceof HTMLElement && element.isContentEditable && !editorCleared(element)
     const publicScalar = (element: Element, attribute: string): string => {
       if (!element.isConnected || element.ownerDocument !== document || !visible(element)) throw new Error('Scalar source is hidden, removed, replaced or in another document.')
       if (privateContent(element)) throw new Error('Scalar values are unavailable for private regions or sensitive fields.')
@@ -306,7 +315,8 @@ export function browserTestScript(operation: string, args: Record<string, any>):
         && privateContent(target)) {
         return { passed: false, reason: 'Content assertions are unavailable for private regions or sensitive password, one-time-code and payment fields. Select a public application-state indicator instead.' }
       }
-      if ((args.condition === 'value' || args.condition === 'numericValue') && typedByPerson(target)) {
+      // For an editor, its text is its value.
+      if ((args.condition === 'value' || args.condition === 'numericValue' || args.condition === 'text' && target instanceof HTMLElement && target.isContentEditable) && typedByPerson(target)) {
         return { passed: false, reason: 'The value of a field this test did not fill is private, so it is not compared. Fill the field in this test first, assert a read-only field or text that shows the application state, or have the application mark the field data-public.' }
       }
       switch (args.condition) {

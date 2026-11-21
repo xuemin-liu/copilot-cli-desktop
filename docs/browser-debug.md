@@ -606,7 +606,8 @@ comparison or a screenshot when the app has no ready signal of its own.
   still, because captures are a few hundred milliseconds apart.
 Numeric checks read visible field values or numeric element text without exporting
 the value. `value` and `numericValue` compare the live value of a field a person can
-type in only when the same run filled that field, or when the application marks the
+type in (a text input, a textarea, or an editor made with `contenteditable`, whose
+text is its value) only when the same run filled that field, or when the application marks the
 field with a `data-public` attribute; otherwise the step fails and says so, because
 nothing else about a plain text field proves that what was typed into it is not
 private. Read-only and disabled fields, lists, checkboxes and element text are
