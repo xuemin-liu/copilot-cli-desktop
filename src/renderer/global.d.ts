@@ -134,7 +134,7 @@ export interface CopilotDesktopBridge {
   removeFollowupDefault(projectId:string):Promise<void>
   pauseFollowup(id:string):Promise<void>
   configureAutomation(projectId:string,repository:string,template:'assigned-issue'|'default-ci',actors:string[],id?:string):Promise<void>
-  automationAction(id:string,action:'off'|'preview'|'automatic'|'start'):Promise<void>
+  automationAction(id:string,action:'off'|'preview'|'automatic'|'start'|'delete'):Promise<void>
   pauseAutomatic(paused:boolean,projectId?:string):Promise<void>
   deliveryAction(id: string, action: 'retry' | 'discard'): Promise<void>
   meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript' | 'use-answer', tabId?: string, role?: string): Promise<void>

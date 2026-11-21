@@ -16,7 +16,7 @@ export function WorkflowAutomations({profiles,rules,previews,paused,pausedProjec
       <label>GitHub repository<input required value={repository} placeholder="owner/repository" onChange={event=>setRepository(event.target.value)} /></label>
       <label>Investigation template<select value={template} onChange={event=>setTemplate(event.target.value as typeof template)}><option value="assigned-issue">New issue assigned to my GitHub account</option><option value="default-ci">Failed default-branch CI check</option></select></label>
       <label>{template==='assigned-issue'?'Allowed assigner logins':'Allowed GitHub app slugs'}<input required value={actors} onChange={event=>setActors(event.target.value)} placeholder={template==='assigned-issue'?'teammate, trusted-bot[bot]':'github-actions'} /></label>
-      <p>Creates a Preview rule. Preview launches no worker. Automatic and Start preview create a restricted read/search investigation in a dedicated worktree, using this project’s model. They produce proposed next steps for review. Limits: three starts per day and ten per rule; two active workers per project, ten minutes per turn. Model costs are not capped.</p>
+      <p>Creates a Preview rule. Preview launches no worker. Automatic and Start preview create a restricted read/search investigation in a dedicated worktree, using this project’s model. They produce proposed next steps for review. Limits: three starts per day (more wait for the next day) and ten per rule; two active workers per project, ten minutes per turn. Model costs are not capped.</p>
       <button disabled={pending||!profiles.length} type="submit">{editing?'Save changes in Preview':'Create Preview rule'}</button>
       {editing&&<button type="button" onClick={()=>setEditing(undefined)}>Cancel editing</button>}
     </form>
@@ -25,12 +25,16 @@ export function WorkflowAutomations({profiles,rules,previews,paused,pausedProjec
       <button disabled={pending||rule.mode==='off'} type="button" onClick={()=>run(()=>window.copilotDesktop.automationAction(rule.id,'off'))}>Off</button>
       <button disabled={pending||rule.mode==='preview'} type="button" onClick={()=>run(()=>window.copilotDesktop.automationAction(rule.id,'preview'))}>Preview</button>
       <button disabled={pending||rule.mode==='automatic'} type="button" onClick={()=>run(()=>window.copilotDesktop.automationAction(rule.id,'automatic'))}>Enable Automatic for new events</button>
+      <button disabled={pending} type="button" onClick={()=>{if(window.confirm(`Delete the rule for ${rule.repository}? Its previews go with it. Sessions it started are kept.`))run(async()=>{await window.copilotDesktop.automationAction(rule.id,'delete');if(editing===rule.id)setEditing(undefined)})}}>Delete rule</button>
+      {rule.launches>=10&&<p role="status">This rule has used all 10 of its starts and starts nothing more. Delete it and create a new rule to continue.</p>}
     </li>)}</ul>
     <h3>Preview history · {previews.length}</h3>
     <ul>{previews.slice(0,limit).map(p=><li key={p.id}><strong>{p.title}</strong><p>{p.summary}</p><span>{p.state}</span>
       {p.refusal&&p.state==='preview'&&<p role="status">{p.refusal}. No session or checkout was created; this refusal did not consume launch budget.</p>}
       {p.state==='preview'&&rules.some(r=>r.id===p.ruleId&&r.revision===p.revision&&r.mode!=='off')&&<button disabled={pending||paused} type="button" onClick={()=>run(()=>window.copilotDesktop.automationAction(p.id,'start'))}>Start selected preview</button>}
       {p.sessionId&&<button type="button" onClick={()=>run(()=>window.copilotDesktop.openSessionHistory(p.sessionId!))}>Open task session</button>}
+      {p.state==='preview'&&p.waitUntil!==undefined&&<p role="status">The rule reached its three starts for the day. This one waits until {new Date(p.waitUntil).toLocaleString()} and is checked again before it starts.</p>}
+      {p.state==='limit'&&<p role="status">Not started: the rule had used all 10 of its starts.</p>}
       {p.state==='uncertain'&&<p>Launch may have created a session or checkout. Inspect Tasks and sessions; this event will not be launched again automatically.</p>}
     </li>)}</ul>
     {previews.length>limit&&<button type="button" onClick={()=>setLimit(n=>n+30)}>Show more previews</button>}

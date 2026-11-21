@@ -47,6 +47,21 @@ export function isTerminalReply(data: string): boolean {
   return data.length > 0 && data.replace(TERMINAL_REPLIES, '') === ''
 }
 
+// A mouse report (SGR form): button code, column, row, then M (down or move) or m (up). In the code, 32 means the pointer
+// moved and 64 means the wheel turned.
+const MOUSE_REPORTS = /\x1b\[<(\d+);\d+;\d+[Mm]/g
+
+/**
+ * Input that cannot be the person answering a prompt: the terminal's own replies and focus reports, and mouse reports
+ * for a pointer that only moved or a wheel that turned. A mouse button going down or up is not passive, because a
+ * click can choose an option.
+ */
+export function isPassiveTerminalInput(data: string): boolean {
+  if (data.length === 0) return false
+  const rest = data.replace(MOUSE_REPORTS, (report: string, code: string) => (Number(code) & (32 | 64)) !== 0 ? '' : report)
+  return rest === '' || isTerminalReply(rest)
+}
+
 /** Why the session can never take a task that edits files and runs Git, or null when it can. The renderer shows it on the
  * button; main checks it again before typing anything. A task that only asks for an answer (a meeting's review round) passes
  * `needsWrite: false`, so read-only sessions and side chats can take it. */
