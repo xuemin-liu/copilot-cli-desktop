@@ -5606,10 +5606,13 @@ async function outsideLocation(target: string, roots: readonly string[]): Promis
  * Hidden tabs read again when they are next shown.
  */
 async function revalidateFileTabs(): Promise<void> {
-  const tabs = projectTools().state().projects.flatMap(project => project.tabs.filter(tab => tab.kind === 'file').map(tab => ({ profileId: project.profileId, id: tab.id })))
+  // With no tools started there is no File tab to recheck; this must not start them.
+  const tools = projectToolService
+  if (!tools) return
+  const tabs = tools.state().projects.flatMap(project => project.tabs.filter(tab => tab.kind === 'file').map(tab => ({ profileId: project.profileId, id: tab.id })))
   for (const tab of tabs) {
     const { trusted } = await trustedFile(tab.profileId, tab.id).catch(() => ({ trusted: false }))
-    if (!trusted) projectTools().watchFile(tab.profileId, tab.id, null)
+    if (!trusted) tools.watchFile(tab.profileId, tab.id, null)
   }
   if (!mainWindow || mainWindow.isDestroyed()) return
   for (const tab of tabs) mainWindow.webContents.send('desktop:file-changed', tab.id)
@@ -5783,6 +5786,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let shortcutChanged = false
   let overridesChanged = false
   let desktopControlChanged = false
+  let outsideFilesChanged = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
@@ -5815,10 +5819,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     // Sessions started from now on get the helper; turning it off also turns control off everywhere at once.
     desktopControlChanged = typeof values.desktopControl === 'boolean' && desktopConfig.desktopControl !== values.desktopControl
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
-    if (typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace) {
-      desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
-      observe(revalidateFileTabs(), 'Could not recheck File tabs')
-    }
+    outsideFilesChanged = typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace
+    if (typeof values.openFilesOutsideWorkspace === 'boolean') desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -5843,6 +5845,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (!desktopConfig.desktopControl) await desktopControl?.disableAll('Turned off: desktop control was turned off in Settings.')
     broadcastState()
   }
+  // Only once the change is saved: a save that failed was rolled back, and the tabs keep what they show.
+  if (outsideFilesChanged) await revalidateFileTabs()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })

@@ -1489,9 +1489,22 @@ test('outside files: a link back into the workspace uses its tab, turning the se
   await harness.request('desktop:file-watch', profile.id, inside[0]!.id, true)
   assert.ok(harness.watchedFile(outsideTab.id)?.endsWith('secret.txt'))
   assert.ok(harness.watchedFile(inside[0]!.id)?.endsWith('inside.txt'))
+  const fileChanges = (from: number) => harness.windowFor().messages.slice(from).filter(message => message.channel === 'desktop:file-changed').map(message => message.payload)
+  // A save that fails is rolled back: the setting stays on, the outside tab stays watched and is not told to clear.
+  await harness.flushConfig()
+  const config = join(directory, 'desktop.json')
+  const saved = await readFile(config, 'utf8')
+  await rm(config); await mkdir(config)
+  const beforeFailure = harness.windowFor().messages.length
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false }))
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal((await harness.requestSettings('desktop-settings:get') as { openFilesOutsideWorkspace: boolean }).openFilesOutsideWorkspace, true, 'rolled back')
+  assert.ok(harness.watchedFile(outsideTab.id)?.endsWith('secret.txt'), 'a failed save leaves the watch alone')
+  assert.deepEqual(fileChanges(beforeFailure), [], 'a failed save tells no tab to read again')
+  await rm(config, { recursive: true }); await writeFile(config, saved)
   const changed = harness.windowFor().messages.length
   await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false })
-  for (let turn = 0; turn < 50 && harness.watchedFile(outsideTab.id) !== null; turn++) await new Promise(resolve => setTimeout(resolve, 20))
+  // Rechecked once the save is done, before the request answers.
   assert.equal(harness.watchedFile(outsideTab.id), null, 'no folder outside the workspace stays watched')
   assert.ok(harness.watchedFile(inside[0]!.id)?.endsWith('inside.txt'), 'the workspace file is still watched')
   const told = harness.windowFor().messages.slice(changed).filter(message => message.channel === 'desktop:file-changed').map(message => message.payload)
