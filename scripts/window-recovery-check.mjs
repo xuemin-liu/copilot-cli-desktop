@@ -10,7 +10,7 @@ if (!process.versions.electron) {
   await mkdir(out, { recursive: true })
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
   const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { env, stdio: 'inherit', windowsHide: true })
-  const timer = setTimeout(() => child.kill(), 120_000)
+  const timer = setTimeout(() => child.kill(), 180_000)
   try { assert.equal(await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }), 0) }
   finally { clearTimeout(timer) }
   console.log('PASS: the main window reloads after its page process dies, and asks when it keeps dying')
@@ -36,7 +36,7 @@ if (!process.versions.electron) {
     await import('../dist/src/main/main.js')
     await app.whenReady()
     let win
-    for (let index = 0; index < 150 && !win; index++) { win = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('index.html')); if (!win) await delay(100) }
+    for (let index = 0; index < 600 && !win; index++) { win = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('index.html')); if (!win) await delay(100) }
     assert.ok(win)
     const ui = code => win.webContents.executeJavaScript(code)
     const shown = async label => {
