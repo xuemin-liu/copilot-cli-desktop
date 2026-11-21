@@ -43,6 +43,8 @@ export interface GitRepoSummary {
   changeCount: number
   /** Changes whenever the file list changes, so a view that shows the list knows to reload it. */
   generation: number
+  /** Changes when a file with unstaged changes is edited again, which the list does not show: an open diff reloads. */
+  contentStamp?: string | undefined
   /** Current commit id (null before the first commit); changes with every commit, so history views know to reload. */
   headOid: string | null
   error: string | null

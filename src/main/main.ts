@@ -120,7 +120,7 @@ import type { GitIpcEvent } from './git-ipc.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { describeProcessExit, observeProcessFailures, ReloadBudget } from './process-diagnostics.js'
 import { fanOutReadiness } from './fan-out-readiness.js'
-import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
+import { PERMISSION_PRESET_INFO, assertPermissionPresetSupported, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionCapabilities, type PermissionPreset } from './permission-presets.js'
 import { describeSessionPermission, type SessionPermissionMode } from './permission-modes.js'
 import {
   isCopilotProviderType,
@@ -1417,7 +1417,7 @@ interface SessionSpawnPlan {
   attachmentPaths: string[]
   launch: SessionLaunchConfig
   permissionPreset: PermissionPreset
-  permissionCapabilities: { toolAllowlist: boolean }
+  permissionCapabilities: PermissionCapabilities
   secretArgs: string[]
   connectSessionId: string | null
   sessionTitle: string
@@ -1495,6 +1495,17 @@ async function buildSessionSpawnPlan(
   // the true resume id is known) agrees with this guess.
   const likelyFreshSession = !connectSessionId
     && (resumeMode === 'new' || (resumeMode === 'auto-resume' && buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }).length === 0))
+  // A connected session takes no permission flags. For the others, Restricted mode must not start on a guess: ask the
+  // CLI once more, then refuse, here, before a restart has stopped the tab's process. This comes before the launch
+  // options are checked, which refuse a failed probe too, so a probe that only failed at startup can recover for both.
+  if (!connectSessionId && profile.permissionPreset === 'read-only' && copilotCapabilities.probeFailed) {
+    await recheckCopilotCapabilities()
+    if (state.resolution !== resolution) throw new Error('The copilot CLI changed while the session was starting. Try again.')
+  }
+  // What was checked here is what the session is started with: a probe that finishes during the awaits below must not
+  // change the flags after a restart has stopped the old process.
+  const permissionCapabilities: PermissionCapabilities = { toolAllowlist: copilotCapabilities.toolAllowlist, probeFailed: copilotCapabilities.probeFailed }
+  if (!connectSessionId) assertPermissionPresetSupported(profile.permissionPreset, permissionCapabilities)
   validateLaunchOptions(profile.launch, connectSessionId, likelyFreshSession)
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const inheritedEnvironment = { ...process.env, ...vaultEnvironment }
@@ -1512,7 +1523,7 @@ async function buildSessionSpawnPlan(
     attachmentPaths,
     launch: profile.launch,
     permissionPreset: profile.permissionPreset,
-    permissionCapabilities: { toolAllowlist: copilotCapabilities.toolAllowlist },
+    permissionCapabilities,
     // This must receive the full environment that PtySession will pass to
     // Copilot, not only provider/vault overrides. Ambient credentials also
     // reach Copilot through PtySession's process.env merge and must be named

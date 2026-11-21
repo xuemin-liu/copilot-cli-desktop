@@ -74,7 +74,7 @@ export function parseProgrammaticRunArguments(args: readonly string[]): Programm
 export function buildProgrammaticCopilotArgs(
   options: ProgrammaticRunOptions,
   workspace: string,
-  capabilities: Pick<CopilotCapabilities, 'toolAllowlist'>,
+  capabilities: Pick<CopilotCapabilities, 'toolAllowlist'> & { probeFailed?: boolean | undefined },
 ): string[] {
   return [
     '--prompt', options.prompt,

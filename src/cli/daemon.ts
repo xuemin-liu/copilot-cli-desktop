@@ -6,6 +6,7 @@ import { appendBoundedLog } from '../main/log-retention.js'
 import { spawnChildProcessPty } from '../main/child-process-pty-backend.js'
 import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from '../main/copilot-command.js'
 import {
+  assertPermissionPresetSupported,
   buildPermissionArgs,
   isPermissionPreset,
   needsToolAllowlistProbe,
@@ -331,6 +332,8 @@ async function initialize(): Promise<void> {
   copilotCapabilities = needsToolAllowlistProbe(preset)
     ? await discoverCopilotCapabilities(resolution)
     : { ...EMPTY_COPILOT_CAPABILITIES }
+  // Before anything is started: a probe that failed says nothing about the CLI, so Restricted mode is refused.
+  assertPermissionPresetSupported(preset, copilotCapabilities)
   const compatibilityWarning = permissionCompatibilityWarning(preset, copilotCapabilities)
   if (compatibilityWarning) {
     await updateState({ warning: compatibilityWarning })

@@ -15,9 +15,9 @@ import { shardedTest } from './fixtures/sharded-test.js'
 import { createGitFixture, findGitForTests, folderLink, shellPath } from './fixtures/git-fixture.js'
 import { TRASH_NAME } from './host-path.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
-import { GitCancelledError, GitService, GitStaleError, isIndexLockFailure } from './git-service.js'
+import { GitCancelledError, GitService, GitStaleError, STATUS_TOO_LARGE_MESSAGE, isIndexLockFailure } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
-import { GitTrustStore } from './git-trust.js'
+import { GitTrustStore, scanRepoConfig } from './git-trust.js'
 import type { GitConfirmRequest, GitProjectView, GitRepoStatusView } from './git-types.js'
 import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 
@@ -123,6 +123,60 @@ shardedTest('a requested refresh picks up edits and pushes one change event', { 
   const status = await h.service.getStatus(SUBSCRIBER, PROFILE, repoAt(event, '.')!.id)
   assert.deepEqual(status.unstaged.map(entry => entry.path), ['a.txt'])
   assert.deepEqual(status.untracked.map(entry => entry.path), ['new.txt'])
+})
+
+shardedTest('editing a changed file again is pushed as a change, with the file list and its ids left as they were', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'one\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init') })
+  writeFileSync(join(h.project, 'a.txt'), 'first edit\n')
+  writeFileSync(join(h.project, 'new.txt'), 'x\n')
+  const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  const before = await h.service.getStatus(SUBSCRIBER, PROFILE, first.id)
+  const baseline = h.events.length
+
+  // The list does not change: a.txt was modified and still is. Only its content, size and time did.
+  writeFileSync(join(h.project, 'a.txt'), 'a second, longer edit\n')
+  h.service.requestRefresh(PROFILE)
+  const event = await waitFor(() => h.events.length > baseline && h.events.at(-1))
+  const second = repoAt(event, '.')!
+  assert.notEqual(second.contentStamp, first.contentStamp, 'the panel is told, so an open diff reloads')
+  assert.equal(second.generation, first.generation)
+  const after = await h.service.getStatus(SUBSCRIBER, PROFILE, first.id)
+  assert.deepEqual(after.unstaged.map(entry => entry.id), before.unstaged.map(entry => entry.id), 'the entry ids are not churned')
+  assert.match((await h.service.getDiff(SUBSCRIBER, PROFILE, first.id, after.unstaged[0]!.id, false)).text, /a second, longer edit/)
+
+  // An untracked file edited again is news too; a refresh with no edit is not.
+  writeFileSync(join(h.project, 'new.txt'), 'more text\n')
+  h.service.requestRefresh(PROFILE)
+  const third = repoAt(await waitFor(() => h.events.length > baseline + 1 && h.events.at(-1)), '.')!
+  assert.notEqual(third.contentStamp, second.contentStamp)
+  h.service.requestRefresh(PROFILE)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(h.events.length, baseline + 2, 'an unchanged poll pushes nothing')
+})
+
+shardedTest('a status too large to read says so plainly, and lists nothing to act on', { skip }, async (t) => {
+  let limit: number | undefined
+  const calls: string[] = []
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'one\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init') }, {})
+  for (let index = 0; index < 40; index++) writeFileSync(join(h.project, `changed-file-number-${index}.txt`), 'x\n')
+  // The real runner, with the real limit behaviour, at a size a test can reach.
+  const small = new GitService({
+    getRuntime: async () => ({
+      runner: { run: (options: GitRunOptions) => { calls.push(String(options.args[0])); return h.fixture.runner.run(options.args[0] === 'status' && limit ? { ...options, maxStdoutBytes: limit } : options) } } as unknown as GitRunner,
+      executable: h.fixture.git,
+    }),
+    trustStore: h.trustStore, resolveProject: (profileId) => profileId === PROFILE ? h.project : null, onChanged: () => undefined, debounceMs: 20, fallbackMs: 60_000,
+  })
+  t.after(() => small.dispose())
+  limit = 256
+  const repo = repoAt(await small.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(repo.state, 'error')
+  assert.equal(repo.error, STATUS_TOO_LARGE_MESSAGE)
+  assert.doesNotMatch(repo.error ?? '', /failed|exit/)
+  const listed = await small.getStatus(SUBSCRIBER, PROFILE, repo.id)
+  assert.deepEqual([listed.staged, listed.unstaged, listed.untracked, listed.totalEntries], [[], [], [], 0], 'no half-read list to stage or discard from')
+  limit = undefined
+  assert.equal(repoAt(await small.rescan(SUBSCRIBER, PROFILE), '.')?.changeCount, 40, 'the same repository reads normally under the limit')
 })
 
 shardedTest('nested repositories keep their ids across rescans and a removed id is never reused', { skip }, async (t) => {
@@ -552,6 +606,47 @@ shardedTest('the status summary follows a branch change even when the file list 
   const after = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
   assert.equal(after.summary.branch, 'second-branch')
   assert.equal(after.generation, before.generation, 'entry ids stay valid when the file list is unchanged')
+})
+
+shardedTest('a repository with an include is asked about its include line first, then about what the file brings in', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'shared.gitconfig'), '[user]\n\tname = harmless\n')
+    f.plain(project, 'config', 'include.path', '../shared.gitconfig')
+  })
+  const root = realpathSync.native(h.project)
+  // Trusted before includes were followed: that answer no longer covers it.
+  const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(first.state, 'needs-review')
+  assert.deepEqual(first.reviewItems.map(item => item.key), ['include.path'])
+  assert.equal(h.calls.includes('status'), false)
+
+  // The file brings in nothing to review, so accepting the line is the whole question.
+  const ready = repoAt(await h.service.trust(SUBSCRIBER, PROFILE, first.id, first.configHash!), '.')!
+  assert.equal(ready.state, 'ready')
+  assert.equal(await h.trustStore.areIncludesApproved(root, (await scanRepoConfig(h.fixture.runner, root)).ownHash), true)
+
+  // The included file changes under an unchanged include line: Git is held again, with the new setting listed.
+  writeFileSync(join(h.project, 'shared.gitconfig'), '[core]\n\tsshCommand = evil\n')
+  const asked = repoAt(await h.service.rescan(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(asked.state, 'needs-review')
+  assert.deepEqual(asked.reviewItems.map(item => item.key).sort(), ['core.sshcommand', 'include.path'])
+  assert.equal(repoAt(await h.service.trust(SUBSCRIBER, PROFILE, asked.id, asked.configHash!), '.')?.state, 'ready')
+})
+
+shardedTest('an include whose file names a program is asked about twice: the line, then the program', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'shared.gitconfig'), '[core]\n\tsshCommand = evil\n')
+    f.plain(project, 'config', 'include.path', '../shared.gitconfig')
+  })
+  const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.deepEqual(first.reviewItems.map(item => item.key), ['include.path'], 'the file is not read before its line is accepted')
+  const second = repoAt(await h.service.trust(SUBSCRIBER, PROFILE, first.id, first.configHash!), '.')!
+  assert.equal(second.state, 'needs-review')
+  assert.deepEqual(second.reviewItems.map(item => item.key).sort(), ['core.sshcommand', 'include.path'])
+  assert.equal(h.calls.includes('status'), false)
+  assert.equal(repoAt(await h.service.trust(SUBSCRIBER, PROFILE, second.id, second.configHash!), '.')?.state, 'ready')
 })
 
 shardedTest('a setting too long to have been shown in full cannot be trusted, even if asked directly', { skip }, async (t) => {
@@ -1323,6 +1418,29 @@ shardedTest('a branch that tracks a differently named branch is not pushed by th
   assert.equal(result.ok, false)
   assert.match(result.message, /differently named branch/)
   assert.equal(remoteHead(h), before)
+})
+
+shardedTest('a branch set to push to another remote than it pulls from is not pushed to its upstream', { skip }, async (t) => {
+  for (const [key, label] of [['remote.pushDefault', 'remote.pushDefault'], ['branch.main.pushRemote', 'branch.main.pushRemote']] as const) {
+    const h = await withOrigin(t, (f, project) => {
+      f.plain(f.root, 'init', '-q', '--bare', 'fork.git')
+      f.plain(project, 'remote', 'add', 'fork', join(f.root, 'fork.git'))
+      f.plain(project, 'config', key, 'fork')
+      writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
+    })
+    const { repoId } = await open(h)
+    const before = remoteHead(h)
+    const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+    assert.equal(result.ok, false, key)
+    assert.match(result.message, new RegExp(`pulls from "origin" but is set to push to "fork" \\(${label.replace(/\./g, '\\.')}\\)`))
+    assert.equal(remoteHead(h), before, 'nothing reached the upstream remote')
+    assert.equal(h.calls.includes('push'), false)
+    // A push remote that is the upstream remote changes nothing.
+    h.fixture.plain(h.project, 'config', key, 'origin')
+    const same = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+    assert.equal(same.ok, true, `${same.reason}: ${same.message}`)
+    await h.service.dispose(); h.fixture.cleanup()
+  }
 })
 
 shardedTest('pull and push need a branch, fetch does not', { skip }, async (t) => {
