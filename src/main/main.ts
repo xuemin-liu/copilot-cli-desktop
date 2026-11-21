@@ -159,6 +159,7 @@ import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree, resolveProjectWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
+import { MeetingGrants, type GrantAnswer, type GrantQuestion } from './meeting-grants.js'
 import { hostPath, isSameOrInside, samePath } from './host-path.js'
 import { desktopPosixPath } from './posix-executables.js'
 import { linuxAutostartEnabled, setLinuxAutostart } from './linux-autostart.js'
@@ -2944,6 +2945,43 @@ function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {
 
 const guestHostTitle = (seat: GuestSeat): string => `${seat.name} (guest)`
 
+let sharedMeetingGrants: MeetingGrants | null = null
+/** The questions an outside agent's request puts to the person: see `meeting-grants.ts`. */
+function meetingGrants(): MeetingGrants {
+  sharedMeetingGrants ??= new MeetingGrants({
+    file: join(app.getPath('userData'), 'meeting-change-grants.json'),
+    canonical: (folder) => realPathNative(folder),
+    ask: askMeetingGrant,
+  })
+  return sharedMeetingGrants
+}
+
+async function askMeetingGrant(question: GrantQuestion): Promise<GrantAnswer> {
+  const owner = mainWindow
+  // Nobody to ask is a "no": the request came from a program, and only a person can say yes.
+  if (!owner || owner.isDestroyed()) return 'deny'
+  if (!owner.isVisible()) owner.show()
+  owner.focus()
+  if (!owner.isFocused()) owner.flashFrame(true)
+  const attach = question.kind === 'attach-changes'
+  const { response } = await dialog.showMessageBox(owner, {
+    type: 'question',
+    title: 'Review meeting',
+    message: attach
+      ? `Attach the uncommitted changes of this folder to a review meeting?\n\n${question.folder}`
+      : `Let “${question.agent}” read the changes shared in meeting ${question.meetingId}?`,
+    detail: attach
+      ? `An agent that calls itself “${question.agent}” is starting a review meeting and named this folder. It would get the folder's uncommitted changes and up to 100 of its new files, with secrets masked, and so would every reviewer in the meeting.\n\nThe meeting tools need no sign-in, so the name is only what the program said. Allow this only if you asked an agent to host a meeting for this project.`
+      : `It joined with the meeting's id only, not with an invitation you made. The post and the replies are already open to it; this is about the uncommitted changes the host attached.\n\nThe meeting tools need no sign-in, so the name is only what the program said. Allow this only if you told an agent to join this meeting.`,
+    buttons: attach ? ['Don’t allow', 'Allow for this meeting', 'Always allow for this folder'] : ['Don’t allow', 'Allow'],
+    // It can appear while the person is pressing Enter somewhere else.
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  })
+  return response === 2 ? 'always' : response === 1 ? 'once' : 'deny'
+}
+
 const guestDeps: GuestDeps = {
   ready: () => guestsReady,
   isOpen: (id) => meetingHub.isOpen(id),
@@ -2982,6 +3020,9 @@ const guestDeps: GuestDeps = {
     if (!runner) throw new Error('Git is not available on this computer, so no changes can be attached.')
     return folderChanges(seat.folder!, { runner, trust: gitTrustStore() })
   },
+  approveChanges: (seat) => seat.folder === null ? Promise.resolve(false) : meetingGrants().attachChanges(seat.name, seat.folder),
+  approveMaterial: (seat) => meetingGrants().readChanges(seat.name, seat.meetingId),
+  canonicalFolder: (folder) => realPathNative(folder),
   checkFolder: async (folder) => {
     if (!isAbsolute(folder) || folder.length > 4096) return 'Pass your project folder as an absolute path.'
     // Checked before anything touches it: a network path would be opened by the stat below.
