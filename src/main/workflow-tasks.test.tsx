@@ -51,6 +51,24 @@ test('unsupported existing conversations offer manual tracking and supported res
     const task=store.manual('existing-session','project','Existing work',false)
     const active=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[tab]} installedCliVersion="1.0.105" onRestart={()=>{}} />)
     assert.match(active,/Resume with task support/)
+    assert.match(active,/Structured reports need Copilot CLI 1\.0\.105; this session runs 1\.0\.82\./)
+    assert.doesNotMatch(active,/role="note"/,'the verified version is installed: nothing to explain')
+    // A newer installed CLI turns the features off. The panel says which version is installed and what is off.
+    const newer=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[{...tab,cliVersion:'1.0.114'}]} installedCliVersion="1.0.114" onRestart={()=>{}} />)
+    assert.match(newer,/<p role="note">Task reports and automatic work are verified with Copilot CLI 1\.0\.105 only\. Version 1\.0\.114 is installed, so automatic work is off and new sessions cannot report\. Task outcomes can still be set by hand\./)
+    // Mixed: the CLI was updated while a session started on the verified version is still running. That session reports,
+    // so the panel must not say reports are off; it says what the new version changes.
+    const mixed105=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[{...tab,cliVersion:'1.0.105'}]} installedCliVersion="1.0.114" onRestart={()=>{}} />)
+    assert.match(mixed105,/<summary>Tasks · 1 · new sessions cannot report<\/summary>/)
+    assert.match(mixed105,/new sessions cannot report\. Sessions still running 1\.0\.105 keep reporting\./)
+    assert.doesNotMatch(mixed105,/reports off|set by hand|Structured reports/,'the running session reports: nothing says otherwise')
+    // A side chat on the verified version cannot report, so it does not count as a reporting session.
+    const sideOnly=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[{...tab,cliVersion:'1.0.105',sideChat:{} as never}]} installedCliVersion="1.0.114" />)
+    assert.match(sideOnly,/<summary>Tasks · 1 · reports off<\/summary>/)
+    assert.match(newer,/this session runs 1\.0\.114\./)
+    assert.match(newer,/<summary>Tasks · 1 · reports off<\/summary>/,'said on the closed panel too')
+    assert.doesNotMatch(newer,/Resume with task support/,'restarting would not help')
+    assert.doesNotMatch(renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[tab]} />),/role="note"/,'no installed version known yet')
     assert.match(active,/Recorded outcome/)
     assert.match(active,/End current task and track another/)
     assert.doesNotMatch(active,/Delete task history/)
