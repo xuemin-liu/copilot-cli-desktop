@@ -12,6 +12,11 @@ export interface PtyLike {
   kill(signal?: string): void
   /** Release native/process handles after either natural exit or termination. */
   dispose?(): void
+  /**
+   * For a backend that learns only later whether the program started: settles when it has, or rejects with why it
+   * could not (a missing program or folder). A backend whose spawn already failed or succeeded leaves it out.
+   */
+  readonly ready?: Promise<void>
 }
 
 export interface SpawnOptions {

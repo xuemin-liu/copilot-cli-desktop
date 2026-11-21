@@ -6,6 +6,9 @@ import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import { MeetingTurnReader } from './meeting-turns.js'
 import { SessionBindingReader } from './session-binding.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
+import { spawnChildProcessPty } from './child-process-pty-backend.js'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 class FakePty extends EventEmitter implements PtyLike {
   pid = 4242
@@ -329,6 +332,67 @@ test('empty input and empty bracketed paste preserve the approval badge', async 
   session.write('y\n')
   assert.equal(session.status, 'running')
   assert.deepEqual(pty.written, ['\u001bv', '\u0016', 'y\n'])
+})
+
+test('what the terminal sends by itself, and a pointer that only moves or scrolls, leaves the approval badge up', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  pty.emit('data', 'Allow copilot to run `git push`?')
+  const passive = [
+    '\u001b[I', '\u001b[O',                       // the window gained or lost focus
+    '\u001b[<35;40;12M',                           // the pointer moved, no button held
+    '\u001b[<32;40;12M\u001b[<35;41;12M',          // moved with a button held, then without
+    '\u001b[<64;40;12M', '\u001b[<65;40;12M',      // the wheel turned
+    '\u001b[12;40R', '\u001b[?1;2c',               // answers to the CLI's own questions
+  ]
+  for (const input of passive) {
+    session.write(input)
+    assert.equal(session.status, 'approval-needed', JSON.stringify(input))
+  }
+  assert.deepEqual(pty.written, passive, 'it is all still passed on to the CLI')
+  // A click can choose an option, so a button going down is an answer.
+  session.write('\u001b[<0;40;12M')
+  assert.equal(session.status, 'running')
+
+  pty.emit('data', 'Allow copilot to run `git push`?')
+  assert.equal(session.status, 'approval-needed')
+  session.write('\u001b[<35;40;12My')
+  assert.equal(session.status, 'running', 'a key typed along with a pointer move is an answer')
+})
+
+test('a program that could not be started fails the start, and the session is never running without a process', async () => {
+  const statuses: string[] = []
+  const session = new PtySession({ file: process.execPath, args: ['-e', '0'], cwd: join(tmpdir(), `no-such-folder-${process.pid}-${Date.now()}`), spawnPty: spawnChildProcessPty })
+  session.on('status', (status: string) => statuses.push(status))
+  let exits = 0
+  session.on('exit', () => { exits++ })
+  await assert.rejects(session.start(), /copilot could not be started: .*ENOENT/)
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(statuses.includes('running'), false)
+  assert.equal(session.processId, null)
+  assert.equal(exits, 0, 'nothing ran, so nothing exited')
+
+  // The same backend with a folder that exists starts, with a process id.
+  const ok = new PtySession({ file: process.execPath, args: ['-e', 'setTimeout(() => {}, 5000)'], cwd: tmpdir(), spawnPty: spawnChildProcessPty })
+  await ok.start()
+  assert.equal(ok.status, 'running')
+  assert.ok((ok.processId ?? 0) > 0)
+  await ok.stop()
+})
+
+test('a process that exits while it is being started is not reported as running afterwards', async () => {
+  const pty = new FakePty()
+  // It reports its exit as soon as the session listens for it, as a backend does for a process that is already gone.
+  pty.onExit = (listener) => { listener({ exitCode: 1 }) }
+  const statuses: string[] = []
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  session.on('status', (status: string) => statuses.push(status))
+  const exited = once(session, 'exit')
+  await session.start()
+  await exited
+  assert.deepEqual(statuses, ['crashed'])
+  assert.equal(session.processId, null)
 })
 
 test('heuristics reassemble text split across pty chunks without trusting session IDs by default', async () => {

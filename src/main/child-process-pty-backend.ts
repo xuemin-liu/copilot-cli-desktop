@@ -51,6 +51,14 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     spawnError = error
     for (const listener of errorListeners) listener(error)
   })
+  // Node reports a missing program or working folder a moment after `spawn()` returns, with no process id. Until then the
+  // caller cannot tell a starting process from one that will never exist.
+  const ready = new Promise<void>((resolveReady, rejectReady) => {
+    child.once('spawn', () => resolveReady())
+    errorListeners.add(rejectReady)
+  })
+  // Whoever does not ask must not turn a failed start into an unhandled rejection; `onExit` reports it too.
+  ready.catch(() => undefined)
   // Stream output through a decoder so multibyte characters split across
   // chunks are not replaced with U+FFFD.
   const forward = (stream: NodeJS.ReadableStream | null, listener: (data: string) => void): void => {
@@ -67,7 +75,8 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
   }
 
   return {
-    pid: child.pid,
+    get pid() { return child.pid },
+    ready,
     onData: (listener) => {
       forward(child.stdout, listener)
       forward(child.stderr, listener)

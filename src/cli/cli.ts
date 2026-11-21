@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { closeSync, openSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { recordHolderAlive } from './process-identity.js'
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +48,9 @@ async function getLiveState(): Promise<DaemonState | null> {
   const saved = await readDaemonState(paths)
   if (!saved) return null
   if (await isDaemonAlive(saved)) return saved
-  if (isProcessAlive(saved.pid)) {
+  // A process with that id that started after the state was written is another program that was given the same id
+  // (after a restart of the computer, usually): the controller is gone and its state is stale.
+  if (await recordHolderAlive(saved.pid, saved.startedAt)) {
     throw new Error(
       `Controller PID ${saved.pid} is still running but its control API did not respond; preserved ${paths.statePath}`,
     )
@@ -89,6 +92,9 @@ async function start(workspaceArgument: string | undefined, extraArgs: string[])
   }
 
   const workspace = resolve(workspaceArgument ?? process.cwd())
+  if (!(await stat(workspace).then((info) => info.isDirectory(), () => false))) {
+    throw new Error(`The workspace folder does not exist: ${workspace}`)
+  }
   await ensureCliDirectories(paths)
   const lockToken = await acquireControllerLock(paths)
 
