@@ -1445,7 +1445,16 @@ test('activity in several sessions is shown by one broadcast a second, not one f
   const quiet = sent.count
   t.mock.timers.tick(5_000)
   assert.equal(sent.count, quiet)
-  // And a tab that closes takes nothing away from the others: their next change is still shown.
+  // Closing a tab takes nothing away from the others: there is no timer of its own to clear, and their next change is
+  // still shown, once.
+  t.mock.timers.reset()
+  await harness.request('desktop:close-tab', tabs[0]!)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const after = harness.countBroadcasts()
+  harness.activityChanged(tabs[1]!)
+  harness.activityChanged(tabs[2]!)
+  t.mock.timers.tick(1_000)
+  assert.equal(after.count, 1)
   t.mock.timers.reset()
 }))
 

@@ -552,6 +552,8 @@ function scheduleActivityBroadcast(): void {
   if (activityBroadcastTimer) return
   activityBroadcastTimer = setTimeout(() => {
     activityBroadcastTimer = null
+    // Nothing is left to show it to once the app is closing.
+    if (shuttingDown()) return
     syncTabState()
     broadcastState()
   }, 1_000)
@@ -6485,6 +6487,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (updateCheckTimer) clearTimeout(updateCheckTimer)
   if (copilotResolutionRefreshTimer) clearTimeout(copilotResolutionRefreshTimer)
+  if (activityBroadcastTimer) { clearTimeout(activityBroadcastTimer); activityBroadcastTimer = null }
   globalShortcut.unregisterAll()
 })
 
