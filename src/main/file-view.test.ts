@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, isInsideFolder, isSameFolder, locateInRoots,
-  normalizeRelativePath, openInRoot, readFileAsset, readFileView, readOpened, resolveInRoot,
+  normalizeRelativePath, openInRoot, readFileAsset, readFileView, readOpened, readViewerAsset, resolveInRoot,
 } from './file-view.js'
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
@@ -37,6 +37,29 @@ test('the view is chosen from the name and then from the first bytes', () => {
   assert.equal(classifyFile('notes.md', new Uint8Array([35, 0, 1, 2])).reason, 'binary', 'a .md holding binary data is not shown as text')
   assert.equal(classifyFile('tool.exe', new Uint8Array([0x4d, 0x5a, 0x90, 0])).kind, 'other')
   assert.equal(classifyFile('script.ps1', new Uint8Array([0xff, 0xfe, 0x61, 0x00])).kind, 'text', 'UTF-16 with a byte order mark is text')
+})
+
+test('a PDF is known by its header and read whole; viewer data files are served by plain name only', async () => {
+  assert.equal(classifyFile('report.pdf', bytes('%PDF-1.7\n')).kind, 'pdf')
+  assert.equal(classifyFile('renamed.txt', bytes('junk\n%PDF-1.4\n')).kind, 'pdf', 'a little leading junk is allowed')
+  assert.equal(classifyFile('notes.pdf', bytes('just text')).kind, 'text', 'the name alone does not make a PDF')
+  const { base, root } = await fixture()
+  try {
+    const body = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from([0, 1, 2, 255]), Buffer.alloc(20_000, 7)])
+    await writeFile(join(root, 'paper.pdf'), body)
+    const pdf = await readFileView(root, 'paper.pdf')
+    assert.ok(pdf.status === 'ok' && pdf.kind === 'pdf')
+    assert.deepEqual(Buffer.from(pdf.bytes), body)
+    assert.equal(pdf.openable, true)
+    assert.equal(await fileOpenable(root, 'paper.pdf'), join(root, 'paper.pdf'))
+  } finally { await rm(base, { recursive: true, force: true }) }
+  const shipped = join('node_modules', 'pdfjs-dist')
+  assert.ok((await readViewerAsset(shipped, 'cMapUrl', 'UniGB-UCS2-H.bcmap')).length > 100)
+  assert.ok((await readViewerAsset(shipped, 'standardFontDataUrl', 'FoxitFixed.pfb')).length > 100)
+  for (const [kind, name] of [['cMapUrl', '../package.json'], ['cMapUrl', '..\\package.json'], ['cMapUrl', 'sub/UniGB-UCS2-H.bcmap'], ['cMapUrl', '.hidden'], ['cMapUrl', ''],
+    ['build', 'pdf.mjs'], ['__proto__', 'x'], ['toString', 'x'], ['cMapUrl', 'missing.bcmap'], [7, 'x'], ['cMapUrl', 7]] as const) {
+    await assert.rejects(readViewerAsset(shipped, kind, name), `${String(kind)} ${String(name)}`)
+  }
 })
 
 test('text is decoded as UTF-8 or as UTF-16 by its byte order mark, without the mark', () => {

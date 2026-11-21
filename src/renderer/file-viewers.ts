@@ -5,7 +5,28 @@ export interface TextViewer {
   /** Markdown as sanitized HTML: no scripts, forms, styles or frames; pictures carry `data-file-src` and no `src`. */
   markdown(text: string): string
 }
-export interface FileViewers { text?: TextViewer }
+/** What the PDF view reports back: the page in view, find results, and why a document could not be shown. */
+export interface PdfViewerEvents {
+  page(current: number, total: number): void
+  found(current: number, total: number): void
+  failed(reason: 'password' | 'invalid' | 'too-large' | 'failed'): void
+}
+export interface PdfHandle {
+  /** Zoom in (1) or out (-1) one step, or fit the page to the panel's width (0). */
+  zoom(step: -1 | 0 | 1): void
+  /** Mark every match and go to the next one, or the previous; an empty text clears the marks. */
+  find(text: string, previous?: boolean): void
+  /** The panel is visible again: lay the pages out for its current size. */
+  shown(): void
+  readonly page: number
+  close(): void
+}
+/** Draws a PDF into `container`. Lives in viewer-pdf.js, with its parser in a worker (viewer-pdf-worker.js). The bytes
+ * are handed over: the caller must not use them again. */
+export interface PdfViewer { open(container: HTMLDivElement, bytes: Uint8Array, events: PdfViewerEvents, startPage?: number): PdfHandle }
+export interface FileViewers { text?: TextViewer; pdf?: PdfViewer }
+/** Viewers whose script comes with a stylesheet of the same name. */
+const STYLED = new Set<keyof FileViewers>(['pdf'])
 declare global {
   interface Window { copilotFileViewers?: FileViewers }
 }
@@ -22,6 +43,13 @@ export function loadViewer<Name extends keyof FileViewers>(name: Name): Promise<
   let pending = loading.get(name) as Promise<NonNullable<FileViewers[Name]>> | undefined
   if (!pending) {
     pending = new Promise((resolve, reject) => {
+      if (STYLED.has(name) && !document.querySelector(`link[data-viewer="${name}"]`)) {
+        const style = document.createElement('link')
+        style.rel = 'stylesheet'
+        style.href = `./viewer-${name}.css`
+        style.dataset.viewer = name
+        document.head.append(style)
+      }
       const script = document.createElement('script')
       script.src = `./viewer-${name}.js`
       script.onload = () => {

@@ -156,6 +156,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   openFile: (source, path, location) => ipcRenderer.invoke('desktop:open-file', source, path, location ?? null),
   fileRead: (profileId, tabId, known) => ipcRenderer.invoke('desktop:file-read', profileId, tabId, known ?? null),
   fileAsset: (profileId, tabId, href) => ipcRenderer.invoke('desktop:file-asset', profileId, tabId, href),
+  viewerAsset: (kind, filename) => ipcRenderer.invoke('desktop:viewer-asset', kind, filename),
   fileWatch: (profileId, tabId, on) => ipcRenderer.invoke('desktop:file-watch', profileId, tabId, on),
   fileCommand: (profileId, tabId, command) => ipcRenderer.invoke('desktop:file-command', profileId, tabId, command),
   onFileChanged: (listener) => { const handler = (_event, tabId) => listener(tabId); ipcRenderer.on('desktop:file-changed', handler); return () => ipcRenderer.removeListener('desktop:file-changed', handler) },

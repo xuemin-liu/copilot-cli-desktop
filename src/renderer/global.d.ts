@@ -158,6 +158,8 @@ export interface CopilotDesktopBridge {
   fileRead(profileId: string, tabId: string, known?: string | null): Promise<import('../main/file-view.js').FileViewResult>
   /** A picture a Markdown file refers to, as a data URL; null when it is not a local picture under the same root. */
   fileAsset(profileId: string, tabId: string, href: string): Promise<string | null>
+  /** A data file shipped with the app that the PDF viewer needs for some documents (character maps, standard fonts, image decoders). */
+  viewerAsset(kind: 'cMapUrl' | 'standardFontDataUrl' | 'wasmUrl', filename: string): Promise<Uint8Array>
   fileWatch(profileId: string, tabId: string, on: boolean): Promise<void>
   fileCommand(profileId: string, tabId: string, command: 'reveal' | 'open' | 'copy-path'): Promise<void>
   onFileChanged(listener: (tabId: string) => void): () => void

@@ -3,7 +3,7 @@ import type { JSX, KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { FileViewResult } from '../../main/file-view.js'
 import type { ToolTab } from '../../main/tool-tabs.js'
 import { errorMessage } from '../errors.js'
-import { findRanges, formatFileSize, loadViewer, type TextViewer } from '../file-viewers.js'
+import { findRanges, formatFileSize, loadViewer, type PdfHandle, type TextViewer } from '../file-viewers.js'
 
 type Shown = Extract<FileViewResult, { status: 'ok' }>
 const escapeHtml = (text: string): string => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -19,6 +19,14 @@ function setWatching(profileId: string, tabId: string, on: boolean): void {
 /** Different pictures one Markdown file may load, and how many are read at the same time. */
 const MARKDOWN_PICTURES = 200
 const MARKDOWN_PICTURE_READS = 3
+
+const PDF_PROBLEM = {
+  password: 'This document is protected with a password, so it is not shown here.',
+  invalid: 'This file is not a readable PDF.',
+  'too-large': 'This document has too many pages to show here.',
+  failed: 'This document could not be shown.',
+} as const
+const NO_BYTES = new Uint8Array(0)
 
 const CARD_REASON = {
   unsupported: 'There is no viewer for this kind of file.',
@@ -51,6 +59,12 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const body = useRef<HTMLDivElement>(null)
   const findInput = useRef<HTMLInputElement>(null)
   const ranges = useRef<Range[]>([])
+  const [pdfPage, setPdfPage] = useState<{ current: number; total: number } | null>(null)
+  const [pdfProblem, setPdfProblem] = useState<keyof typeof PDF_PROBLEM | null>(null)
+  // A PDF's bytes are kept out of React state: they are handed to the viewer once and not held twice.
+  const pdfBytes = useRef<Uint8Array | null>(null)
+  const pdfBox = useRef<HTMLDivElement>(null)
+  const pdfView = useRef<PdfHandle | null>(null)
   const jumped = useRef(0)
 
   const load = useCallback(async (force: boolean): Promise<void> => {
@@ -60,7 +74,9 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       // A read that finishes after a newer one started would put old content back.
       if (current !== request.current || result.status === 'unchanged') return
       shown.current = result.status === 'ok' ? result.revision : null
-      setView(result); setFailure(null)
+      if (result.status === 'ok' && result.kind === 'pdf') { pdfBytes.current = result.bytes; setView({ ...result, bytes: NO_BYTES }) }
+      else setView(result)
+      setFailure(null)
     } catch (error) { if (current === request.current) setFailure(errorMessage(error)) }
   }, [profileId, tab.id])
 
@@ -76,6 +92,32 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const file = view?.status === 'ok' ? view : null
   const text = file && (file.kind === 'text' || file.kind === 'markdown') ? file : null
   const rendered = text?.kind === 'markdown' && !source
+  const pdf = file?.kind === 'pdf' ? file : null
+  const pdfRevision = pdf?.revision ?? null
+
+  // Open the document when it is first read and again whenever the file changes, staying on the page in view.
+  useEffect(() => {
+    const container = pdfBox.current, bytes = pdfBytes.current
+    if (!pdfRevision) { pdfView.current?.close(); pdfView.current = null; setPdfPage(null); setPdfProblem(null); return }
+    if (!container || !bytes) return
+    pdfBytes.current = null
+    let current = true
+    loadViewer('pdf').then(loaded => {
+      if (!current) return
+      const page = pdfView.current?.page ?? 1
+      pdfView.current?.close()
+      setPdfProblem(null)
+      pdfView.current = loaded.open(container, bytes, {
+        page: (now, total) => { if (current) setPdfPage({ current: now, total }) },
+        found: (now, total) => { if (current) setMatch({ index: Math.max(0, now - 1), count: total }) },
+        failed: reason => { if (current) { setPdfProblem(reason); setPdfPage(null) } },
+      }, page)
+    }, error => { if (current) { setPdfProblem('failed'); setNotice(errorMessage(error)) } })
+    return () => { current = false }
+  }, [pdfRevision])
+  useEffect(() => () => { pdfView.current?.close(); pdfView.current = null }, [])
+  // Pages cannot be laid out while the tab is hidden; do it when the tab is shown.
+  useEffect(() => { if (active) pdfView.current?.shown() }, [active])
   useEffect(() => {
     if (!text || viewer) return
     let current = true
@@ -152,7 +194,8 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   useEffect(() => {
     const root = body.current
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
-    if (!registry) return
+    // A PDF marks its own matches, in its text layer.
+    if (!registry || pdfRevision) return
     registry.delete('file-find'); registry.delete('file-find-current')
     ranges.current = []
     if (!root || !active || !finding || !query || !content) { setMatch({ index: 0, count: 0 }); return }
@@ -161,21 +204,26 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     if (found.length) registry.set('file-find', new Highlight(...found))
     setMatch({ index: 0, count: found.length })
     return () => { registry.delete('file-find'); registry.delete('file-find-current') }
-  }, [active, finding, query, content, rendered])
+  }, [active, finding, query, content, rendered, pdfRevision])
+  useEffect(() => {
+    if (!pdfRevision || pdfProblem) return
+    const timer = setTimeout(() => pdfView.current?.find(finding ? query : ''), 150)
+    return () => clearTimeout(timer)
+  }, [pdfRevision, pdfProblem, finding, query])
   useEffect(() => {
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
     const range = ranges.current[match.index]
-    if (!registry) return
+    if (!registry || pdfRevision) return
     registry.delete('file-find-current')
     if (!range || !finding) return
     registry.set('file-find-current', new Highlight(range))
     range.startContainer.parentElement?.scrollIntoView({ block: 'center', inline: 'nearest' })
-  }, [match, finding])
-  const step = (by: number): void => setMatch(current => current.count ? { ...current, index: (current.index + by + current.count) % current.count } : current)
+  }, [match, finding, pdfRevision])
+  const step = (by: number): void => pdfRevision ? pdfView.current?.find(query, by < 0) : setMatch(current => current.count ? { ...current, index: (current.index + by + current.count) % current.count } : current)
   const openFind = (): void => { setFinding(true); requestAnimationFrame(() => { findInput.current?.focus(); findInput.current?.select() }) }
   const onKeyDown = (event: KeyboardEvent): void => {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f' && (text || finding)) { event.preventDefault(); event.stopPropagation(); openFind() }
-    else if (event.key === 'Escape' && finding) { event.preventDefault(); setFinding(false); body.current?.focus() }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f' && (text || pdf || finding)) { event.preventDefault(); event.stopPropagation(); openFind() }
+    else if (event.key === 'Escape' && finding) { event.preventDefault(); setFinding(false); (pdf ? pdfBox : body).current?.focus() }
   }
 
   const command = (name: 'reveal' | 'open' | 'copy-path'): void => {
@@ -209,20 +257,25 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     <div className="file-panel-header">
       <div className="file-panel-title" title={file?.path ?? path}>
         <strong>{tab.title}</strong>
-        <span>{path}{file ? ` · ${formatFileSize(file.size)}` : ''}</span>
+        <span>{path}{file ? ` · ${formatFileSize(file.size)}` : ''}{pdf && pdfPage ? ` · page ${pdfPage.current} of ${pdfPage.total}` : ''}</span>
       </div>
       <div className="file-panel-actions">
         {text?.kind === 'markdown' && <button type="button" aria-pressed={source} title={source ? 'Show the rendered document' : 'Show the Markdown source'} onClick={() => setSource(value => !value)}>{source ? 'Rendered' : 'Source'}</button>}
         {text && !rendered && <button type="button" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap(value => !value)}>Wrap</button>}
         {file?.kind === 'image' && <button type="button" aria-pressed={actualSize} title={actualSize ? 'Fit the picture to the panel' : 'Show the picture at its own size'} onClick={() => setActualSize(value => !value)}>{actualSize ? 'Fit' : 'Actual size'}</button>}
-        {text && <button type="button" title="Find in this file (Ctrl+F)" onClick={openFind}>Find</button>}
+        {pdf && !pdfProblem && <>
+          <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => pdfView.current?.zoom(-1)}>−</button>
+          <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => pdfView.current?.zoom(1)}>+</button>
+          <button type="button" title="Fit the page to the panel's width" onClick={() => pdfView.current?.zoom(0)}>Fit width</button>
+        </>}
+        {(text || (pdf && !pdfProblem)) && <button type="button" title="Find in this file (Ctrl+F)" onClick={openFind}>Find</button>}
         <button type="button" title="Read the file again" onClick={() => { setNotice(null); void load(true) }}>Reload</button>
         {file && <button type="button" title={file.path} onClick={() => command('copy-path')}>Copy path</button>}
         {file && <button type="button" onClick={() => command('reveal')}>Reveal in folder</button>}
         {file?.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}
       </div>
     </div>
-    {finding && text && <div className="file-find" role="search">
+    {finding && (text || (pdf && !pdfProblem)) && <div className="file-find" role="search">
       <input ref={findInput} aria-label="Find in file" placeholder="Find" value={query} onChange={event => setQuery(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); step(event.shiftKey ? -1 : 1) } }} />
       <span role="status">{query ? match.count ? `${match.index + 1} of ${match.count}${match.count >= 2_000 ? '+' : ''}` : 'No results' : ''}</span>
@@ -242,6 +295,15 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       <p>{CARD_REASON[file.reason]}</p>
       <div><button type="button" onClick={() => command('reveal')}>Reveal in folder</button>
         {file.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}</div>
+    </div>}
+    {pdf && pdfProblem && <div className="file-card">
+      <strong>{pdf.name}</strong>
+      <p>{PDF_PROBLEM[pdfProblem]}</p>
+      <div><button type="button" onClick={() => command('reveal')}>Reveal in folder</button>
+        {pdf.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}</div>
+    </div>}
+    {pdf && <div className="file-pdf" hidden={pdfProblem !== null}>
+      <div className="file-pdf-pages" ref={pdfBox} tabIndex={0} role="region" aria-label={`Pages of ${tab.title}`} />
     </div>}
     {file?.kind === 'image' && <div className={`file-image${actualSize ? ' file-image-actual' : ''}`} tabIndex={0} ref={body}>
       <img src={file.dataUrl} alt={file.name} draggable={false} />
