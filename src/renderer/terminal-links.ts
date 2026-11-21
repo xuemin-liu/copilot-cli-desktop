@@ -15,8 +15,12 @@ const BACKTICK_PATH_PATTERN = /`([^`\r\n]{1,4096})`/g
 // an absolute macOS/Linux path of two or more names ("/usr/bin/git", not a
 // lone "/tmp" or the "/or" of "and/or"), or a bare relative path that has at
 // least one separator and a file extension (the common shape of paths CLI
-// tools print, e.g. "dist\app.js").
-const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?::\d+)?)?|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?|\(\d+(?:,\d+)?\))?/g
+// tools print, e.g. "dist\app.js"). The bare form may only begin where a name
+// begins: without that, on a long run of name characters with no separator
+// (base64, hex, a minified line) the match is retried from every character and
+// each try reads to the end of the run, which takes a second at 40,000
+// characters.
+const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?::\d+)?)?|(?<![\w.-])(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?|\(\d+(?:,\d+)?\))?/g
 // Trailing "path:line" or "path:line:column" location suffix many CLIs print
 // (e.g. tsc, eslint) — the number(s) are not part of the filesystem path, but
 // say where in the file the link points. tsc also prints "path(line,column)".
@@ -38,11 +42,16 @@ function splitLocation(candidate: string): { text: string; line?: number; column
   return { text: candidate.slice(0, match.index), ...(line > 0 ? { line, ...(column > 0 ? { column } : {}) } : {}) }
 }
 
-function countChar(text: string, character: string): number {
-  return text.split(character).length - 1
+/** A ratio, a version or a date written with slashes ("3.5/4.0", "v1.2/3.4", "10/11/2026.5"): every part is a number. */
+function isNumbersOnly(text: string): boolean {
+  return text.split(/[\\/]/).every((part) => /^v?\d[\d.]*$/i.test(part))
 }
 
 function trimTrailingPunctuation(text: string): string {
+  // Counted once and kept up to date while trimming. Counting again for every closing bracket made a link followed by
+  // thousands of brackets take seconds.
+  const count: Record<string, number> = { '(': 0, ')': 0, '[': 0, ']': 0 }
+  for (const char of text) if (char in count) count[char]!++
   let end = text.length
   while (end > 0) {
     const char = text[end - 1]
@@ -52,8 +61,8 @@ function trimTrailingPunctuation(text: string): string {
       // scanned text (e.g. the sentence-parenthesis around a URL, not the
       // URL's own balanced "(mathematics)" or an IPv6 host's "[::1]").
       const opener = char === ')' ? '(' : '['
-      const scope = text.slice(0, end)
-      if (countChar(scope, char) > countChar(scope, opener)) {
+      if (count[char]! > count[opener]!) {
+        count[char]!--
         end--
         continue
       }
@@ -100,6 +109,8 @@ export function scanLineForLinks(line: string): DetectedLink[] {
     const start = match.index
     const end = start + text.length
     if (text.length < 3) continue
+    // Only the bare form can be made of numbers alone; a path with a root (C:\, ./, /usr) is a path whatever its names.
+    if (!EXPLICIT_PATH_PREFIX.test(text) && isNumbersOnly(text)) continue
     pushIfClear(links, { type: 'path', text, start, end, ...location })
   }
   return links.sort((left, right) => left.start - right.start)
@@ -129,19 +140,23 @@ export interface LineCellRef {
  * for every character in the resulting string, which buffer cell it came
  * from — so a string-index match can be mapped back to screen coordinates.
  */
+export const LOGICAL_LINE_ROWS = 200
+
 export function buildLogicalLine(
   getLine: (row: number) => BufferLineLike | undefined,
   cols: number,
   clickedRow: number,
 ): { text: string; cells: LineCellRef[] } {
+  // At most this many rows are read, with the row asked about inside them. Counting from the first row of the line
+  // instead left every row past the 200th without links, on a line that long.
   let firstRow = clickedRow
-  while (firstRow > 0 && getLine(firstRow)?.isWrapped) firstRow--
+  while (firstRow > 0 && clickedRow - firstRow < LOGICAL_LINE_ROWS / 2 && getLine(firstRow)?.isWrapped) firstRow--
   let text = ''
   const cells: LineCellRef[] = []
   let row = firstRow
   // A bound, not an expected depth: guards against an unexpected isWrapped
   // cycle turning this into an infinite loop.
-  for (let guard = 0; guard < 200; guard++) {
+  for (let guard = 0; guard < LOGICAL_LINE_ROWS; guard++) {
     const line = getLine(row)
     if (!line) break
     for (let column = 0; column < cols; column++) {

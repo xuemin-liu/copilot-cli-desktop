@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  LOGICAL_LINE_ROWS,
   buildLogicalLine,
   scanLineForLinks,
   type BufferLineLike,
@@ -182,4 +183,54 @@ test('buildLogicalLine maps a wide character inside a link to its full display w
   assert.deepEqual(logical.cells[link!.start], { row: 0, column: 0, width: 1 })
   assert.deepEqual(logical.cells[link!.end - 1], { row: 0, column: 13, width: 1 })
   assert.deepEqual(logical.cells[3], { row: 0, column: 3, width: 2 })
+})
+
+test('ratios, versions and dates written with slashes are not paths; a path with numbers in it still is', () => {
+  const texts = (line: string): string[] => scanLineForLinks(line).map((link) => link.text)
+  for (const line of ['score 3.5/4.0 done', 'from v1.2/3.4 up', 'due 10/11/2026.5', 'ratio 16/9.0', '1.0/2.0/3.0']) assert.deepEqual(texts(line), [], line)
+  assert.deepEqual(texts('see 2024/report.txt'), ['2024/report.txt'])
+  assert.deepEqual(texts('lib/libfoo.so.1 loaded'), ['lib/libfoo.so.1'])
+  assert.deepEqual(texts('build/1.2/app.js:3'), ['build/1.2/app.js'])
+  assert.deepEqual(texts('./3.5/4.0'), ['./3.5/4.0'], 'an explicit relative path is a path whatever its names')
+  assert.deepEqual(texts('C:\\1\\2.0'), ['C:\\1\\2.0'])
+})
+
+test('a bare path is still found after punctuation, and not from the middle of a name', () => {
+  const texts = (line: string): string[] => scanLineForLinks(line).map((link) => link.text)
+  assert.deepEqual(texts('--config=dist/app.js'), ['dist/app.js'])
+  assert.deepEqual(texts('(src/main/main.ts:12)'), ['src/main/main.ts'])
+  assert.deepEqual(texts('error in src\\renderer\\App.tsx(4,2): bad'), ['src\\renderer\\App.tsx'])
+  assert.deepEqual(texts('@scope/pkg/index.js'), ['scope/pkg/index.js'])
+})
+
+test('scanning a long line with no separators, or a link followed by many brackets, stays fast', () => {
+  const timed = (line: string): number => { const started = performance.now(); scanLineForLinks(line); return performance.now() - started }
+  // 200,000 characters: about a quarter of a minute before, when every character restarted a scan to the end of the run.
+  for (const run of ['a'.repeat(200_000), 'A1b2C3d4'.repeat(25_000), `${'f'.repeat(100_000)} ${'0'.repeat(100_000)}`]) {
+    const elapsed = Math.min(timed(run), timed(run))
+    assert.ok(elapsed < 500, `${run.slice(0, 8)}… took ${Math.round(elapsed)} ms`)
+  }
+  const brackets = `https://example.com/a${')'.repeat(100_000)}`
+  const elapsed = Math.min(timed(brackets), timed(brackets))
+  assert.ok(elapsed < 500, `brackets took ${Math.round(elapsed)} ms`)
+  assert.equal(scanLineForLinks(brackets)[0]?.text, 'https://example.com/a')
+  assert.equal(scanLineForLinks('https://en.wikipedia.org/wiki/Function_(mathematics)).')[0]?.text, 'https://en.wikipedia.org/wiki/Function_(mathematics)')
+})
+
+test('on a line wrapped over more rows than are read, the rows around the one asked about are the ones read', () => {
+  const cols = 10
+  const rows = 500
+  // Row r holds its own number, so the text shows which rows were read. Every row but the first continues the line.
+  const getLine = (row: number): BufferLineLike | undefined => row < 0 || row >= rows ? undefined : {
+    isWrapped: row > 0,
+    getCell: (column) => ({ getChars: () => String(row).padStart(cols, '0')[column]!, getWidth: () => 1 }),
+  }
+  const near = buildLogicalLine(getLine, cols, 3)
+  assert.equal(near.cells[0]?.row, 0)
+  assert.equal(near.cells.at(-1)?.row, LOGICAL_LINE_ROWS - 1)
+  const far = buildLogicalLine(getLine, cols, 350)
+  assert.equal(far.cells.length, LOGICAL_LINE_ROWS * cols)
+  assert.equal(far.cells[0]?.row, 350 - LOGICAL_LINE_ROWS / 2)
+  assert.ok(far.cells.some((cell) => cell.row === 350), 'the row asked about is read')
+  assert.equal(far.cells.at(-1)?.row, 350 + LOGICAL_LINE_ROWS / 2 - 1)
 })
