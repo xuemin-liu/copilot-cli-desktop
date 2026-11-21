@@ -6,6 +6,7 @@ import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import { GitTrustStore, configItemsHash, isBenignConfigItem, parseConfigScan, scanRepoConfig } from './git-trust.js'
 import { statusArgs } from './git-commands.js'
+import type { GitRunOptions, GitRunner } from './git-runner.js'
 import { caseInsensitivePaths, pathKey } from './host-path.js'
 
 /** A repository folder in this platform's spelling, and the same text in lower case. */
@@ -126,6 +127,65 @@ test('an included file is read only after its include line is accepted, and its 
   assert.equal(again.includes, 'held')
   assert.deepEqual([...new Set(again.items.map(item => item.key))], ['include.path'])
   assert.equal(await new GitTrustStore(join(fixture.root, 'includes-trust.json')).areIncludesApproved(repo, held.ownHash), true, 'survives a restart')
+})
+
+test('before its include line is accepted, an included file is never opened: one Git cannot even parse changes nothing', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('unparsable', (d) => {
+    fixture.plain(d, 'config', 'include.path', '../bad.gitconfig')
+    writeFileSync(join(d, 'bad.gitconfig'), '[broken syntax\n')
+  })
+  // Control: any Git command started in the repository opens the file, whatever it was asked.
+  assert.throws(() => fixture.plain(repo, 'config', '--local', '--no-includes', '--get-regexp', 'include'))
+  const store = new GitTrustStore(join(fixture.root, 'unparsable-trust.json'))
+  const held = await scanRepoConfig(fixture.runner, repo, undefined, store)
+  assert.equal(held.includes, 'held')
+  assert.deepEqual(held.items, [{ key: 'include.path', value: '../bad.gitconfig' }])
+  // Once accepted the file is opened, and a scan that cannot be completed is an error, never "nothing to review".
+  await store.approveIncludes(repo, held.ownHash)
+  await assert.rejects(scanRepoConfig(fixture.runner, repo, undefined, store), /bad config/)
+})
+
+test('a scan that was cut short or failed is an error, not an empty review', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('incomplete', (d) => {
+    for (let index = 0; index < 20; index++) fixture.plain(d, 'config', `filter.f${index}.clean`, `program-${index}`)
+  })
+  assert.equal((await scanRepoConfig(fixture.runner, repo)).items.length, 20)
+  const limited = (limit: number): GitRunner => ({ run: (options: GitRunOptions) => fixture.runner.run({ ...options, maxStdoutBytes: limit }) } as unknown as GitRunner)
+  await assert.rejects(scanRepoConfig(limited(200), repo), /too large to review/)
+  const slow = { run: (options: GitRunOptions) => fixture.runner.run({ ...options, timeoutMs: 1 }) } as unknown as GitRunner
+  await assert.rejects(scanRepoConfig(slow, repo), /took too long|cancelled|Could not read/)
+  const aborted = new AbortController(); aborted.abort()
+  await assert.rejects(scanRepoConfig(fixture.runner, repo, aborted.signal))
+})
+
+test('the worktree config is reviewed when Git reads it, and one that cannot be read is an error', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('worktree-config')
+  const file = join(repo, '.git', 'config.worktree')
+  writeFileSync(file, '[core]\n\tsshCommand = from-worktree-config\n')
+  assert.deepEqual((await scanRepoConfig(fixture.runner, repo)).items, [], 'Git ignores the file while the extension is off, and so does the review')
+  fixture.plain(repo, 'config', 'extensions.worktreeConfig', 'true')
+  assert.deepEqual((await scanRepoConfig(fixture.runner, repo)).items, [{ key: 'core.sshcommand', value: 'from-worktree-config' }])
+  // An include line in the worktree config is held like one in the shared config.
+  writeFileSync(file, '[include]\n\tpath = ../../elsewhere.gitconfig\n')
+  assert.equal((await scanRepoConfig(fixture.runner, repo)).includes, 'held')
+  writeFileSync(file, '[broken syntax\n')
+  await assert.rejects(scanRepoConfig(fixture.runner, repo), /bad config/)
+})
+
+test('a linked worktree is reviewed by the config of the repository it belongs to', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('main-tree', (d) => fixture.plain(d, 'config', 'core.sshCommand', 'shared'))
+  const linked = join(fixture.root, 'linked-tree')
+  fixture.plain(repo, 'worktree', 'add', '-q', linked, '-b', 'side')
+  assert.deepEqual((await scanRepoConfig(fixture.runner, linked)).items, [{ key: 'core.sshcommand', value: 'shared' }])
+  await assert.rejects(scanRepoConfig(fixture.runner, fixture.root), /Could not find the repository config/)
 })
 
 test('the scan ignores the user\'s own global config', { skip }, async (t) => {

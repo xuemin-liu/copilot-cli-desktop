@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { pathKey } from './host-path.js'
 import { writeFileAtomic } from './atomic-file.js'
-import type { GitRunner } from './git-runner.js'
+import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
+import { repoConfigFiles } from './git-discovery.js'
 import { splitNul } from './git-parse.js'
 import type { GitReviewItem } from './git-types.js'
 
@@ -75,18 +77,28 @@ export function configItemsHash(items: readonly GitReviewItem[]): string {
   return createHash('sha256').update(JSON.stringify(tuples)).digest('hex')
 }
 
-/** One pass over the repository's own config (local and worktree scope), never global or system. */
-async function readReviewItems(runner: GitRunner, repoRoot: string, followIncludes: boolean, signal?: AbortSignal): Promise<GitReviewItem[]> {
-  const found: GitReviewItem[] = []
-  for (const scope of ['--local', '--worktree']) {
-    const result = await runner.run({
-      cwd: repoRoot, signal,
-      args: ['config', scope, ...(followIncludes ? ['--includes'] : []), '--show-origin', '-z', '--get-regexp', REVIEW_KEY_PATTERN],
-    })
-    // Exit 1 means no match. A failure in `--worktree` is expected when worktree config is not in use.
-    if (result.exitCode === 0) found.push(...parseConfigScan(result.stdout.toString('utf8')))
-    else if (scope === '--local' && result.exitCode !== 1) throw new Error(result.cancelled ? 'cancelled' : result.stderr.trim().split(/\r?\n/, 1)[0] || 'Could not read the repository config')
-  }
+/** The first line of what Git said, for an error a person will read. */
+function scanFailure(result: GitRunResult, what: string): Error {
+  if (result.cancelled) return new Error('cancelled')
+  if (result.timedOut) return new Error(`Reading ${what} took too long`)
+  if (result.stdoutTruncated) return new Error(`${what} is too large to review`)
+  return new Error(result.stderr.trim().split(/\r?\n/, 1)[0] || `Could not read ${what}`)
+}
+
+/**
+ * The output of one `git config` query, or null when it matched nothing (exit 1). Anything else is an error: a scan
+ * that was cut short, timed out or failed has not shown that the config is harmless, so it must not count as "nothing
+ * to review".
+ */
+async function query(runner: GitRunner, options: GitRunOptions, what: string): Promise<string | null> {
+  const result = await runner.run(options)
+  if (result.cancelled || result.timedOut || result.stdoutTruncated) throw scanFailure(result, what)
+  if (result.exitCode === 0) return result.stdout.toString('utf8')
+  if (result.exitCode === 1) return null
+  throw scanFailure(result, what)
+}
+
+function reviewable(found: GitReviewItem[]): GitReviewItem[] {
   const seen = new Set<string>()
   return found.filter(item => {
     const id = `${item.key}\0${item.value}`
@@ -97,22 +109,49 @@ async function readReviewItems(runner: GitRunner, repoRoot: string, followInclud
 }
 
 /**
- * What in a repository's config needs the user's review.
+ * What in a repository's config needs the user's review. Only the repository's own config (local and worktree scope) is
+ * read, never global or system.
  *
- * `git config --local` does not read the files an `include.path` names, but every other git command does. So the
- * settings those files bring in are part of what is reviewed and hashed: a change to an included file is a new
- * question. An include can also name a file on another computer, and reading it is itself a network request, so the
- * files are read only after the user has accepted those exact include lines. Until then the scan is `held`, and its
- * hash matches nothing that was trusted before.
+ * `git config --local` does not print what the files named by `include.path` hold, but every other git command uses
+ * them. So the settings those files bring in are part of what is reviewed and hashed: a change to an included file is
+ * a new question.
+ *
+ * An include can also name a file on another computer, and opening it is itself a network request. Any git command
+ * started inside the repository opens the included files while it starts up, whatever its options say. So the first
+ * pass does not run Git in the repository at all: it reads the two config files by path (`--file`, `--no-includes`),
+ * from a folder that is not a repository. Only when that pass shows no include lines, or the user has accepted those
+ * exact lines, is Git run in the repository. Until then the scan is `held`, and its hash matches nothing that was
+ * trusted before.
  */
 export async function scanRepoConfig(runner: GitRunner, repoRoot: string, signal?: AbortSignal, approvals?: IncludeApprovals): Promise<RepoConfigScan> {
-  const own = await readReviewItems(runner, repoRoot, false, signal)
+  const files = await repoConfigFiles(repoRoot)
+  if (!files) throw new Error('Could not find the repository config')
+  const outside = tmpdir()
+  const fromFile = (file: string, args: readonly string[], what: string): Promise<string | null> => query(runner, {
+    cwd: outside, signal, args: ['config', '--file', file, '--no-includes', ...args],
+    // Keeps Git from finding a repository above the folder it runs in.
+    environment: { extra: { GIT_CEILING_DIRECTORIES: outside } },
+  }, what)
+  const review = ['--show-origin', '-z', '--get-regexp', REVIEW_KEY_PATTERN]
+
+  const found = parseConfigScan(await fromFile(files.local, review, 'the repository config') ?? '')
+  // Git reads `config.worktree` only with this extension on; it is set in the shared config.
+  const worktreeConfig = (await fromFile(files.local, ['--type=bool', '--get', 'extensions.worktreeConfig'], 'the repository config'))?.trim() === 'true'
+    && await stat(files.worktree).then(info => info.isFile(), () => false)
+  if (worktreeConfig) found.push(...parseConfigScan(await fromFile(files.worktree, review, 'the worktree config') ?? ''))
+  const own = reviewable(found)
   const ownHash = configItemsHash(own)
   if (!own.some(isInclude)) return { items: own, hash: ownHash, includes: 'none', ownHash }
   if (!approvals || !(await approvals.areIncludesApproved(repoRoot, ownHash))) {
     return { items: own, hash: createHash('sha256').update(`includes-held\0${ownHash}`).digest('hex'), includes: 'held', ownHash }
   }
-  const items = await readReviewItems(runner, repoRoot, true, signal)
+  // The include lines are accepted, so Git may open what they name. Run in the repository, so that conditions such as
+  // `includeIf "gitdir:..."` are decided as they are for every other command there.
+  const followed: GitReviewItem[] = []
+  for (const scope of worktreeConfig ? ['--local', '--worktree'] : ['--local']) {
+    followed.push(...parseConfigScan(await query(runner, { cwd: repoRoot, signal, args: ['config', scope, '--includes', ...review] }, 'the repository config and the files it includes') ?? ''))
+  }
+  const items = reviewable(followed)
   return { items, hash: configItemsHash(items), includes: 'followed', ownHash }
 }
 
