@@ -38,7 +38,9 @@ interface Harness {
   /** Which window the system reports as focused: the main one, or none. */
   focusMainWindow(focused: boolean): void
   quitCalls(): number
-  windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
+  windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; loads: number; close(): void; emit(name: string): void; webContents: { emit(name: string, ...args: unknown[]): void } }
+  /** Wait for every application log line written so far. */
+  flushAppLog(): Promise<void>
   requestIn(tabId: string, name: string, ...args: unknown[]): Promise<any>
   configureMigration(busy: boolean, exclusive: boolean): void
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
@@ -162,7 +164,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           setApplicationMenu(menu) { applicationMenu = menu; for (const window of allWindows) if (!window.destroyed) window.setMenu(menu); },
         };
         export const BrowserWindow = class extends EventEmitter {
-          destroyed = false; focused = 0; title = ''; messages = [];
+          destroyed = false; focused = 0; title = ''; messages = []; loads = 0;
           constructor(options = {}) { super(); this.title = options.title || ''; allWindows.push(this); }
           static focusedWindow = null; static failLoad = null;
           static getFocusedWindow() { return this.focusedWindow; }
@@ -178,6 +180,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           show() {} focus() { this.focused++; this.emit('focus'); } restore() {} flashFrame() {}
           async loadFile(path) {
             if (BrowserWindow.failLoad?.(path)) throw new Error('page load failed');
+            this.loads++;
             this.url = (await import('node:url')).pathToFileURL(path).href;
             let prevented = false;
             this.emit('page-title-updated', { preventDefault() { prevented = true; } }, 'Copilot CLI Desktop');
@@ -282,6 +285,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const lifecycleTest = {
           shellCalls: shell.calls,
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
+          async flushAppLog() { await Promise.allSettled(diagnosticWrites); await appLogWriteQueue; },
           async startTestDesktopControl() {
             await startDesktopControl();
             desktopControl.native.desktopAvailable = async () => true;
@@ -1361,6 +1365,48 @@ test('Ctrl/Cmd+W and +T as menu accelerators in the main window are handed to th
   item('New Session Tab').click!({}, undefined, { triggeredByAccelerator: true })
   assert.equal(newSessions(), 2)
   assert.deepEqual(requests(), ['w', 't'])
+}))
+
+test('a main window whose page process died loads the page again, a bounded number of times, then asks', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const tab = (await harness.createMain()).activeTabId!
+  const window = harness.windowFor()
+  const settle = async (): Promise<void> => { for (let turn = 0; turn < 5; turn++) await new Promise(resolve => setImmediate(resolve)) }
+  await settle()
+  const loaded = window.loads
+  const asked = harness.answerMessageBoxes(1)
+  for (let death = 1; death <= 3; death++) {
+    window.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 })
+    await settle()
+    assert.equal(window.loads, loaded + death, 'the page is loaded again')
+  }
+  assert.equal(asked.length, 0)
+  // The fourth death within a minute is a page that cannot stay up: no reload until the person asks for one.
+  window.webContents.emit('render-process-gone', {}, { reason: 'oom', exitCode: 6 })
+  await settle()
+  assert.equal(window.loads, loaded + 3)
+  assert.equal(asked.length, 1)
+  assert.match((asked[0] as { detail: string }).detail, /sessions are still running/)
+  harness.answerMessageBoxes(0)
+  window.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 })
+  await settle()
+  assert.equal(window.loads, loaded + 4, 'Reload was chosen')
+  // A page that closed normally, and a window that only stopped responding, are logged and left alone.
+  window.webContents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 0 })
+  window.emit('unresponsive')
+  window.emit('responsive')
+  await settle()
+  assert.equal(window.loads, loaded + 4)
+  assert.equal(window.destroyed, false)
+  assert.ok((await harness.request('desktop:get-state') as DesktopState).tabs.some(entry => entry.id === tab), 'the session outlives its page')
+  await harness.flushAppLog()
+  const log = await readFile(join(directory, 'logs', 'app.log'), 'utf8')
+  assert.equal(log.match(/Main window page process ended \(reason=crashed exitCode=5\); loading the page again/g)?.length, 3)
+  assert.match(log, /Main window page process ended \(reason=oom exitCode=6\); it keeps ending/)
+  assert.match(log, /Main window page process ended: reason=clean-exit exitCode=0/)
+  assert.match(log, /Main window stopped responding/)
+  assert.match(log, /Main window is responding again/)
 }))
 
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {

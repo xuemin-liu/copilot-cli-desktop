@@ -27,6 +27,7 @@
     "clipboard:smoke": "npm run build && node scripts/electron-side-chat-check.mjs --clipboard-switch",
     "links:check": "node scripts/terminal-links-check.mjs",
     "dialog:check": "npm run build && node scripts/add-workspace-dialog-check.mjs",
+    "window-recovery:check": "npm run build && node scripts/window-recovery-check.mjs",
     "file-viewer:check": "npm run build && node scripts/terminal-links-check.mjs && node scripts/file-viewer-app-check.mjs",
     "stopped-notice:check": "npm run build && node scripts/stopped-notice-check.mjs && node scripts/electron-side-chat-check.mjs --stopped-notice",
     "sidebar:check": "node scripts/sidebar-projects-check.mjs",
