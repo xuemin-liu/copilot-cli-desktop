@@ -14,6 +14,8 @@ export interface DesktopWindowFacts {
   identity: DesktopAppIdentity | null
   className: string
   elevated: boolean | null
+  /** The window's process, when known. */
+  pid?: number | undefined
 }
 
 export type DesktopBlockReason =
@@ -91,8 +93,11 @@ function packageFamily(identity: DesktopAppIdentity): string | null {
 }
 
 /** Why a window may never be captured or controlled, or null when the user may approve it. */
-export function desktopBlockReason(facts: DesktopWindowFacts, ownProgramPath: string): DesktopBlockReason | null {
+export function desktopBlockReason(facts: DesktopWindowFacts, ownProgramPath: string, ownPid?: number): DesktopBlockReason | null {
   const { identity } = facts
+  // Every window, dialog and approval prompt of this app belongs to this process. The path below can be spelled another
+  // way than Windows reports it (a junction, a substituted drive, a short name); the process id cannot.
+  if (ownPid !== undefined && facts.pid === ownPid) return 'self'
   if (!identity) return 'unidentified'
   if (identity.kind === 'program' && identity.path.toLowerCase() === ownProgramPath.toLowerCase()) return 'self'
   if (TERMINAL_CLASSES.has(facts.className.toLowerCase())) return 'terminal'
@@ -181,7 +186,9 @@ export function parseDesktopChord(text: string, reservedAccelerators: string[]):
   if (vk === undefined) throw new Error(`Unknown key: ${keyName}`)
   const chord = chordText(modifiers, normalizedKey)
   const reserved = new Set(reservedAccelerators.map(acceleratorChord))
-  if (REFUSED_CHORDS.has(chord)) throw new Error(`${chord} is refused: it switches, locks or opens parts of Windows.`)
+  // Alt with Tab or Escape switches windows whatever else is held (Shift only reverses the direction).
+  const switcher = modifiers.includes('alt') && (normalizedKey === 'tab' || normalizedKey === 'escape')
+  if (switcher || REFUSED_CHORDS.has(chord)) throw new Error(`${chord} is refused: it switches, locks or opens parts of Windows.`)
   if (reserved.has(chord)) throw new Error(`${chord} is one of Copilot CLI Desktop’s own shortcuts, so it is refused.`)
   const order: Array<'ctrl' | 'alt' | 'shift'> = ['ctrl', 'alt', 'shift']
   const sorted = order.filter(name => modifiers.includes(name))
@@ -247,6 +254,71 @@ export function intersectRect(a: DesktopRect, b: DesktopRect): DesktopRect | nul
   const right = Math.min(a.x + a.width, b.x + b.width)
   const bottom = Math.min(a.y + a.height, b.y + b.height)
   return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null
+}
+
+/** What is left of `rect` after removing every rectangle in `holes`, as rectangles that do not overlap. */
+export function subtractRects(rect: DesktopRect, holes: readonly DesktopRect[]): DesktopRect[] {
+  let pieces: DesktopRect[] = [rect]
+  for (const hole of holes) {
+    const next: DesktopRect[] = []
+    for (const piece of pieces) {
+      const cut = intersectRect(piece, hole)
+      if (!cut) { next.push(piece); continue }
+      const right = piece.x + piece.width, bottom = piece.y + piece.height, cutRight = cut.x + cut.width, cutBottom = cut.y + cut.height
+      if (cut.y > piece.y) next.push({ x: piece.x, y: piece.y, width: piece.width, height: cut.y - piece.y })
+      if (cutBottom < bottom) next.push({ x: piece.x, y: cutBottom, width: piece.width, height: bottom - cutBottom })
+      if (cut.x > piece.x) next.push({ x: piece.x, y: cut.y, width: cut.x - piece.x, height: cut.height })
+      if (cutRight < right) next.push({ x: cutRight, y: cut.y, width: right - cutRight, height: cut.height })
+    }
+    pieces = next
+    if (pieces.length === 0) break
+  }
+  return pieces
+}
+
+/** Windows 11 rounds a window's corners; what is behind shows there. Generous, so it holds at every display scale. */
+export const DESKTOP_CORNER_SIZE = 24
+
+/** The part of an opaque window's frame that certainly hides what is behind it: the frame without its four corners. */
+export function opaqueCover(bounds: DesktopRect, corner = DESKTOP_CORNER_SIZE): DesktopRect[] {
+  if (bounds.width <= corner * 2 || bounds.height <= corner * 2) return []
+  return [
+    { x: bounds.x + corner, y: bounds.y, width: bounds.width - corner * 2, height: bounds.height },
+    { x: bounds.x, y: bounds.y + corner, width: bounds.width, height: bounds.height - corner * 2 },
+  ]
+}
+
+export interface DesktopMaskWindow { bounds: DesktopRect; minimized: boolean; clickThrough: boolean; opaque?: boolean | undefined }
+
+/** Past this many pieces the screen is too fragmented to be worth it: every blocked window is painted whole. */
+const MAX_MASK_RECTS = 1500
+
+/**
+ * The areas of a full-screen capture to paint over: each blocked window, where it can be seen. `windows` is front
+ * first. A blocked window behind another window is hidden only where that window is proven to cover it (`opaque`, and
+ * away from the rounded corners); anywhere that is not proven stays painted, also over a window that is allowed.
+ */
+export function screenMaskRects<W extends DesktopMaskWindow>(windows: readonly W[], blocked: (window: W) => boolean): DesktopRect[] {
+  const masks: DesktopRect[] = []
+  const cover: DesktopRect[] = []
+  for (const window of windows) {
+    if (window.minimized) continue
+    if (!window.clickThrough && blocked(window)) masks.push(...subtractRects(window.bounds, cover))
+    if (window.opaque === true && !window.clickThrough) cover.push(...opaqueCover(window.bounds))
+    if (masks.length > MAX_MASK_RECTS) return windows.filter(candidate => !candidate.clickThrough && !candidate.minimized && blocked(candidate)).map(candidate => candidate.bounds)
+  }
+  return masks
+}
+
+/** The parts of the painted-over areas that fall inside a patch of a frame, in a form two captures can be compared by. */
+export function maskInPatch(frame: DesktopFrameGeometry, blank: readonly DesktopRect[], patch: DesktopRect): string {
+  const inside = blank.map(rect => intersectRect(screenRectToFrame(frame, rect), patch)).filter((rect): rect is DesktopRect => rect !== null)
+  // Which pixels are painted, not how the area was cut into rectangles: two cuts of the same area must compare equal.
+  const painted = new Uint8Array(patch.width * patch.height)
+  for (const rect of inside) {
+    for (let y = rect.y - patch.y; y < rect.y - patch.y + rect.height; y++) painted.fill(1, y * patch.width + rect.x - patch.x, y * patch.width + rect.x - patch.x + rect.width)
+  }
+  return Buffer.from(painted).toString('base64')
 }
 
 export const DESKTOP_PATCH_SIZE = 64
