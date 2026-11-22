@@ -1013,7 +1013,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
           const review=reviewerTasks.get(task.id)
           if(!review||!samePath(resolve(folder),resolve(review.area.checkout)))throw new Error('The review session is not in its own checkout')
           await verifyReviewerPolicy(review.area,review.policy)
-          const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number)
+          const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number,pr.base)
           const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
           if(grant)followups?.markCheckedOut(grant.id,head,pr.base)
           return

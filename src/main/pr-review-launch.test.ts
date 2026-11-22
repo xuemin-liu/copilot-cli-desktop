@@ -2,11 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { createGitFixture } from './fixtures/git-fixture.js'
+import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+
+let fixtureRef: GitFixture | null = null
+/** The upstream's first commit: a base every clone already holds. */
+const baseOf = (upstream: string): string => fixtureRef!.plain(upstream, 'rev-list', '--max-parents=0', 'HEAD').trim().split('\n')[0]!
 
 test('the reviewer clone holds the PR head detached, keeps no remote, runs no hook, and moves only while clean', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     // "GitHub": a repository whose refs/pull/7/head is the PR.
     const upstream = f.repo('upstream')
@@ -30,15 +35,15 @@ test('the reviewer clone holds the PR head detached, keeps no remote, runs no ho
     writeFileSync(join(upstream, 'a.txt'), 'second\n'); f.plain(upstream, 'commit', '-qam', 'second')
     const second = f.plain(upstream, 'rev-parse', 'HEAD').trim()
     f.plain(upstream, 'update-ref', 'refs/pull/7/head', second)
-    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, 'c'.repeat(40), 7), /moved the pull request again/)
+    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, 'c'.repeat(40), 7, baseOf(upstream)), /moved the pull request again/)
     writeFileSync(join(area.checkout, 'scratch.txt'), 'reviewer notes')
-    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, second, 7), /has changes/)
+    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, second, 7, baseOf(upstream)), /has changes/)
     f.plain(area.checkout, 'clean', '-fq')
-    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 7), second)
+    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 7, baseOf(upstream)), second)
     assert.equal(readFileSync(join(area.checkout, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'second\n')
-    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 7), second, 'already there')
+    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 7, baseOf(upstream)), second, 'already there')
     writeFileSync(join(area.checkout, 'a.txt'), 'reviewer edit\n')
-    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, second, 7), /has changes/, 'dirty at the same head too')
+    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, second, 7, baseOf(upstream)), /has changes/, 'dirty at the same head too')
     f.plain(area.checkout, 'checkout', '--', 'a.txt')
     await assert.rejects(cloneForReview(f.runner, project, upstream, area, { head: 'not-a-sha' }, 7), /Invalid/)
 
@@ -49,6 +54,7 @@ test('the reviewer clone holds the PR head detached, keeps no remote, runs no ho
 
 test('the project must be a clone of the PR repository', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     const project = f.repo('project')
     await assert.rejects(projectOrigin(f.runner, project, 'owner/repo'))
@@ -60,6 +66,7 @@ test('the project must be a clone of the PR repository', async (t) => {
 
 test('the reviewer policy lets the sandbox read the helper folder and is verified as written', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     const area = await createReviewerArea(join(f.root, 'reviewers'))
     const policy = await writeReviewerPolicy(area, { userHome: join(f.root, 'user'), personCopilotHome: join(f.root, 'user', '.copilot'), desktopData: join(f.root, 'desktop'), appData: null, localAppData: null })
@@ -79,6 +86,7 @@ test('the first review prompt names the head, the helper and the rules', () => {
 
 test('the reviewer clone owns its objects and keeps its Git directory outside the checkout', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     const { readdirSync, statSync, readFileSync: read } = await import('node:fs')
     const upstream = f.repo('upstream')
@@ -98,6 +106,7 @@ test('the reviewer clone owns its objects and keeps its Git directory outside th
 
 test('leftover reviewer folders older than a week are removed; others and anything not ours stay', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     const { mkdirSync: mk, utimesSync, existsSync: exists } = await import('node:fs')
     const { pruneReviewerAreas } = await import('./pr-review-launch.js')
@@ -114,6 +123,7 @@ test('leftover reviewer folders older than a week are removed; others and anythi
 
 test('a rewritten .git pointer and a planted filter in the checkout are never followed by the desktop', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
   try {
     const upstream = f.repo('upstream')
     writeFileSync(join(upstream, '.gitattributes'), 'a.txt filter=probe\n'); f.plain(upstream, 'add', '.'); f.plain(upstream, 'commit', '-qm', 'attributes')
@@ -135,7 +145,30 @@ test('a rewritten .git pointer and a planted filter in the checkout are never fo
     f.plain(upstream, 'update-ref', 'refs/pull/5/head', second)
     // The rewritten pointer is an untracked change only for the desktop's own Git directory, which stays clean.
     assert.deepEqual(await reviewCheckoutState(f.runner, area), { head: first, clean: true })
-    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 5), second)
+    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, second, 5, baseOf(upstream)), second)
     assert.equal(existsSync(join(f.root, 'filter-ran')), false, 'the planted filter never ran')
+  } finally { f.cleanup() }
+})
+
+test('a base that moved while the head stayed is fetched before the reviewer is told about it', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  fixtureRef = f
+  try {
+    const upstream = f.repo('upstream')
+    f.plain(upstream, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+    const base = f.plain(upstream, 'rev-parse', 'HEAD').trim()
+    f.plain(upstream, 'checkout', '-q', '-b', 'feature'); writeFileSync(join(upstream, 'b.txt'), 'pr\n'); f.plain(upstream, 'add', '.'); f.plain(upstream, 'commit', '-qm', 'pr')
+    const head = f.plain(upstream, 'rev-parse', 'HEAD').trim()
+    f.plain(upstream, 'update-ref', 'refs/pull/9/head', head)
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, upstream, upstream, area, { head, base }, 9)
+    // The base branch moves on GitHub; the PR's head does not.
+    f.plain(upstream, 'checkout', '-q', '-'); writeFileSync(join(upstream, 'c.txt'), 'base moved\n'); f.plain(upstream, 'add', '.'); f.plain(upstream, 'commit', '-qm', 'base')
+    const newBase = f.plain(upstream, 'rev-parse', 'HEAD').trim()
+    const has = (sha: string): boolean => { try { f.plain(area.root, '--git-dir', area.gitdir, 'cat-file', '-e', `${sha}^{commit}`); return true } catch { return false } }
+    assert.equal(has(newBase), false, 'the clone does not have the new base yet')
+    assert.equal(await refreshReviewCheckout(f.runner, area, upstream, head, 9, newBase), head)
+    assert.equal(has(newBase), true, 'the new base is in the clone before the turn')
+    await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, head, 9, 'e'.repeat(40)), /base commit could not be fetched/)
   } finally { f.cleanup() }
 })

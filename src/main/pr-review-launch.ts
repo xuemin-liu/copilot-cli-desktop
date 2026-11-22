@@ -71,11 +71,12 @@ const reviewGit = (area: Pick<ReviewerArea, 'gitdir' | 'checkout'>, args: readon
  * Clones the project into the reviewer folder and checks the PR's head out, detached. The clone keeps no remote, so
  * nothing in it can push; later updates fetch from `origin` explicitly.
  */
-export async function cloneForReview(runner: GitRunner, project: string, origin: string, area: ReviewerArea, snapshot: Pick<GithubSnapshot, 'head'>, number: number): Promise<void> {
+export async function cloneForReview(runner: GitRunner, project: string, origin: string, area: ReviewerArea, snapshot: Pick<GithubSnapshot, 'head'> & { base?: string }, number: number): Promise<void> {
   if (!SHA.test(snapshot.head) || !Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request revision')
   await git(runner, area.root, ['clone', '--quiet', '--no-checkout', '--no-local', `--separate-git-dir=${area.gitdir}`, '--', project, area.checkout])
   await git(runner, area.root, reviewGit(area, ['remote', 'remove', 'origin']))
   await fetchHead(runner, area, origin, snapshot.head, number)
+  if (snapshot.base) await ensureCommit(runner, area, origin, snapshot.base)
   // A --no-checkout clone has an empty index, which a plain checkout would carry over as staged deletions. Nothing of
   // the reviewer's is in a fresh clone yet, so its first checkout is forced; later moves require a clean checkout.
   await git(runner, area.root, reviewGit(area, ['checkout', '--quiet', '--force', '--detach', snapshot.head]))
@@ -91,18 +92,29 @@ async function fetchHead(runner: GitRunner, area: Pick<ReviewerArea, 'gitdir' | 
  * Brings the reviewer's checkout to `head`. It must be clean (the reviewer's own scratch files count), because moving
  * a dirty checkout would mix the reviewer's edits into the next review. Returns the head now checked out.
  */
-export async function refreshReviewCheckout(runner: GitRunner, area: Pick<ReviewerArea, 'gitdir' | 'checkout' | 'root'>, origin: string, head: string, number: number): Promise<string> {
-  if (!SHA.test(head)) throw new Error('Invalid pull request revision')
+export async function refreshReviewCheckout(runner: GitRunner, area: Pick<ReviewerArea, 'gitdir' | 'checkout' | 'root'>, origin: string, head: string, number: number, base: string): Promise<string> {
+  if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
   const current = await git(runner, area.root, reviewGit(area, ['rev-parse', '--verify', '--quiet', 'HEAD']), 'read').catch(() => '')
   if (current) {
     // Also at the same head (an author reply or a base move): a review of local edits is not a review of the PR.
     const status = await git(runner, area.root, reviewGit(area, ['status', '--porcelain=v1', '--untracked-files=normal']), 'read')
     if (status) throw new Error('The reviewer\'s checkout has changes; the person has to look at it before the review continues')
   }
+  // The reviewer diffs the head against the base it is shown, so the base must be in the clone too, also when only
+  // the base moved and the head stayed.
+  await ensureCommit(runner, area, origin, base)
   if (current === head) return head
   await fetchHead(runner, area, origin, head, number)
   await git(runner, area.root, reviewGit(area, ['checkout', '--quiet', '--detach', head]))
   return head
+}
+
+/** A commit the clone must hold: fetched by its id from the PR's repository when missing, then checked. */
+async function ensureCommit(runner: GitRunner, area: Pick<ReviewerArea, 'gitdir' | 'checkout' | 'root'>, origin: string, sha: string): Promise<void> {
+  const present = async (): Promise<boolean> => git(runner, area.root, reviewGit(area, ['cat-file', '-e', `${sha}^{commit}`]), 'read').then(() => true, () => false)
+  if (await present()) return
+  await git(runner, area.root, reviewGit(area, ['fetch', '--quiet', '--no-tags', '--', origin, sha]), 'network').catch(() => {})
+  if (!await present()) throw new Error('The pull request\'s base commit could not be fetched; the next check tries again')
 }
 
 /** What the reviewer checkout points at now, checked to be clean. */
