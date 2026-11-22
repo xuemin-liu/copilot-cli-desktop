@@ -141,3 +141,14 @@ test('a refusal right after a long turn starts its own clock, so a normal delive
   o.box.pump()
   assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 60_000, behindTurn: false }])
 })
+
+test('hasDelivery reports queued and in-turn deliveries by id so manual retries do not duplicate work', () => {
+  const o = outbox({})
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'digest', text: 'replies', id: 'd1' })
+  assert.equal(o.box.hasDelivery('tab-1', 'd1'), true)
+  assert.equal(o.box.hasDelivery('tab-1', 'd2'), false)
+  o.box.pump()
+  assert.equal(o.box.hasDelivery('tab-1', 'd1'), true, 'still tracked while in turn')
+  o.box.turnEnded('tab-1')
+  assert.equal(o.box.hasDelivery('tab-1', 'd1'), false, 'gone once the turn ended')
+})

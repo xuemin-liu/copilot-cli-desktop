@@ -929,3 +929,25 @@ test('the meeting awaits a reviewer\'s answer only while its round is being coll
   h.hub.stop('K7QF')
   assert.equal(h.hub.awaits('tab-c', h.last('tab-c')), false, 'a closed meeting awaits nobody')
 })
+
+test('a host that posts after reading replies directly supersedes its queued digest and clears it from outstanding', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'four agreed findings')
+  const digest = h.last('tab-host')
+  assert.equal(digest.kind, 'digest')
+  assert.equal(h.hub.superseded('tab-host', digest), false, 'still owed before the host posts')
+  assert.equal(h.hub.outstandingDelivery('tab-host', 'K7QF', digest.id!)?.id, digest.id, 'available for manual retry while owed')
+
+  h.hub.post('tab-host', 'propose-close', 'four agreed findings', null)
+  assert.equal(h.hub.superseded('tab-host', digest), true, 'round 1 digest must not be typed after the host proposed to close')
+  assert.equal(h.hub.outstandingDelivery('tab-host', 'K7QF', digest.id!), null, 'no longer offered for retry once answered')
+  const saved = JSON.parse(h.files.get(at('K7QF', 'meeting.json'))!)
+  assert.equal(saved.outstanding.some((entry: { sessionId: string }) => entry.sessionId === SESSIONS['tab-host']), false, 'stale digest is not saved as outstanding')
+
+  const vote = h.last('tab-b')
+  assert.equal(h.hub.outstandingDelivery('tab-b', 'K7QF', vote.id!)?.id, vote.id, 'reviewer vote is still available for manual retry')
+  h.hub.turnCompleted('tab-b', vote, 'AGREE')
+  assert.equal(h.hub.outstandingDelivery('tab-b', 'K7QF', vote.id!), null, 'closed meeting offers nothing for retry')
+})

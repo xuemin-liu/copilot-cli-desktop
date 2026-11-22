@@ -3688,3 +3688,213 @@ test('natural CLI exit revokes its browser bridge while keeping project pages', 
   assert.equal(after.connections.length,0);
   assert.equal(after.projects[0].tabs.length,2,'completed CLI can open an unbound browser');
 }))
+
+test('retrying an uncertain meeting digest from Handoffs re-enqueues and delivers it after an aborted send', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  // Let the host's /add-dir setup command settle (200 ms Enter + 2 s quiet window).
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+  // Defer Enter before the reviewer finishes so the automatic pump of the host digest pauses before Enter.
+  h.deferTaskEnter()
+  const beforeAttempt = hostSpawn.written.length
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.request('desktop:get-state')).meetings![0]!.stage, 'host', 'meeting moved to host stage')
+
+  // First attempt to deliver the round-1 digest to the host aborts before Enter, leaving it uncertain.
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeAttempt).some(chunk => chunk.includes('Four agreed findings.')))
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  const uncertain = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(uncertain?.state, 'uncertain')
+
+  // Restoring the host binding and clicking Send again in Handoffs must re-enqueue and deliver the digest.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(2100)
+  const beforeRetry = hostSpawn.written.length
+  await h.request('desktop:delivery-action', uncertain!.id, 'retry')
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeRetry).some(chunk => chunk.includes('Four agreed findings.')), 'Send again re-enqueues and pastes the digest')
+  h.flushTaskEnter()
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === uncertain!.id)?.state, 'submitted')
+}))
+
+test('host manually proposing to close after an uncertain digest clears the block so the closing vote result reaches the host', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+  h.deferTaskEnter()
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.request('desktop:get-state')).meetings![0]!.stage, 'host', 'meeting moved to host stage')
+
+  // Round-1 digest fails to reach host and becomes uncertain.
+  await h.pumpMeetingDelivery()
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  const stale = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(stale?.state, 'uncertain')
+
+  // Host manually retrieves the reply and sends the four agreed findings for a closing vote.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'propose-close', hostSessionId, 'Four agreed findings')).ok, true)
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state, 'cancelled', 'resolved round-1 digest stops blocking the host')
+
+  // Reviewer votes AGREE on round 2; the closing agreed message must reach the host tab automatically.
+  await pause(2100)
+  await h.pumpMeetingDelivery()
+  h.flushTaskEnter()
+  const beforeClose = hostSpawn.written.length
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nVote`, interactionId: 'rev-r2' }) +
+    line('assistant.turn_start', { turnId: 'rev-r2' }) +
+    line('assistant.message', { interactionId: 'rev-r2', phase: 'final_answer', content: 'AGREE' }) +
+    line('assistant.turn_end', { turnId: 'rev-r2' }))
+  await h.refreshRecords(reviewerId)
+
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(2100)
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeClose).some(chunk => chunk.includes('All 1 reviewers agreed.')), 'closing vote result reaches the host automatically')
+  h.flushTaskEnter()
+}))
+
+test('a live conversation turn clears uncertain command state so dialog-like assistant text does not block meeting delivery', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.tabs = [{ title: 'Host', lastSessionId: SOURCE }]
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const log = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(log), { recursive: true })
+  await writeFile(log, line('session.start', { sessionId: SOURCE, startTime: new Date().toISOString() }))
+  await h.restoreSaved()
+  const tab = (await h.request('desktop:get-state')).activeTabId!
+  const spawn = h.spawns[0]!
+  await writeFile(join(dirname(log), 'inuse.7700.lock'), '')
+  h.configureBinding(tab, 7700, [7700])
+  await h.refreshRecords(tab)
+
+  // User edits a normal prompt with Left Arrow before pressing Enter, then Copilot replies with text containing dialog hints.
+  await h.request('desktop:write-tab', tab, 'start a meeting')
+  await h.request('desktop:write-tab', tab, '\x1b[D')
+  await h.request('desktop:write-tab', tab, '\r')
+  spawn.emitData('\x1b[?2004hPress Esc to cancel if needed.\r\n')
+  await appendFile(log,
+    line('user.message', { content: 'start a meeting', interactionId: 'u1' }) +
+    line('assistant.turn_start', { turnId: 't1' }) +
+    line('assistant.message', { interactionId: 'u1', phase: 'final_answer', content: 'Press Esc to cancel if needed.' }) +
+    line('assistant.turn_end', { turnId: 't1' }))
+  await h.refreshRecords(tab)
+  await pause(2100)
+
+  h.queueMeetingDelivery(tab, 'post', 'Reviewer reply digest')
+  await h.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(chunk => chunk.includes('Reviewer reply digest')), 'meeting delivery is not blocked by a false-positive dialog check')
+}))

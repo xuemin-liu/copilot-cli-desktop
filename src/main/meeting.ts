@@ -378,15 +378,18 @@ export class MeetingHub {
     if (meeting.round >= meeting.maxRounds) {
       // Saved with the meeting, in the folder every reviewer can read: filtered like any shared patch before it is kept.
       meeting.held = { kind, text: post, changes: changes === null ? null : sharedChanges(changes) }
+      this.clearHostDigest(meeting)
       this.pause(meeting, 'round-limit')
       return `Meeting ${meeting.id} reached its limit of ${meeting.maxRounds} rounds. The person decides whether it continues; end your turn.`
     }
     if (meeting.participants.size === 0) {
       // The last reviewer left after its round ended. A round opened now would wait its whole timeout for nobody.
       if (kind === 'propose-close') throw new MeetingError('Nobody is in the meeting now, so there is nobody to agree. Post a round; whoever joins next reviews it.')
+      this.clearHostDigest(meeting)
       this.keepForNextReviewer(meeting, kind, post, changes)
       return `Nobody is in meeting ${meeting.id} now. Your post is kept as round ${meeting.round} and is the first thing the next reviewer sees. End your turn.`
     }
+    this.clearHostDigest(meeting)
     this.nextRound(meeting, kind, post, changes)
     return `Sent round ${meeting.round} to ${meeting.participants.size} reviewer${meeting.participants.size === 1 ? '' : 's'}. Their replies arrive as your next message; end your turn now.`
   }
@@ -507,13 +510,26 @@ export class MeetingHub {
     if (meeting) this.sendAgainSoon(meeting, tabId, again)
   }
 
-  /** A message going in again that is no longer owed, so it must not be typed: a stale digest would draw a round nobody needs. */
+  /** A queued message that is no longer owed, so it must not be typed: a stale digest would draw a round nobody needs. */
   superseded(tabId: string, delivery: MeetingDelivery): boolean {
-    if (!delivery.again) return false
+    if (!delivery.again && delivery.kind !== 'digest' && delivery.kind !== 'reminder') return false
     const meeting = this.meetings.get(delivery.meetingId)
     if (meeting && this.owes(meeting, tabId, delivery)) return false
     if (meeting) this.settleOutstanding(meeting, tabId, delivery)
     return true
+  }
+
+  /** An open meeting's still-relevant delivery for this party, for a manual retry from Handoffs after it left the outbox. */
+  outstandingDelivery(tabId: string, meetingId: string, deliveryId: string): MeetingDelivery | null {
+    const meeting = this.meetings.get(meetingId)
+    if (!meeting || meeting.stage === 'closed') return null
+    const delivery = meeting.outstanding.get(tabId)
+    if (!delivery || delivery.id !== deliveryId) return null
+    if (this.owes(meeting, tabId, delivery)) return delivery
+    // A late-joining reviewer is not in `awaiting` yet, so it is still relevant while its round is current and unanswered.
+    if (meeting.participants.has(tabId) && delivery.round === meeting.round && !meeting.replies.has(tabId)
+      && (delivery.kind === 'post' || delivery.kind === 'vote')) return delivery
+    return null
   }
 
   /**
@@ -565,6 +581,14 @@ export class MeetingHub {
   private settleOutstanding(meeting: Meeting, tabId: string, { round, kind }: MeetingDelivery): void {
     const outstanding = meeting.outstanding.get(tabId)
     if (outstanding && outstanding.round === round && outstanding.kind === kind) meeting.outstanding.delete(tabId)
+  }
+
+  /** Once the host posts its next round or closes, any prior digest/reminder it held is answered and must not replay. */
+  private clearHostDigest(meeting: Meeting): void {
+    const outstanding = meeting.outstanding.get(meeting.host.tabId)
+    if (outstanding && (outstanding.kind === 'digest' || outstanding.kind === 'reminder')) {
+      meeting.outstanding.delete(meeting.host.tabId)
+    }
   }
 
   /** Whether this session is a reviewer owing a reply now, which is when `postAnswer` takes one. */

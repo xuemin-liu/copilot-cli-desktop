@@ -56,7 +56,10 @@ Queued handoffs can be inspected and discarded, including when a crash left a qu
 Closed meeting scopes are retired when the in-memory outbox has no work and no turn is still running. An entry left
 uncertain is discarded then: a closed meeting takes no more replies, so it can no longer matter, and keeping it would block
 that session from every later meeting. In an open meeting uncertain evidence is retained, and the meeting bar and a
-notification say so. Storage failure disables automatic meeting input while ordinary terminals remain usable.
+notification say so. Choosing Send again in Handoffs re-queues a still-owed meeting delivery that has already left the
+outbox and pumps it at once; choosing Discard also pumps work waiting behind it. If a host answers its round directly
+(`round` or `propose-close`, for instance after reading the reply file), any superseded queued or uncertain digest/reminder
+for that host in the meeting is cleared so it neither replays stale replies nor blocks the closing vote. Storage failure disables automatic meeting input while ordinary terminals remain usable.
 An individual intake rejection is shown as a waiting handoff and leaves other destinations and recovery actions usable;
 it is distinct from an unavailable/corrupt journal.
 

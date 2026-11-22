@@ -11,6 +11,28 @@ export function settleClosedMeeting(journal:WorkflowDeliveries,scope:string):voi
   journal.retireScope(scope)
 }
 
+/**
+ * The host answered its round (for instance after reading replies directly), so any queued or uncertain digest/reminder for
+ * that host in this meeting is resolved and must not block later rounds or the closing vote.
+ */
+export function settleHostDelivery(journal: WorkflowDeliveries, scope: string, sessionId: string): void {
+  for (const delivery of journal.list()) {
+    if (delivery.scope === scope && delivery.sessionId === sessionId && (delivery.state === 'queued' || delivery.state === 'uncertain')) {
+      journal.discard(delivery.id)
+    }
+  }
+}
+
+/** Extracts the meeting id and delivery id from a meeting journal row; null for non-meeting handoffs. */
+export function meetingDeliverySource(delivery: Pick<WorkflowDelivery, 'scope' | 'source'>): { meetingId: string; deliveryId: string } | null {
+  if (!delivery.scope.startsWith('meeting/')) return null
+  const meetingId = delivery.scope.slice('meeting/'.length)
+  const prefix = `meeting/${meetingId}/`
+  if (!meetingId || !delivery.source.startsWith(prefix)) return null
+  const deliveryId = delivery.source.slice(prefix.length)
+  return deliveryId ? { meetingId, deliveryId } : null
+}
+
 /** Maps the meeting's persisted message identity to the shared destination arbiter. */
 export function journalMeetingDelivery(journal:WorkflowDeliveries,sessionId:string,delivery:MeetingDelivery,changed?:()=>void):WorkflowDelivery|null {
   if(delivery.kind==='add-dir')throw new Error('Folder commands are idempotent meeting setup, not worker turns')
