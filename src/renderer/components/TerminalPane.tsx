@@ -73,7 +73,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     if (!container) return
 
     const terminal = new Terminal({
-      convertEol: true,
+      // No convertEol: the PTY already ends lines with CR LF, and ConPTY sends a bare LF to mean "down one row, same
+      // column". Turning that into CR LF put text in the wrong column, so ConPTY's later redraws (for example after
+      // Claude Code's /clear) left stray characters behind.
       fontFamily: 'Cascadia Code, Consolas, "Courier New", monospace',
       fontSize: 13,
       cursorBlink: true,
