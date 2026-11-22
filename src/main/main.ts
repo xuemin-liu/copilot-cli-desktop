@@ -3,7 +3,8 @@ import type { ToolFile, ToolsAction } from './tool-tabs.js'
 import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
-import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
+import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
+import { githubCliApi,githubCliWrite,parseGithubPullUrl } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
@@ -675,6 +676,12 @@ let workflowNotice: string | null = null
 let followups: WorkflowFollowups | null = null
 let followupError: string | null = null
 let followupOpening: Promise<WorkflowFollowups> | null = null
+/** The PR loops' checked GitHub writes and their receipts (pr-loop-posts.ts); opened with follow-ups. */
+let prPosts: PrLoopPosts | null = null
+let prPostsError: string | null = null
+let prPostTimer: NodeJS.Timeout | null = null
+/** A PR loop's turn runs the build and tests, so it may take longer than a follow-up's ten minutes. */
+const automaticTurnLimit=(grant:FollowupGrant):number=>(grant.role===undefined?10:30)*60_000
 const automaticTurns = new Map<string, { deliveryId:string; grant:FollowupGrant; session:PtySession; timer:NodeJS.Timeout; stopping:boolean; authorized:()=>boolean }>()
 let automations:WorkflowAutomations|null=null
 let automationError:string|null=null
@@ -830,6 +837,11 @@ function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
 }
+/** Only what the Tasks view shows: receipts that still need settling, without bodies. */
+function prPostViews():import('./types.js').PrPostView[]{
+  try{return (prPosts?.list()??[]).filter(r=>r.state==='intent'||r.state==='uncertain').map(r=>({id:r.id,grantId:r.grantId,state:r.state as 'intent'|'uncertain',kind:r.kind,target:r.target,createdAt:r.createdAt}))}
+  catch{return []}
+}
 function followupDefaultViews():import('./workflow-followups.js').FollowupDefault[]{
   try{return followups?.defaults()??[]}catch{followupError='Project follow-up defaults are unavailable; automatic work is disabled.';followups?.stop();return []}
 }
@@ -839,9 +851,16 @@ async function openFollowups():Promise<WorkflowFollowups> {
   followupOpening=(async()=>{
     if(!deliveryJournal||deliveryError||!workflows())throw new Error('Workflow storage is unavailable')
     const api=await githubCliApi(app.getPath('userData'))
+    const write=await githubCliWrite(app.getPath('userData'))
     if(shuttingDown())throw new Error('Desktop is closing')
+    if(!prPosts){
+      try{prPosts=new PrLoopPosts(join(app.getPath('userData'),'pr-loop-posts.sqlite'),{api,write});prPostsError=null}
+      catch{prPostsError='PR loops are unavailable: their reply records could not be opened. Task follow-ups still work; restart Desktop to try again.';void writeAppLog('PR loop receipts could not be opened').catch(()=>{})}
+    }
+    if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{})},60_000);prPostTimer.unref()}
     const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
       api,journal:deliveryJournal,projectAvailable:id=>desktopConfig.profiles.some(profile=>profile.id===id),
+      postsSettled:id=>prPosts?.settled(id)??false,
       complete:(task,snapshot,grant)=>{
         const store=workflows(),current=store?.active(task.sessionId)
         if(!store||snapshot.open||snapshot.merged!==true||current?.id!==task.id||current.assignmentId!==task.assignmentId||current.scopeRevision!==task.scopeRevision)throw new Error('Task changed before verified merge completion')
@@ -865,7 +884,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
             if(!store||store.active(grant.sessionId)?.id!==grant.taskId)return false
             if(!ready()||!controller.authorized(grant)||!deliveryJournal?.begin(delivery.id,()=>controller.authorized(grant)))return false
             store.submitted(grant.sessionId,grant.projectId,delivery.text)
-            const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},10*60_000);timer.unref()
+            const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},automaticTurnLimit(grant));timer.unref()
             automaticTurns.set(tab.id,{deliveryId:delivery.id,grant,session,timer,stopping:false,authorized:()=>controller.authorized(grant)})
             meetingReader(tab.id).expectDesktopPrompt(delivery.text)
             return true
@@ -914,7 +933,7 @@ const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   else if(item&&tabsState.tabs.some(tab=>tab.id===item.tabId))activateSessionTab(item.tabId)
   else restoreMainWindow()
 }))
-function attentionItems(view?:DesktopState):AttentionItem[]{return view?workflowAttention(view.tabs,view.meetings??[],view.workflowTasks??[],view.workflowFollowups??[],view.workflowDeliveries??[]):workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews())}
+function attentionItems(view?:DesktopState):AttentionItem[]{return view?workflowAttention(view.tabs,view.meetings??[],view.workflowTasks??[],view.workflowFollowups??[],view.workflowDeliveries??[],view.workflowPrPosts??[]):workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews(),prPostViews())}
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
   try { return workflowResources.views(workflowStore?.list()??[],new Set(tabsState.tabs.map(tab=>tab.lastSessionId).filter((id):id is string=>id!==null))) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
@@ -941,6 +960,8 @@ function snapshot(windowSessionId?: string): DesktopState {
     meetings: meetingViews(),
     workflowTasks: workflowViews(),
     workflowFollowups: followupViews(),
+    workflowPrPosts: prPostViews(),
+    workflowPrPostsError: prPostsError,
     workflowFollowupDefaults:followupDefaultViews(),
     workflowFollowupError: followupError,
     workflowAutomation: automationViews(),
@@ -3205,6 +3226,23 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       if (!canRebind) session.commitSessionBinding()
     }
     switch (command) {
+      case 'pr-reply': {
+        const binding = callerSession?.bindingDiagnostic
+        if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
+          return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
+        if (!followups || !prPosts) return { ok: false, message: prPostsError ?? 'PR loops are not running in the desktop.' }
+        const grant = followups.list().find((candidate) => candidate.enabled && candidate.role === 'author' && candidate.sessionId === request.sessionId) ?? null
+        try {
+          const sessionId = request.sessionId
+          const live = (): boolean => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'author' && current.sessionId === sessionId && followups?.authorized(current)) }
+          const receipt = await prPosts.reply(grant, sessionId, { to: request.to ?? '', body: request.text }, live)
+          broadcastState()
+          return { ok: true, message: `Posted${receipt.url ? `: ${receipt.url}` : '.'}` }
+        } catch (error) {
+          broadcastState()
+          return { ok: false, message: error instanceof PrPostRejected ? error.message : 'The desktop could not post the reply.' }
+        }
+      }
       case 'task-status':
       case 'task-report': {
         if (!supportsTaskReporting({ version: currentTab.cliVersion, sideChat: Boolean(currentTab.sideChat), remote: currentTab.remote, preset: currentTab.sessionPermissionPreset })) return { ok: false, message: 'This session does not support task reporting.' }
@@ -5404,11 +5442,14 @@ ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): voi
   workflowNotice = null
   broadcastState()
 })
-ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown,reviewers:unknown,checks:unknown,completeOnMerge:unknown=false):Promise<void>=>{
+ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown,reviewers:unknown,checks:unknown,completeOnMerge:unknown=false,options:unknown={}):Promise<void>=>{
   assertTrustedIpcSender(event)
   if(typeof taskId!=='string'||typeof url!=='string'||!Array.isArray(reviewers)||!reviewers.every(r=>typeof r==='string')||typeof checks!=='boolean'||typeof completeOnMerge!=='boolean')throw new Error('Invalid follow-up settings')
+  const parsed=options&&typeof options==='object'&&!Array.isArray(options)?options as Record<string,unknown>:null
+  if(!parsed||Object.keys(parsed).some(key=>key!=='role'&&key!=='includeExisting')||(parsed.role!==undefined&&parsed.role!=='author'&&parsed.role!=='follow-up')||(parsed.includeExisting!==undefined&&typeof parsed.includeExisting!=='boolean'))throw new Error('Invalid follow-up settings')
+  const enrollOptions:import('./workflow-followups.js').EnrollOptions=parsed.role==='author'?{role:'author',includeExisting:parsed.includeExisting===true}:{}
   const controller=await openFollowups()
-  const grant=await controller.enroll(taskId,url,reviewers,checks,completeOnMerge);workflows()?.link(grant.sessionId,{pullUrl:`https://github.com/${grant.repository}/pull/${grant.number}`});broadcastState()
+  const grant=await controller.enroll(taskId,url,reviewers,checks,completeOnMerge,enrollOptions);workflows()?.link(grant.sessionId,{pullUrl:`https://github.com/${grant.repository}/pull/${grant.number}`});broadcastState()
 })
 ipcMain.handle('desktop:followup-default-save',async(event,projectId:unknown,url:unknown,names:unknown,checks:unknown,complete:unknown):Promise<void>=>{
   assertTrustedIpcSender(event)
@@ -5421,6 +5462,23 @@ ipcMain.handle('desktop:followup-default-remove',(event,projectId:unknown):void=
   assertTrustedIpcSender(event)
   if(typeof projectId!=='string'||!followups)throw new Error('Project defaults are unavailable')
   followups.removeDefault(projectId);broadcastState()
+})
+ipcMain.handle('desktop:followup-confirm-approval',async(event,id:unknown,shown:unknown):Promise<void>=>{
+  assertTrustedIpcSender(event)
+  if(typeof id!=='string'||!isValidSessionId(id)||!followups)throw new Error('Unknown enrollment')
+  const value=shown&&typeof shown==='object'&&!Array.isArray(shown)?shown as Record<string,unknown>:null
+  if(!value||(value.kind!=='review'&&value.kind!=='text')||typeof value.head!=='string'||typeof value.base!=='string'||typeof value.ref!=='string'||typeof value.at!=='number')throw new Error('Show the approval again before confirming it')
+  await followups.confirmApproval(id,{kind:value.kind,head:value.head,base:value.base,ref:value.ref,at:value.at});broadcastState()
+})
+ipcMain.handle('desktop:followup-extend',(event,id:unknown):void=>{
+  assertTrustedIpcSender(event)
+  if(typeof id!=='string'||!isValidSessionId(id)||!followups)throw new Error('Unknown enrollment')
+  followups.extendLimit(id);broadcastState()
+})
+ipcMain.handle('desktop:pr-post-dismiss',(event,id:unknown):void=>{
+  assertTrustedIpcSender(event)
+  if(typeof id!=='string'||!isValidSessionId(id)||!prPosts)throw new Error('Unknown reply')
+  prPosts.dismiss(id);broadcastState()
 })
 ipcMain.handle('desktop:followup-pause', (event,id:unknown):void=>{
   assertTrustedIpcSender(event)
@@ -6605,4 +6663,4 @@ app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
 
-app.once('will-quit', () => { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })
+app.once('will-quit', () => { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null; if(prPostTimer)clearInterval(prPostTimer); prPostTimer=null; prPosts?.close(); prPosts=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })

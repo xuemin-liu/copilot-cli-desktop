@@ -195,6 +195,13 @@ is the longer case, timed in the Phase 0 PR.
   across a push, a CI read failure, the caps after a restart, a double enrollment, a post in flight when the grant is
   paused, and a crash after GitHub accepted a post but before the receipt was saved.
 
+**Revision after Phase 1.** The PR helper is a `pr-reply` command of the existing session helper
+(`meeting.ps1`/`meeting.sh`), which already carries each session's own token, not a separate `copilot-desktop pr`
+command. Phase 1 posts author replies only, so approvals that end the fix loop by themselves (helper receipts from a
+reviewer grant) arrive with Phase 2; until then every approval is **Confirm approval**. The stored grant keeps its
+schema: the loop fields are optional and checked together, so no table changed, and receipts live in their own store
+(`pr-loop-posts.sqlite`).
+
 ### Phase 2: the review loop
 
 - Reviewer role: the first review on enrollment; a new head or base counts as news; only marked comments from the PR
