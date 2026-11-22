@@ -59,7 +59,7 @@ try {
   } elseif ($File -or $Changes) { throw ('meeting.ps1 ' + $Command + ' takes no -File or -Changes.') }
   if ($Command -eq 'start') { $meetingBody.topic = $Topic }
   if ($Page) {
-    if ($Command -ne 'pr-read' -or $Page -notmatch '^[1-9][0-9]{0,7}$') { throw 'Use pr-read -Page <positive page number>.' }
+    if ($Command -ne 'pr-read' -or $Page -notmatch '^[1-9][0-9]{0,7}(-[0-9]{1,2}-[0-9]{1,7}-[a-f0-9]{16})?$') { throw 'Use pr-read -Page <nextPage cursor>.' }
     $meetingBody.page = $Page
   }
   if ($Command -eq 'pr-reply') {
@@ -141,7 +141,8 @@ if [ "$command" = pr-reply ]; then
 elif [ -n "$to" ]; then fail "meeting.sh $command takes no -To."; fi
 if [ -n "$page" ]; then
   [ "$command" = pr-read ] || fail 'Only pr-read takes -Page.'
-  case "$page" in *[!0-9]*|0*|?????????*) fail 'Invalid feedback page.' ;; esac
+  case "$page" in *[!0-9a-f-]*|0*) fail 'Invalid feedback cursor.' ;; esac
+  [ "$(printf %s "$page" | wc -c)" -le 48 ] || fail 'Invalid feedback cursor.'
 fi
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
@@ -278,7 +279,7 @@ Fix loops: when the desktop's continuation says you are the author of a pull req
 `
 
 const PR_REVIEW_INSTRUCTIONS = `
-Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (read every page with -Page <nextPage> until nextPage is null). Use pr-reply -To <root comment id> -File <file> for an unmarked reply that verifies a fix or explains a disagreement and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, a body that starts "Approved at <full head sha>", and "checks": {"ran": [...], "missing": [...]}; with a check missing it is posted as a comment until the person says "approve anyway" in your tab, and then you send it again with "approveAnyway": true. The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
+Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (read every page with -Page <nextPage> until nextPage is null, passing each cursor verbatim. Long comments continue under the same id with a bodyOffset). Use pr-reply -To <root comment id> -File <file> for an unmarked reply that verifies a fix or explains a disagreement and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, a body that starts "Approved at <full head sha>", and "checks": {"ran": [...], "missing": [...]}; with a check missing it is posted as a comment until the person says "approve anyway" in your tab, and then you send it again with "approveAnyway": true. The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
 `
 
 const TASK_INSTRUCTIONS = `

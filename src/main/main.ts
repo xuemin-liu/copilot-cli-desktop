@@ -3558,7 +3558,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (enrolling) { await Promise.race([enrolling, new Promise((resolveWait) => setTimeout(resolveWait, 60_000))]); grant = findGrant() }
         if (command === 'pr-read') {
           if (!grant) return { ok: false, message: 'This session has no active review loop.' }
-          try { return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), grant.repository, grant.number, request.page) } } catch { return { ok: false, message: 'The desktop could not read the pull request.' } }
+          try { return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), grant.repository, grant.number, request.page) } } catch { return { ok: false, message: 'The page could not be read. If the PR changed, restart pr-read from page one.' } }
         }
         let parsed: unknown
         try { parsed = JSON.parse(request.text) } catch { return { ok: false, message: 'The review file must be JSON: {"body": "...", "comments": [...], "approve": false}.' } }
