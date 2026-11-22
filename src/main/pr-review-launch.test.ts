@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
@@ -35,7 +35,7 @@ test('the review runs in a detached worktree of the project: nothing copied, no 
     assert.deepEqual(await reviewCheckoutState(f.runner, area), { head, clean: true })
     assert.match(f.plain(area.checkout, 'status', '--branch', '--porcelain=v2'), /# branch.head \(detached\)/)
     assert.equal(existsSync(join(f.root, 'hook-ran')), false, 'no hook ran')
-    assert.equal(resolve(area.commonDir), resolve(project, '.git'), 'the worktree uses the project\'s own Git directory')
+    assert.equal(realpathSync.native(area.commonDir), realpathSync.native(join(project, '.git')), 'the worktree uses the project\'s own Git directory')
     assert.ok(!existsSync(join(area.root, 'checkout', '.git', 'objects')) && size(area.root) < 200_000, 'no objects were copied')
     assert.equal(f.plain(project, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'b1', 'the person\'s worktree stays on its branch')
     assert.ok(existsSync(join(project, 'work-in-progress.txt')))
@@ -116,9 +116,10 @@ test('removing a review takes out only its own worktree and ref; the policy read
     await verifyReviewerPolicy(area, policy)
     const other = join(f.root, 'other-worktree')
     f.plain(project, 'worktree', 'add', '-q', '--detach', other, base)
+    const listedAs = realpathSync.native(area.checkout).replace(/\\/g, '/')
     await removeReviewerArea(area, f.runner)
     assert.equal(existsSync(area.root), false)
-    assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), new RegExp(area.checkout.replace(/\\/g, '/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
+    assert.ok(!f.plain(project, 'worktree', 'list', '--porcelain').toLowerCase().includes(listedAs.toLowerCase()), 'its registration is gone')
     assert.match(f.plain(project, 'worktree', 'list'), /other-worktree/, 'another worktree stays')
     assert.throws(() => f.plain(project, 'rev-parse', '--verify', area.ref), 'this review\'s ref is gone')
   } finally { f.cleanup() }
@@ -239,4 +240,40 @@ test('a merged or closed PR is reported only from a clear answer; a failed read 
 test('an approval held for missing checks is not reported as open findings', () => {
   const a = 'a'.repeat(40)
   assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'review', head: a, createdAt: 1, heldApproval: true }]) ?? '', /held its approval .* because some checks could not run/)
+})
+
+test('a reviewer folder reached through a link (macOS /var, a Windows short name) is still recognized as its worktree', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    mkdirSync(join(f.root, 'real-reviewers'))
+    const alias = join(f.root, 'reviewers-alias')
+    symlinkSync(join(f.root, 'real-reviewers'), alias, process.platform === 'win32' ? 'junction' : 'dir')
+    // The desktop names the folder through the link; Git lists the worktree by its real path.
+    const dirty = await createReviewerArea(alias)
+    await cloneForReview(f.runner, project, upstream, dirty, { head, base }, 7)
+    writeFileSync(join(dirty.checkout, 'notes.txt'), 'the reviewer\'s changes')
+    assert.equal(await removeReviewerArea(dirty, f.runner), 'kept', 'a worktree with changes is never deleted')
+    assert.ok(existsSync(join(dirty.checkout, 'notes.txt')))
+    rmSync(join(dirty.checkout, 'notes.txt'))
+    assert.equal(await removeReviewerArea(dirty, f.runner), 'removed')
+    assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), /real-reviewers/, 'and its registration went with it')
+  } finally { f.cleanup() }
+})
+
+test('a checkout replaced by a link to another worktree is never removed, nor is that worktree', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+    const other = join(f.root, 'other-worktree')
+    f.plain(project, 'worktree', 'add', '-q', '--detach', other, base)
+    // What sandboxed code could do: swap the review's checkout for a link to the person's other worktree.
+    rmSync(area.checkout, { recursive: true, force: true })
+    symlinkSync(other, area.checkout, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.equal(await removeReviewerArea(area, f.runner), 'kept')
+    assert.ok(existsSync(join(other, 'a.txt')), 'the other worktree is untouched')
+    assert.match(f.plain(project, 'worktree', 'list'), /other-worktree/)
+  } finally { f.cleanup() }
 })

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
@@ -41,6 +42,15 @@ export const createReviewerArea = (base: string): Promise<ReviewerArea> => makeR
 
 const REVIEW_REF = /^refs\/desktop-review\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const samePath = (a: string, b: string): boolean => process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+/**
+ * A folder by its real path: Git reports worktrees by their real path, while a folder the desktop names may be reached
+ * through a link (macOS's /var is /private/var) or a Windows short name (RUNNER~1). A path that does not exist stays as
+ * it is.
+ */
+async function realPath(path: string): Promise<string> {
+  // The native call expands Windows short names; the JavaScript one only follows links.
+  try { return realpathSync.native(path) } catch { return resolve(path) }
+}
 
 /**
  * Takes a review out of the person's project: its own worktree (only when the project still registers it at this
@@ -53,8 +63,15 @@ export async function removeReviewerArea(area: Pick<ReviewerArea, 'root' | 'chec
     if (!runner) return 'kept'
     let listed: string
     try { listed = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read') } catch { return 'kept' }
-    const registered = listed.split('\0').some((line) => line.startsWith('worktree ') && samePath(line.slice(9), area.checkout))
-    if (registered && !await git(runner, area.project, ['worktree', 'remove', '--', area.checkout]).then(() => true, () => false)) return 'kept'
+    const checkout = await realPath(area.checkout)
+    // Only this review's own folder: a checkout that resolves anywhere but the "checkout" folder inside its reviewer
+    // folder (replaced by a link to another worktree, say) is not removed, whatever it matches.
+    if (!samePath(checkout, join(await realPath(area.root), 'checkout'))) return 'kept'
+    let registered = false
+    for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
+    // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
+    if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) return 'kept'
+    if (registered && !await git(runner, area.project, ['worktree', 'remove', '--', checkout]).then(() => true, () => false)) return 'kept'
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   await rm(area.root, { recursive: true, force: true, maxRetries: 3 })

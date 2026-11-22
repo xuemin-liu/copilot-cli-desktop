@@ -22,7 +22,7 @@ import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -899,6 +899,11 @@ function reviewReservations():ReviewReservations|null{
   if(!app.isReady())return null
   try{return reservations??=new ReviewReservations(join(app.getPath('userData'),'pr-review-reservations.json'))}catch{return null}
 }
+/** The same folder, by real path: a session may report its folder resolved where the desktop named it through a link. */
+function sameRealPath(a:string,b:string):boolean{
+  const real=(path:string):string=>{try{return realpathSync.native(path)}catch{return resolve(path)}}
+  return samePath(real(a),real(b))
+}
 let sweeping=false
 /**
  * A review that ended (merged, closed, stopped, or a start that failed) and whose tab is gone leaves its worktree in
@@ -915,7 +920,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(reviewLaunches.has(record.launchId)||(record.kept&&existsSync(record.checkout)))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
-      const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&samePath(resolve(session.sessionCwd),resolve(record.checkout)))
+      const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&sameRealPath(session.sessionCwd,record.checkout))
       if(open)continue
       const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
       if(record.taskId)reviewerTasks.delete(record.taskId)
@@ -1162,7 +1167,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
         if(role==='reviewer'){
           // The reviewer's clone has no branch: the desktop moves it to the PR's head while it is clean.
           const review=reviewerTasks.get(task.id)
-          if(!review||!samePath(resolve(folder),resolve(review.area.checkout)))throw new Error('The review session is not in its own checkout')
+          if(!review||!sameRealPath(folder,review.area.checkout))throw new Error('The review session is not in its own checkout')
           await verifyReviewerPolicy(review.area,review.policy)
           const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number,pr.base)
           const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
