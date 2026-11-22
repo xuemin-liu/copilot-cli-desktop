@@ -3209,7 +3209,9 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (!followups || !prPosts) return { ok: false, message: 'PR loops are not running in the desktop.' }
         const grant = followups.list().find((candidate) => candidate.enabled && candidate.role === 'author' && candidate.sessionId === request.sessionId) ?? null
         try {
-          const receipt = await prPosts.reply(grant, request.sessionId, { to: request.to ?? '', body: request.text })
+          const sessionId = request.sessionId
+          const live = (): boolean => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'author' && current.sessionId === sessionId && followups?.authorized(current)) }
+          const receipt = await prPosts.reply(grant, sessionId, { to: request.to ?? '', body: request.text }, live)
           broadcastState()
           return { ok: true, message: `Posted${receipt.url ? `: ${receipt.url}` : '.'}` }
         } catch (error) {

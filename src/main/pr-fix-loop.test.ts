@@ -22,7 +22,7 @@ async function setup() {
   const task = tasks.submitted('session', 'project', 'Fix the checkout bug')
   const other = tasks.submitted('session-2', 'project', 'Another task')
   const journal = new WorkflowDeliveries(join(dir, 'deliveries.sqlite'))
-  let now = Date.parse('2026-11-02T12:00:00Z'), open = true, head = first, checksFail = false, settled = true, checkReads = 0
+  let now = Date.parse('2026-11-02T12:00:00Z'), open = true, head = first, baseSha = base, checksFail = false, settled = true, checkReads = 0
   const comments: Record<string, unknown>[] = [], conversation: Record<string, unknown>[] = [], reviews: Record<string, unknown>[] = []
   const injected: string[] = []
   let controller: WorkflowFollowups
@@ -32,7 +32,7 @@ async function setup() {
     api: async (path) => {
       if (path === 'users/reviewer') return { id: REVIEWER, login: 'reviewer' }
       if (path === 'user') return { id: AUTHOR }
-      if (path === 'repos/owner/repo/pulls/1') return { state: open ? 'open' : 'closed', merged: !open, user: { id: AUTHOR }, head: { sha: head, ref: 'feature', repo: { full_name: 'owner/repo' } }, base: { sha: base } }
+      if (path === 'repos/owner/repo/pulls/1') return { state: open ? 'open' : 'closed', merged: !open, user: { id: AUTHOR }, head: { sha: head, ref: 'feature', repo: { full_name: 'owner/repo' } }, base: { sha: baseSha } }
       if (path.includes('/check-runs') || path.includes('/statuses')) { checkReads++; if (checksFail) throw new Error('CI unavailable'); return path.includes('/check-runs') ? [{ check_runs: [] }] : [[]] }
       if (path === 'repos/owner/repo/pulls/1/comments?per_page=100') return [comments]
       if (path === 'repos/owner/repo/issues/1/comments?per_page=100') return [conversation]
@@ -50,6 +50,7 @@ async function setup() {
   return { dir, tasks, task, other, journal, controller, host, injected,
     advance: (ms = 120_001) => { now += ms },
     push: () => { head = second },
+    moveBase: () => { baseSha = 'e'.repeat(40) },
     close: () => { open = false },
     failChecks: () => { checksFail = true },
     checkReads: () => checkReads,
@@ -124,6 +125,25 @@ test('a formal approval waits for the person, who confirms it only for the curre
   h.advance(); h.review(11, REVIEWER, 'APPROVED'); await h.controller.tick()
   const confirmed = await h.controller.confirmApproval(grant.id)
   assert.equal(confirmed.enabled, false); assert.equal(confirmed.health, 'approved'); assert.equal(confirmed.head, second)
+}))
+
+test('a base that moved after the approval was shown must be shown again before it can be confirmed', () => fixture(async (h) => {
+  const grant = await enrollFix(h)
+  h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
+  assert.equal(h.controller.grant(grant.id)?.approval?.base, base)
+  h.moveBase()
+  await assert.rejects(h.controller.confirmApproval(grant.id), /base changed/)
+  const shown = h.controller.grant(grant.id)!
+  assert.equal(shown.enabled, true); assert.equal(shown.approval?.base, 'e'.repeat(40), 'the person now sees the new base')
+  const confirmed = await h.controller.confirmApproval(grant.id)
+  assert.equal(confirmed.health, 'approved')
+}))
+
+test('a poll replaces a shown approval when its base changes, even from the same review', () => fixture(async (h) => {
+  const grant = await enrollFix(h)
+  h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
+  h.moveBase(); h.advance(); await h.controller.tick()
+  assert.equal(h.controller.grant(grant.id)?.approval?.base, 'e'.repeat(40))
 }))
 
 test('an approval withdrawn on GitHub since the last poll cannot be confirmed', () => fixture(async (h) => {

@@ -62,7 +62,7 @@ export class PrLoopPosts {
    * An author's reply on its own PR. `grant` is the grant as stored now; `sessionId` is the session the helper call
    * came from, which must be the grant's.
    */
-  async reply(grant: FollowupGrant | null, sessionId: string, request: ReplyRequest): Promise<PostReceipt> {
+  async reply(grant: FollowupGrant | null, sessionId: string, request: ReplyRequest, authorized: () => boolean = () => true): Promise<PostReceipt> {
     if (!grant || !grant.enabled || grant.role !== 'author') throw new PrPostRejected('This session has no active fix loop.')
     if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the fix loop for that PR.')
     if (this.busy.has(grant.id)) throw new PrPostRejected('Another reply of this loop is being posted; try again in a moment.')
@@ -92,11 +92,14 @@ export class PrLoopPosts {
         }
       }
 
+      // The lookups above took time: the loop may have been paused, or the session lost its grant, meanwhile.
+      if (!authorized()) throw new PrPostRejected('The fix loop was stopped or changed; nothing was posted.')
       const receipt: PostReceipt = { id: randomUUID(), grantId: grant.id, sessionId, repository: grant.repository, number: grant.number,
         kind: target === null ? 'comment' : 'reply', target, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now() }
       const posted = `${body}\n\n${receiptTag(receipt.id)}`
       receipt.bodyHash = sha256(posted)
       this.save(receipt)
+      if (!authorized()) { this.save({ ...receipt, state: 'dismissed' }); throw new PrPostRejected('The fix loop was stopped or changed; nothing was posted.') }
       let answer: unknown
       try {
         answer = target === null

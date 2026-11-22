@@ -122,3 +122,13 @@ test('a missing, copied or edited post becomes uncertain, and only the person se
   assert.equal(h.posts.list()[2]!.state, 'uncertain', 'not found')
   assert.equal(h.writes.length, 3)
 }))
+
+test('a loop stopped while the reply was being checked posts nothing', () => fixture(async (h) => {
+  let live = true
+  const original = h.posts['host' as never] as { api: (path: string) => Promise<unknown> }
+  const api = original.api
+  original.api = async (path: string) => { if (path === 'user') live = false; return api(path) }
+  await assert.rejects(h.posts.reply(grant(), 'session', { to: '100', body: '🤖 Fixed.' }, () => live), /stopped or changed/)
+  assert.equal(h.writes.length, 0)
+  assert.equal(h.posts.settled(grant().id), true, 'nothing is left in doubt')
+}))

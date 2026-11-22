@@ -34,6 +34,8 @@ export interface EnrollOptions {
   marker?: string
 }
 const roleOf=(grant:Pick<FollowupGrant,'role'>):PrLoopRole=>grant.role??'follow-up'
+/** The evidence the person is shown: the same source, kind, head and base. */
+const sameApproval=(a:ApprovalEvidence,b:ApprovalEvidence):boolean=>a.ref===b.ref&&a.kind===b.kind&&a.head===b.head&&a.base===b.base
 const limitOf=(grant:Pick<FollowupGrant,'limit'>):number=>grant.limit??10
 /** A legacy follow-up shares a PR with nothing; a fix loop and a review loop may share one, one of each. */
 const conflicts=(a:PrLoopRole,b:PrLoopRole):boolean=>a==='follow-up'||b==='follow-up'||a===b
@@ -203,7 +205,10 @@ export class WorkflowFollowups {
     if(snapshot.head!==current.approval.head){this.save({...current,approval:null,health:'watching'});throw new Error('The PR has a newer head than the approval')}
     // The approval must still stand now: a dismissal or a later change request since the last poll withdraws it.
     const evidence=approvalOfHead(snapshot,current.reviewers,current.marker??DEFAULT_PR_MARKER)
-    if(!evidence||evidence.ref!==current.approval.ref){this.save({...current,approval:evidence,health:evidence?'approval-pending':'watching'});throw new Error('The approval changed on GitHub; look again')}
+    // The person confirmed what they were shown: the same approval, head and base. Anything else is shown again.
+    if(!evidence||!sameApproval(evidence,current.approval)||snapshot.base!==current.approval.base){
+      this.save({...current,approval:evidence,health:evidence?'approval-pending':'watching'});throw new Error('The approval or the PR\'s base changed on GitHub; look again')
+    }
     if(this.host.journal.list().some(d=>d.scope===id&&['queued','submitting','submitted','uncertain'].includes(d.state)))throw new Error('Feedback for this loop is still queued or in progress')
     if(this.host.postsSettled?.(id)===false)throw new Error('A reply of this loop has not been confirmed on GitHub yet')
     const next={...current,enabled:false,health:'approved' as const,head:snapshot.head}
@@ -348,7 +353,7 @@ export class WorkflowFollowups {
       if(next.approval&&next.approval.head!==snapshot.head)next.approval=null
       const evidence=approvalOfHead(snapshot,next.reviewers,next.marker??DEFAULT_PR_MARKER)
       if(!evidence)next.approval=null
-      else if(!next.approval||next.approval.ref!==evidence.ref)next.approval=evidence
+      else if(!next.approval||!sameApproval(next.approval,evidence))next.approval=evidence
       if(next.approval&&next.health==='watching')next.health='approval-pending'
     }
     this.save(next)
