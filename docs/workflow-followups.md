@@ -56,8 +56,19 @@ for local prompt identities and submission recovery.
 
 In a Copilot tab, ask in your own words, as you would start a meeting:
 
-- **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab.
-- **"watch PR 286 and fix the review feedback"** (or "fix PR 286", "address the comments on PR 286"): this
+- **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab. A PR that does not
+  exist yet (you are creating it in another tab) is checked for every thirty seconds for an hour and reviewed when it
+  opens.
+- **"review my PR"**: your one open PR here is reviewed; with several, Desktop lists them and you say which; with none,
+  it waits for your next new PR as below.
+- **"review new PRs in this repo"**: each new pull request of yours in this project gets a review loop as it opens, like
+  `/review-pr`'s wait for the next PR. A review that started turns this on as well, for the project it used;
+  **"stop reviewing new PRs"** turns it off, also while a check is under way. Desktop checks with `gh` every thirty
+  seconds, which uses no model and no tokens; a model runs only when a review starts. One review starts at a time, with
+  no daily cap. Only PRs opened after it was turned on count; a fork, someone else's PR or one already in review is
+  skipped. If the project's origin changes, nothing starts until you ask again.
+- **"watch PR 286 and fix the review feedback"** (or "fix PR 286", "address the comments on PR 286", or without a
+  number, **"fix my PR"** / "watch this PR and fix the review feedback" for the PR of the branch this conversation is on): this
   conversation becomes the PR's fix loop, with your own account as the reviewer whose feedback counts, and the
   feedback already on the PR first.
 
@@ -85,6 +96,8 @@ permissions, which govern its edits, commits and pushes, and, unlike a follow-up
   starting `Approved at <full head sha>`) shows **Confirm approval**. GitHub does not record which base an outside
   review saw, so the loop ends only when you confirm, the PR still points at that head, and nothing of the loop is
   queued, in flight or unsettled. A changes-requested review after it, a dismissal or a push clears it.
+- Both PR loops read their PR every twenty seconds, so a review comment reaches the author, and a push reaches the
+  reviewer, within about twenty seconds. Reading uses no model; a model runs only when there is something to act on.
 - Limits: three continuations per PR head and thirty in all; **Allow ten more** extends it up to a hundred. A spent
   loop still notices approvals and merges. Each turn may run for thirty minutes. CI is read only when you ask for it.
 
@@ -93,8 +106,10 @@ permissions, which govern its edits, commits and pushes, and, unlike a follow-up
 **Tasks → Review a PR** runs the desktop's version of `/review-pr` ([plan](pr-loops-plan.md), Phase 2). It asks for its
 own consent, because the review session runs the PR's code.
 
-- Desktop clones the project into a reviewer folder of its own (beside, never inside, its data folder), fetches the
-  PR's head with your Git login, and checks it out detached with hooks off. Nothing of the PR is installed, built or
+- Desktop fetches the PR's head into your project under a ref of the review's own (`refs/desktop-review/<id>`) and
+  adds a detached `git worktree` of it, hooks off, in a reviewer folder beside (never inside) its data folder, as
+  `/review-pr` does. Nothing is copied, so a huge repository costs no more than one checkout; your own worktree and
+  branch are never touched. Nothing of the PR is installed, built or
   run outside the sandbox. Only your own same-repository PRs qualify for now; a PR from a fork never starts.
 - The review session runs in Copilot CLI's command sandbox with its own Copilot home and no GitHub login (see the
   plan's Phase 0 results). It reads the PR with the helper's `pr-read` and posts only with `pr-review -File
@@ -106,11 +121,20 @@ own consent, because the review session runs the PR's code.
   author wakes it too; its own comments never do. A merge or close ends the loop; Desktop never merges.
 - A review loop's approval never ends a fix loop by itself: the PR's own code runs in the same sandbox as the reviewer
   and could post one through the helper, so it shows as **Confirm approval** like any other.
-- The clone copies every object (it shares no file with your repository), and its Git directory sits outside the
-  checkout, read-only to the sandbox. Desktop's own Git commands name that directory directly and never follow the
-  checkout's `.git` pointer, so nothing the PR's code writes into its checkout is run by Desktop.
-- A reviewer folder is removed when its loop has ended and its tab is closed; folders a restart left behind are
-  removed after a week.
+- The worktree shares your project's Git directory, which the sandbox may read but not write: the reviewer can read
+  your local history, branches and Git metadata, but not change them. So a review does not start while the project's
+  own Git config holds a credential (a remote URL with a token, an http extraHeader, a credential helper set for this
+  repository); keep those in your global config or a credential manager. Desktop's own Git commands name the worktree's
+  Git directory directly and never follow its `.git` pointer, so nothing the PR's code writes there is run by Desktop.
+- Each review is recorded (repository, PR, reviewer, and the folder it will use) before anything is made, so the same
+  review cannot start twice. When its loop has ended and its tab is closed, Desktop removes its worktree (only if your
+  project still registers it there, and only while it is clean), its ref and its folder; it never prunes your other
+  worktrees. A worktree with changes is kept for you, and Desktop says where.
+- An approval lists the checks the reviewer ran and the required ones it could not run in the sandbox. With one
+  missing, it is posted as a comment instead; say "approve anyway" in the review tab and the reviewer posts the
+  approval, after Desktop checks the head and base again.
+- When the PR is merged or closed, Desktop tells you if it merged at a head the loop had not approved, or with the last
+  review's findings open. Nothing is posted after a merge.
 - Known limits: inside Copilot's Windows sandbox, this repository's own esbuild build, its tests and `pnpm install` do
   not run, so the reviewer reports them as not run. A review session started before a restart does not resume into
   its loop; start a new review.

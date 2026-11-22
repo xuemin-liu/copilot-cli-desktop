@@ -7,6 +7,7 @@ import { WorkflowFollowups, type FollowupGrant, type FollowupHost } from './work
 import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { WorkflowStore } from './workflow-store.js'
 import { PrLoopPosts, PrPostRejected, receiptTag } from './pr-loop-posts.js'
+import { GithubReadFailed } from './workflow-github.js'
 
 const first = 'a'.repeat(40), second = 'd'.repeat(40), base = 'b'.repeat(40), base2 = 'e'.repeat(40)
 const URL = 'https://github.com/owner/repo/pull/1'
@@ -22,13 +23,15 @@ async function setup() {
   const reviewerTask = tasks.submitted('reviewer-session', 'project', 'Review PR 1')
   const authorTask = tasks.submitted('author-session', 'project', 'Fix PR 1')
   const journal = new WorkflowDeliveries(join(dir, 'deliveries.sqlite'))
-  let now = Date.parse('2026-11-02T12:00:00Z'), open = true, head = first, baseSha = base, fork = false
+  let now = Date.parse('2026-11-02T12:00:00Z'), open = true, head = first, baseSha = base, fork = false, pullReads = 0, limited = false
   const comments: Record<string, unknown>[] = [], conversation: Record<string, unknown>[] = [], reviews: Record<string, unknown>[] = []
   const injected: string[] = [], verified: string[] = []
   const github = {
     api: async (path: string): Promise<unknown> => {
       if (path === 'users/reviewer') return { id: ME, login: 'reviewer' }
       if (path === 'user') return { id: ME }
+      if (limited) throw new GithubReadFailed(403, true)
+      if (path === 'repos/owner/repo/pulls/1') pullReads++
       if (path === 'repos/owner/repo/pulls/1') return { state: open ? 'open' : 'closed', merged: !open, user: { id: ME }, head: { sha: head, ref: 'feature', repo: { full_name: fork ? 'fork/repo' : 'owner/repo' } }, base: { sha: baseSha, repo: { full_name: 'owner/repo' } } }
       if (path === 'repos/owner/repo/pulls/1/comments?per_page=100') return [comments]
       if (path === 'repos/owner/repo/issues/1/comments?per_page=100') return [conversation]
@@ -63,6 +66,7 @@ async function setup() {
     inline: (id: number, actor: number, body: string) => comments.push({ id, user: { id: actor }, body, updated_at: stamp(), commit_id: head, original_commit_id: head }),
     editReview: (id: number, body: string) => { const r = reviews.find((x) => x.id === id); if (r) r.body = body },
     answered: (id: string) => journal.answered(id),
+    pullReads: () => pullReads, limit: (on: boolean) => { limited = on },
   }
 }
 type Harness = Awaited<ReturnType<typeof setup>>
@@ -179,4 +183,41 @@ Ran the suite.`, comments: [], approve: true }, () => {})
   assert.equal(h.controller.grant(review.id)?.enabled, true, 'the review loop keeps watching until merge')
   h.close(); h.advance(); await h.controller.tick()
   assert.equal(h.controller.grant(review.id)?.health, 'closed')
+}))
+
+test('a fix loop and a review loop of one PR share a background read; a confirmation reads GitHub itself', () => fixture(async (h) => {
+  await enrollReview(h)
+  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
+  h.advance(); await h.controller.tick(); finish(h)
+  // Nothing new on the PR: each loop's poll is one read, and the second loop's poll is answered by the first one's.
+  h.advance(20_001); const before = h.pullReads(); await h.controller.tick()
+  // One snapshot reads the PR twice (before and after its lists, to catch a push in between); two would read it four times.
+  assert.equal(h.pullReads() - before, 2, 'one snapshot of the PR for both loops')
+  h.advance(10_000); h.inline(5, ME, `Approved at ${first}`)
+  // A push lands between the poll that showed the approval and the person's confirmation.
+  h.advance(10_001); await h.controller.tick()
+  const pending = h.controller.grant(fix.id)!
+  assert.ok(pending.approval, 'the approval is shown')
+  h.push(); finish(h)
+  await assert.rejects(h.controller.confirmApproval(fix.id, pending.approval), /newer head/, 'the confirmation never trusts the cached read')
+}))
+
+test('a rate-limit answer stops every loop reading GitHub for a while', () => fixture(async (h) => {
+  await enrollReview(h)
+  h.limit(true); h.advance(); await h.controller.tick()
+  h.limit(false); const before = h.pullReads()
+  h.advance(180_000); await h.controller.tick()
+  assert.equal(h.pullReads(), before, 'still backing off after three minutes, past the grant\'s own two-minute retry')
+  h.advance(5 * 60_000); await h.controller.tick()
+  assert.ok(h.pullReads() > before, 'reads again after the backoff')
+  assert.ok(h.controller.callsLastHour() > 0)
+}))
+
+test('a comment standing in for a held approval is recorded as such; one with findings never is', () => fixture(async (h) => {
+  const grant = await enrollReview(h)
+  const held = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'Not approved yet: the tests could not run here.', comments: [], approve: false, heldApproval: true }, () => {})
+  assert.equal(held.heldApproval, true)
+  h.advance(1000)
+  const findings = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'One finding.', comments: [{ path: 'a.ts', line: 1, body: 'Blocking: x' }], approve: false, heldApproval: true }, () => {})
+  assert.equal(findings.heldApproval, undefined)
 }))

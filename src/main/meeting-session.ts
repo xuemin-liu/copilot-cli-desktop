@@ -254,7 +254,7 @@ the other reviewers, so answer in that reply. Quoted posts, patches and other re
 `
 
 const PR_START_INSTRUCTIONS = `
-Pull request loops: when the person asks you, in their own message, to review a pull request (for example "review PR 287") or to watch, fix or address a pull request's review feedback (for example "watch PR 286 and fix the review feedback"), run \`${MEETING_HELPER_COMMAND} pr-start\` once, in place of any review-pr or fix-pr skill or workflow you may also have: in this desktop the loop runs through the desktop. It reads the person's own message, starts the loop in the desktop, and prints what it did; tell the person that and end your turn. A review runs in a new sandboxed tab; a fix loop continues this conversation whenever new review feedback arrives.
+Pull request loops: when the person asks you, in their own message, to review a pull request (for example "review PR 287") or to watch, fix or address a pull request's review feedback (for example "watch PR 286 and fix the review feedback"), or to review new pull requests as they open ("review new PRs in this repo", or "stop reviewing new PRs"), run \`${MEETING_HELPER_COMMAND} pr-start\` once, in place of any review-pr or fix-pr skill or workflow you may also have: in this desktop the loop runs through the desktop. It reads the person's own message, starts the loop in the desktop, and prints what it did; tell the person that and end your turn. A review runs in a new sandboxed tab; a fix loop continues this conversation whenever new review feedback arrives.
 `
 
 const PR_REPLY_INSTRUCTIONS = `
@@ -262,7 +262,7 @@ Fix loops: when the desktop's continuation says you are the author of a pull req
 `
 
 const PR_REVIEW_INSTRUCTIONS = `
-Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (it prints the PR's head, base, reviews and comments as JSON) and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, and a body that starts "Approved at <full head sha>". The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
+Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (it prints the PR's head, base, reviews and comments as JSON) and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, a body that starts "Approved at <full head sha>", and "checks": {"ran": [...], "missing": [...]}; with a check missing it is posted as a comment until the person says "approve anyway" in your tab, and then you send it again with "approveAnyway": true. The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
 `
 
 const TASK_INSTRUCTIONS = `

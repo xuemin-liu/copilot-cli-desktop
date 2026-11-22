@@ -1,0 +1,77 @@
+import { readFileSync } from 'node:fs'
+import { basename } from 'node:path'
+import { writeFileAtomic } from './atomic-file.js'
+
+/**
+ * Which review owns which reviewer folder and worktree (docs/pr-loops-plan.md, decision 6). A start records its
+ * (repository, PR, reviewer) and the folder it is about to make before anything is made, so:
+ * - a second start of the same review is refused, also while the first is still cloning;
+ * - after a crash, what the desktop finds in the person's project is known to be its own, and nothing else is touched.
+ * A failed start releases its record once its folder is gone. A record whose worktree has changes is kept for the
+ * person (`kept`), with its folder.
+ */
+export interface ReviewReservation {
+  /** The launch id: the reviewer folder's own name. */
+  launchId: string
+  repository: string; number: number; reviewer: string
+  project: string; root: string; checkout: string; ref: string
+  /** The review task, once the session took its first prompt. */
+  taskId: string | null
+  createdAt: number
+  kept: boolean
+}
+
+const key = (r: Pick<ReviewReservation, 'repository' | 'number' | 'reviewer'>): string => `${r.repository.toLowerCase()}#${r.number}#${r.reviewer}`
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+export class ReviewReservations {
+  private records = new Map<string, ReviewReservation>()
+  private writing: Promise<void> = Promise.resolve()
+  constructor(private readonly path: string, private readonly now: () => number = Date.now) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
+      if (Array.isArray(parsed)) for (const value of parsed) if (valid(value)) this.records.set(value.launchId, value)
+    } catch { /* None yet. An unreadable file reserves nothing; the startup sweep keeps folders it cannot account for. */ }
+  }
+  list(): ReviewReservation[] { return [...this.records.values()].map((r) => ({ ...r })) }
+  /** The holder of this review, if any. */
+  holder(repository: string, number: number, reviewer: string): ReviewReservation | null {
+    const wanted = key({ repository, number, reviewer })
+    return [...this.records.values()].find((r) => key(r) === wanted) ?? null
+  }
+  /** Records the review before anything is made. Throws if this review is already held. Atomic within the process. */
+  async reserve(record: Omit<ReviewReservation, 'taskId' | 'createdAt' | 'kept'>): Promise<void> {
+    if (!UUID.test(record.launchId) || basename(record.root) !== record.launchId) throw new Error('Invalid reviewer folder')
+    const held = this.holder(record.repository, record.number, record.reviewer)
+    if (held) throw new Error(held.kept
+      ? `An earlier review of PR #${record.number} left changes in its worktree (${held.checkout}); look at it and remove it first.`
+      : `PR #${record.number} already has a review starting or running.`)
+    this.records.set(record.launchId, { ...record, taskId: null, createdAt: this.now(), kept: false })
+    try { await this.save() } catch (error) { this.records.delete(record.launchId); throw error }
+  }
+  async bind(launchId: string, taskId: string): Promise<void> {
+    const r = this.records.get(launchId); if (!r) return
+    this.records.set(launchId, { ...r, taskId }); await this.save()
+  }
+  async keep(launchId: string): Promise<void> {
+    const r = this.records.get(launchId); if (!r || r.kept) return
+    this.records.set(launchId, { ...r, kept: true }); await this.save()
+  }
+  async release(launchId: string): Promise<void> {
+    if (!this.records.delete(launchId)) return
+    await this.save()
+  }
+  private save(): Promise<void> {
+    const text = JSON.stringify([...this.records.values()])
+    this.writing = this.writing.catch(() => {}).then(() => writeFileAtomic(this.path, text))
+    return this.writing
+  }
+}
+
+function valid(value: unknown): value is ReviewReservation {
+  const v = value as ReviewReservation
+  return !!v && typeof v === 'object' && typeof v.launchId === 'string' && UUID.test(v.launchId) && typeof v.repository === 'string' && Number.isSafeInteger(v.number)
+    && typeof v.reviewer === 'string' && typeof v.project === 'string' && typeof v.root === 'string' && basename(v.root) === v.launchId
+    && typeof v.checkout === 'string' && typeof v.ref === 'string' && v.ref === `refs/desktop-review/${v.launchId}`
+    && (v.taskId === null || typeof v.taskId === 'string') && Number.isFinite(v.createdAt) && typeof v.kept === 'boolean'
+}

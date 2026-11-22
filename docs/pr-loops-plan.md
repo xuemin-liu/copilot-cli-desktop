@@ -263,3 +263,17 @@ the meeting MCP tools is left for later.
 - Claude Code or Codex sessions as the author or reviewer. They can already take part through the marker contract
   with their own commands, but the desktop does not deliver to them here.
 - Waiting while the desktop is closed. Like follow-ups, the loops run only while the desktop runs, in the tray too.
+
+**Revision: worktree, agreed in review meeting P67F.** The reviewer clone is replaced by a detached `git worktree` of
+the person's project, as `/review-pr` uses: a full clone cost one copy of the repository per review, which a large
+project cannot afford. The PR is fetched into the project as `refs/desktop-review/<id>`, hooks off, and the desktop
+still names the worktree's Git directory and work tree itself. The project's shared Git directory is read-only to the
+sandbox; a preflight refuses the review when the project's own config (local or worktree scope) holds a credential,
+naming only its kind. Each review is reserved (repository, PR, reviewer, launch id, folder) before anything is made;
+removal checks the project still registers the worktree at that folder, keeps one with changes, and never prunes.
+An approval lists the checks run and missing; with one missing it is a comment until the person says "approve anyway"
+in the reviewer tab. The new-PR queue counts only PRs opened after it was turned on, reads every page, belongs to one
+repository, is fenced so Stop wins over a check in flight, and has no daily cap; "review my PR" and a PR number that does
+not exist yet (waited for an hour) start from chat, and "fix my PR" resolves the branch's PR from the tab's folder.
+Background polls of one PR share a read for fifteen seconds (confirmations read fresh), and a rate-limit answer stops
+reading for five minutes; past 2400 calls an hour PR loops poll every thirty seconds instead of twenty.

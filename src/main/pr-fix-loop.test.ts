@@ -263,3 +263,13 @@ test('a poll that refreshes the approval during the confirmation cannot make the
   assert.equal(after.enabled, true)
   assert.equal(after.approval?.base, 'e'.repeat(40), 'the new base is shown for a new click')
 }))
+
+test('a PR loop reads its PR every twenty seconds; a follow-up keeps two minutes', () => fixture(async (h) => {
+  await enrollFix(h)
+  const legacy = await h.controller.enroll(h.other.id, 'https://github.com/owner/repo/pull/2', ['reviewer'], false).catch(() => null)
+  void legacy
+  h.advance(); await h.controller.tick()
+  h.inline(1)
+  h.advance(20_001); await h.controller.tick()
+  assert.equal(h.injected.length, 1, 'a review comment reaches the author within twenty seconds')
+}))

@@ -240,3 +240,8 @@ export type DesktopEvent =
   | { type: 'session-crashed'; tabId: string; message: string }
 
 export interface PrPostView { id: string; grantId: string; state: 'intent' | 'uncertain'; kind: 'reply' | 'comment' | 'review' | 'approval'; target: number | null; createdAt: number }
+
+/** An open pull request the new-PR queue may review. `reason`: why it cannot be reviewed here. */
+export interface ReviewCandidate { number: number; title: string; author: string; url: string; reason: string | null
+  /** When GitHub says the PR was opened (ms): the new-PR queue reviews only PRs opened after it was turned on. */
+  createdAt: number }
