@@ -2,8 +2,19 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { CodexSessionDiscovery, agentCliHelp, buildAgentCliArgs, claudeSessionStored, resolveAgentCli } from './agent-cli.js'
+import { pathToFileURL } from 'node:url'
+import {
+  AntigravitySessionDiscovery,
+  CodexSessionDiscovery,
+  agentCliHelp,
+  antigravityDataRoot,
+  antigravitySessionStored,
+  buildAgentCliArgs,
+  claudeSessionStored,
+  resolveAgentCli,
+} from './agent-cli.js'
 import { newSessionOptions } from './session-name.js'
 import { createTab, EMPTY_TABS_STATE } from './session-tab-machine.js'
 
@@ -22,14 +33,16 @@ test('buildAgentCliArgs starts Codex bare and resumes only a stored session', ()
   assert.deepEqual(buildAgentCliArgs('codex', { id: ID, stored: true }), ['resume', ID])
 })
 
-test('buildAgentCliArgs leaves Antigravity conversation selection to its own picker', () => {
+test('buildAgentCliArgs starts Antigravity bare and resumes only a stored conversation', () => {
   assert.deepEqual(buildAgentCliArgs('antigravity', { id: null, stored: false }), [])
-  assert.deepEqual(buildAgentCliArgs('antigravity', { id: ID, stored: true }), [])
+  assert.deepEqual(buildAgentCliArgs('antigravity', { id: ID, stored: false }), [])
+  assert.deepEqual(buildAgentCliArgs('antigravity', { id: ID, stored: true }), ['--conversation', ID])
 })
 
 test('buildAgentCliArgs refuses an id that is not a UUID, so nothing else can become an argument', () => {
   assert.throws(() => buildAgentCliArgs('claude', { id: '--dangerously-skip-permissions', stored: true }), /Invalid session id/)
   assert.throws(() => buildAgentCliArgs('codex', { id: 'exec', stored: true }), /Invalid session id/)
+  assert.throws(() => buildAgentCliArgs('antigravity', { id: '--dangerously-skip-permissions', stored: true }), /Invalid session id/)
 })
 
 test('resolveAgentCli runs the executable an npm shim declares, never the shim', async () => {
@@ -272,4 +285,117 @@ test('agentCliHelp reads the resolved executable help, including output from a n
   const failedWithOutput = await agentCliHelp(launch, { env: {}, execFile: async () => { throw Object.assign(new Error('exit 1'), { stdout: '', stderr: 'Usage: x --sandbox' }) } })
   assert.equal(failedWithOutput, 'Usage: x --sandbox')
   assert.equal(await agentCliHelp(launch, { env: {}, execFile: async () => { throw new Error('ENOENT') } }), null)
+})
+
+function writeAntigravitySummary(
+  root: string,
+  row: { id: string; workspaces: string[]; parentId?: string; nestingDepth?: number },
+): void {
+  const db = new DatabaseSync(join(root, 'conversation_summaries.db'))
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      workspace_uris TEXT NOT NULL,
+      parent_conversation_id TEXT NOT NULL DEFAULT '',
+      nesting_depth INTEGER NOT NULL DEFAULT 0
+    )`)
+    db.prepare(`INSERT OR REPLACE INTO conversation_summaries (conversation_id, workspace_uris, parent_conversation_id, nesting_depth)
+      VALUES (?, ?, ?, ?)`).run(
+      row.id,
+      JSON.stringify(row.workspaces.map((folder) => pathToFileURL(folder).href)),
+      row.parentId ?? '',
+      row.nestingDepth ?? 0,
+    )
+  } finally { db.close() }
+}
+
+test('antigravitySessionStored checks stored conversation files and summaries safely', async () => {
+  const gemini = await mkdtemp(join(tmpdir(), 'agent-cli-agy-stored-'))
+  try {
+    const env = { ANTIGRAVITY_GEMINI_DIR: gemini }
+    const root = antigravityDataRoot(env)
+    assert.equal(root, join(gemini, 'antigravity-cli'))
+    assert.equal(await antigravitySessionStored(ID, env), false)
+    assert.equal(await antigravitySessionStored('../../etc/passwd', env), false)
+    await mkdir(join(root, 'conversations'), { recursive: true })
+    await writeFile(join(root, 'conversations', `${ID}.db`), '')
+    assert.equal(await antigravitySessionStored(ID, env), true)
+    assert.equal(await antigravitySessionStored(OTHER_ID, env), false)
+    writeAntigravitySummary(root, { id: OTHER_ID, workspaces: [join(gemini, 'project')] })
+    assert.equal(await antigravitySessionStored(OTHER_ID, env), true)
+  } finally { await rm(gemini, { recursive: true, force: true }) }
+})
+
+test('AntigravitySessionDiscovery claims the new top-level conversation for the tab folder and ignores others', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cli-agy-discover-'))
+  try {
+    const now = Date.now()
+    const cwd = join(root, 'my project')
+    const elsewhere = join(root, 'elsewhere')
+    await mkdir(cwd, { recursive: true })
+    await mkdir(elsewhere, { recursive: true })
+    // Existed before the tab started: must never be claimed even though it shares the folder.
+    writeAntigravitySummary(root, { id: OTHER_ID, workspaces: [cwd] })
+    const subagentId = '22222222-2222-4333-8444-555555555555'
+    const otherFolderId = '33333333-3333-4333-8444-555555555555'
+    let polls = 0
+    const claimed: string[] = []
+    const discovery = new AntigravitySessionDiscovery({
+      root, cwd, now: () => now,
+      claim: (id) => { claimed.push(id); return true },
+      sleep: async () => {
+        polls += 1
+        if (polls === 1) {
+          // Subagent in same folder, unrelated folder, and target conversation before workspace_uris is populated.
+          writeAntigravitySummary(root, { id: subagentId, workspaces: [cwd], parentId: OTHER_ID, nestingDepth: 1 })
+          writeAntigravitySummary(root, { id: otherFolderId, workspaces: [elsewhere] })
+          writeAntigravitySummary(root, { id: ID, workspaces: [] })
+        }
+        if (polls === 2) writeAntigravitySummary(root, { id: ID, workspaces: [cwd] })
+        if (polls > 5) throw new Error('not found')
+      },
+    })
+    await discovery.ready()
+    assert.equal(await discovery.find(), ID)
+    assert.deepEqual(claimed, [ID])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('AntigravitySessionDiscovery falls back to history.jsonl and supports immediate check()', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cli-agy-history-'))
+  try {
+    const cwd = join(root, 'repo')
+    await mkdir(cwd, { recursive: true })
+    await writeFile(join(root, 'history.jsonl'), `${JSON.stringify({ workspace: cwd, conversationId: OTHER_ID })}\n`)
+    const discovery = new AntigravitySessionDiscovery({ root, cwd, claim: () => true })
+    await discovery.ready()
+    assert.equal(await discovery.check(), null)
+    await writeFile(
+      join(root, 'history.jsonl'),
+      `${JSON.stringify({ workspace: cwd, conversationId: OTHER_ID })}\n${JSON.stringify({ workspace: cwd, conversationId: ID })}\n`,
+    )
+    assert.equal(await discovery.check(), ID)
+    // Repeated check returns the already-claimed id without claiming again.
+    assert.equal(await discovery.check(), ID)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('AntigravitySessionDiscovery skips a conversation another tab claimed and stops on cancel', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-cli-agy-cancel-'))
+  try {
+    const cwd = join(root, 'repo')
+    await mkdir(cwd, { recursive: true })
+    let polls = 0
+    const discovery = new AntigravitySessionDiscovery({
+      root, cwd,
+      claim: () => false,
+      sleep: async () => {
+        polls += 1
+        if (polls === 1) writeAntigravitySummary(root, { id: ID, workspaces: [cwd] })
+        if (polls === 3) discovery.cancel()
+      },
+    })
+    assert.equal(await discovery.find(), null)
+    assert.equal(polls, 3)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

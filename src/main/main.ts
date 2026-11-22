@@ -137,7 +137,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { CodexSessionDiscovery, agentCliHelp, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { buildOtherCliLaunchArgs, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -2395,8 +2395,14 @@ async function listSessionClis(): Promise<SessionCliChoice[]> {
   return [copilot, ...others]
 }
 
-/** Codex session ids already given to a tab, so two new Codex tabs in one folder never take the same one. */
-const claimedCodexSessions = new Set<string>()
+/** Session ids already given to a Codex or Antigravity tab, so two new tabs in one folder never take the same one. */
+const claimedOtherCliSessions = new Set<string>()
+
+function claimOtherCliSession(id: string): boolean {
+  if (claimedOtherCliSessions.has(id) || tabsState.tabs.some((tab) => tab.lastSessionId === id)) return false
+  claimedOtherCliSessions.add(id)
+  return true
+}
 
 let antigravityMcpSetup: Promise<void> | undefined
 
@@ -2483,11 +2489,11 @@ function createOtherCliSession(cli: OtherCli, resolution: AgentCliResolution, cw
     processLabel: sessionCliLabel(cli),
     ...(cli === 'codex' && knownId === null ? { sessionIdDiscovery: new CodexSessionDiscovery({
       root: codexSessionsRoot(env), cwd,
-      claim: (id) => {
-        if (claimedCodexSessions.has(id) || tabsState.tabs.some((tab) => tab.lastSessionId === id)) return false
-        claimedCodexSessions.add(id)
-        return true
-      },
+      claim: claimOtherCliSession,
+    }) } : {}),
+    ...(cli === 'antigravity' && knownId === null ? { sessionIdDiscovery: new AntigravitySessionDiscovery({
+      root: antigravityDataRoot(env), cwd,
+      claim: claimOtherCliSession,
     }) } : {}),
     ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
   })
@@ -4088,8 +4094,12 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       cancelHeldInput(tabId)
       if (managed) await managed.session.stop()
       const sessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
-      // Codex ids are only ever read from its store. Claude Code stores a session with its first prompt.
-      const stored = sessionId !== null && (cli === 'codex' || (cli === 'claude' && await claudeSessionStored(sessionId)))
+      // Codex ids are only ever read from its store. Claude Code and Antigravity store a conversation with its first prompt.
+      const stored = sessionId !== null && (
+        cli === 'codex'
+        || (cli === 'claude' && await claudeSessionStored(sessionId))
+        || (cli === 'antigravity' && await antigravitySessionStored(sessionId))
+      )
       managed?.session.removeAllListeners()
       const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
       let replacement: PtySession

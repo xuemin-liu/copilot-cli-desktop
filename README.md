@@ -195,17 +195,16 @@ See [Google's Antigravity installation guide](https://antigravity.google/docs/ge
 
 - The CLI keeps its own sign-in, settings and approvals. The desktop passes it none of Copilot's credentials,
   permission presets, flags or helpers, so the sidebar shows "Access set in Claude Code" instead of a preset.
-- The desktop saves and restores the tab. Claude Code and Codex CLI reopen the saved conversation when the desktop
-  has its session ID and the CLI has stored it. Antigravity CLI starts in the saved folder. Use `/resume` inside
-  the terminal to choose an earlier conversation.
+- The desktop saves and restores the tab. Claude Code, Codex CLI and Antigravity CLI reopen the saved conversation when
+  the desktop has its session ID and the CLI has stored it.
 - The Git panel, the debug browser pane, renaming, pop-out windows and unloading work as for any tab.
 - Features built on Copilot's event log and flags are for Copilot tabs only: activity and approval badges, new
   worktrees made by the desktop, attachments, side chats, tasks and follow-ups, desktop control, History, usage and
   fan-out. In a meeting, such a tab takes part as an [outside agent](#outside-agents-start-or-join-by-meeting-id):
   ask it to join by the meeting id.
-- Claude Code and Codex CLI tabs resume the session ID the desktop originally associated with the tab. Two new
-  Codex tabs opened in one folder before either has a prompt cannot be told
-  apart, so each takes the first session Codex stores there.
+- Claude Code, Codex CLI and Antigravity CLI tabs resume the session ID the desktop originally associated with the tab.
+  Two new Codex or Antigravity tabs opened in one folder before either has a prompt cannot be told
+  apart, so each takes the first session the CLI stores there.
 
 `pnpm other-cli:check` checks how the desktop launches and restarts these tabs. It uses Claude Code and Codex CLI
 with isolated homes, and a local executable fixture for `agy`.

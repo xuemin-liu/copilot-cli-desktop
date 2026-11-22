@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs'
-import { access, open, readdir, readFile } from 'node:fs/promises'
+import { access, open, readdir, readFile, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, delimiter, join, win32 } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath } from 'node:url'
 import { samePath } from './host-path.js'
 import { findPosixExecutable } from './posix-executables.js'
 import {
@@ -135,9 +137,9 @@ export async function agentCliHelp(
 }
 
 /**
- * The CLI's arguments for a tab. Claude Code takes the id of a new session and resumes by it; Codex names its own
- * sessions, so a new one gets no id (it is read from Codex's session store later) and a stored one is resumed by id.
- * Antigravity uses its own /resume picker. Its workspace-scoped recent conversation cannot identify a tab's session.
+ * The CLI's arguments for a tab. Claude Code takes the id of a new session and resumes by it; Codex and Antigravity
+ * name their own sessions, so a new one gets no id (it is read from the CLI's session store later) and a stored one is
+ * resumed by id.
  */
 export function buildAgentCliArgs(cli: OtherCli, session: { id: string | null; stored: boolean }): string[] {
   if (session.id !== null && !UUID.test(session.id)) throw new Error('Invalid session id')
@@ -145,7 +147,9 @@ export function buildAgentCliArgs(cli: OtherCli, session: { id: string | null; s
     if (session.id === null) return []
     return session.stored ? ['--resume', session.id] : ['--session-id', session.id]
   }
-  return cli === 'codex' && session.id !== null && session.stored ? ['resume', session.id] : []
+  if (session.id === null || !session.stored) return []
+  if (cli === 'codex') return ['resume', session.id]
+  return ['--conversation', session.id]
 }
 
 function claudeConfigRoot(env: NodeJS.ProcessEnv): string {
@@ -154,6 +158,10 @@ function claudeConfigRoot(env: NodeJS.ProcessEnv): string {
 
 export function codexSessionsRoot(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.CODEX_HOME || join(homedir(), '.codex'), 'sessions')
+}
+
+export function antigravityDataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini'), 'antigravity-cli')
 }
 
 /**
@@ -171,11 +179,98 @@ export async function claudeSessionStored(sessionId: string, env: NodeJS.Process
   return false
 }
 
+interface AntigravitySummaryRow {
+  id: string
+  workspacePaths: string[]
+  isSubagent: boolean
+}
+
+function parseAntigravityWorkspaceUris(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw.trim()) return []
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { return [] }
+  if (!Array.isArray(parsed)) return []
+  const paths: string[] = []
+  for (const item of parsed) {
+    if (typeof item !== 'string' || !item.startsWith('file://')) continue
+    try { paths.push(fileURLToPath(item)) } catch { /* ignore malformed or non-local URI */ }
+  }
+  return paths
+}
+
+function readAntigravitySummaries(root: string): AntigravitySummaryRow[] | null {
+  const dbPath = join(root, 'conversation_summaries.db')
+  if (!existsSync(dbPath)) return null
+  let db: DatabaseSync | undefined
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true, timeout: 1_000 })
+    let rows: Array<Record<string, unknown>>
+    try {
+      rows = db.prepare(
+        'SELECT conversation_id, workspace_uris, parent_conversation_id, nesting_depth FROM conversation_summaries',
+      ).all() as Array<Record<string, unknown>>
+    } catch {
+      rows = db.prepare(
+        'SELECT conversation_id, workspace_uris FROM conversation_summaries',
+      ).all() as Array<Record<string, unknown>>
+    }
+    const result: AntigravitySummaryRow[] = []
+    for (const row of rows) {
+      if (typeof row.conversation_id !== 'string' || !UUID.test(row.conversation_id)) continue
+      const parent = typeof row.parent_conversation_id === 'string' ? row.parent_conversation_id.trim() : ''
+      const depth = typeof row.nesting_depth === 'number' ? row.nesting_depth : 0
+      result.push({
+        id: row.conversation_id.toLowerCase(),
+        workspacePaths: parseAntigravityWorkspaceUris(row.workspace_uris),
+        isSubagent: parent.length > 0 || depth > 0,
+      })
+    }
+    return result
+  } catch {
+    return null
+  } finally {
+    try { db?.close() } catch { /* ignore close errors */ }
+  }
+}
+
+async function readAntigravityHistory(root: string): Promise<Array<{ id: string; workspace: string }>> {
+  let content: string
+  try { content = await readFile(join(root, 'history.jsonl'), 'utf8') } catch { return [] }
+  const entries: Array<{ id: string; workspace: string }> = []
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as { conversationId?: unknown; workspace?: unknown }
+      if (typeof parsed.conversationId === 'string' && UUID.test(parsed.conversationId) && typeof parsed.workspace === 'string') {
+        entries.push({ id: parsed.conversationId.toLowerCase(), workspace: parsed.workspace })
+      }
+    } catch { /* ignore malformed or partial line */ }
+  }
+  return entries
+}
+
+/**
+ * Whether Antigravity CLI has stored the conversation: it writes `conversations/<id>.db` (or `.pb`) and indexes it in
+ * `conversation_summaries.db`. Checking avoids passing `--conversation` for a conversation that was deleted.
+ */
+export async function antigravitySessionStored(sessionId: string, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+  if (!UUID.test(sessionId)) return false
+  const root = antigravityDataRoot(env)
+  const id = sessionId.toLowerCase()
+  for (const ext of ['.db', '.pb']) {
+    try { await access(join(root, 'conversations', `${id}${ext}`)); return true } catch { /* try next */ }
+  }
+  const summaries = readAntigravitySummaries(root)
+  return summaries?.some((row) => row.id === id) ?? false
+}
+
 /** What a PtySession needs from something that finds its session id after the process has started. */
 export interface SessionIdDiscovery {
   /** Resolves once everything that existed before the spawn has been recorded. */
   ready(): Promise<void>
   find(): Promise<string | null>
+  /** One immediate check right before stopping, so a fast restart still captures a newly stored session. */
+  check?(): Promise<string | null>
   cancel(): void
 }
 
@@ -275,6 +370,130 @@ export class CodexSessionDiscovery implements SessionIdDiscovery {
         if (cwd === null || !id || !samePath(cwd, this.options.cwd) || !this.options.claim(id)) { this.rejected.add(file); continue }
         return this.cancelled ? null : id
       }
+    }
+    return null
+  }
+}
+
+export interface AntigravityDiscoveryOptions {
+  /** `antigravityDataRoot`. */
+  root: string
+  /** The folder the process was started in: the conversation's workspace must match it. */
+  cwd: string
+  /** Called with a matching conversation's id; false when another tab already has it, and the search goes on. */
+  claim(sessionId: string): boolean
+  now?(): number
+  sleep?(ms: number): Promise<void>
+  pollMs?: number
+  slowAfterMs?: number
+  slowPollMs?: number
+}
+
+const ANTIGRAVITY_CONVERSATION_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(?:db|pb)$/i
+
+async function existingAntigravityIds(root: string): Promise<Set<string>> {
+  const ids = new Set<string>()
+  for (const row of readAntigravitySummaries(root) ?? []) ids.add(row.id)
+  try {
+    for (const name of await readdir(join(root, 'conversations'))) {
+      const match = ANTIGRAVITY_CONVERSATION_FILE.exec(name)
+      if (match) ids.add(match[1]!.toLowerCase())
+    }
+  } catch { /* conversations folder may not exist yet */ }
+  try {
+    for (const name of await readdir(join(root, 'brain'))) {
+      if (UUID.test(name)) ids.add(name.toLowerCase())
+    }
+  } catch { /* brain folder may not exist yet */ }
+  for (const entry of await readAntigravityHistory(root)) ids.add(entry.id)
+  return ids
+}
+
+/**
+ * Finds the id of an Antigravity CLI conversation the desktop started. Like Codex, `agy` names its own conversations
+ * once the user sends a prompt, indexing them in `conversation_summaries.db` (and later `history.jsonl`). This watches
+ * for a new top-level conversation whose workspace matches the tab's folder and claims it for the tab.
+ */
+export class AntigravitySessionDiscovery implements SessionIdDiscovery {
+  private readonly before = new Set<string>()
+  private readonly rejected = new Set<string>()
+  private cancelled = false
+  private foundId: string | null = null
+  private inFlight: Promise<string | null> | null = null
+  private realCwd: string | null = null
+  private readonly started: number
+  private readonly snapshot: Promise<void>
+
+  constructor(private readonly options: AntigravityDiscoveryOptions) {
+    this.started = this.now()
+    this.snapshot = Promise.all([
+      existingAntigravityIds(options.root),
+      realpath(options.cwd).catch(() => null),
+    ]).then(([ids, resolved]) => {
+      for (const id of ids) this.before.add(id)
+      this.realCwd = resolved
+    })
+  }
+
+  private now(): number { return this.options.now?.() ?? Date.now() }
+
+  ready(): Promise<void> { return this.snapshot }
+
+  cancel(): void { this.cancelled = true }
+
+  private async matchesCwd(candidate: string): Promise<boolean> {
+    if (samePath(candidate, this.options.cwd)) return true
+    if (this.realCwd && samePath(candidate, this.realCwd)) return true
+    const resolved = await realpath(candidate).catch(() => null)
+    if (!resolved) return false
+    return samePath(resolved, this.options.cwd) || (this.realCwd !== null && samePath(resolved, this.realCwd))
+  }
+
+  private async scanOnce(): Promise<string | null> {
+    await this.snapshot
+    if (this.foundId !== null) return this.foundId
+    const summaries = readAntigravitySummaries(this.options.root)
+    if (summaries) {
+      for (const row of summaries) {
+        if (this.before.has(row.id) || this.rejected.has(row.id)) continue
+        if (row.isSubagent) { this.rejected.add(row.id); continue }
+        if (row.workspacePaths.length === 0) continue
+        let matched = false
+        for (const workspace of row.workspacePaths) {
+          if (await this.matchesCwd(workspace)) { matched = true; break }
+        }
+        if (!matched || !this.options.claim(row.id)) { this.rejected.add(row.id); continue }
+        this.foundId = row.id
+        return row.id
+      }
+    }
+    for (const entry of await readAntigravityHistory(this.options.root)) {
+      if (this.before.has(entry.id) || this.rejected.has(entry.id)) continue
+      if (!entry.workspace.trim()) continue
+      if (!await this.matchesCwd(entry.workspace) || !this.options.claim(entry.id)) { this.rejected.add(entry.id); continue }
+      this.foundId = entry.id
+      return entry.id
+    }
+    return null
+  }
+
+  check(): Promise<string | null> {
+    if (this.foundId !== null) return Promise.resolve(this.foundId)
+    if (this.inFlight) return this.inFlight
+    const scan = this.scanOnce().finally(() => { if (this.inFlight === scan) this.inFlight = null })
+    this.inFlight = scan
+    return scan
+  }
+
+  async find(): Promise<string | null> {
+    await this.snapshot
+    const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref() }))
+    while (!this.cancelled) {
+      const slow = this.now() - this.started > (this.options.slowAfterMs ?? 120_000)
+      await sleep(slow ? this.options.slowPollMs ?? 10_000 : this.options.pollMs ?? 2_000)
+      if (this.cancelled) break
+      const id = await this.check()
+      if (id !== null) return this.cancelled ? null : id
     }
     return null
   }

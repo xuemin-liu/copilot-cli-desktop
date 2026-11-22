@@ -546,6 +546,13 @@ export class PtySession extends EventEmitter {
       this.setStatus('completed')
       return
     }
+    if (this.lastKnownSessionId === null && this.storeDiscovery?.check) {
+      const discovered = await this.storeDiscovery.check().catch(() => null)
+      if (discovered !== null && this.lastKnownSessionId === null) {
+        this.lastKnownSessionId = discovered
+        this.emit('session-id', discovered)
+      }
+    }
     this.setStatus('stopping')
     const exited = new Promise<void>((resolve) => this.once('exit', resolve))
 
