@@ -2178,6 +2178,11 @@ function activateWorkspace(folder: string, options: { general?: boolean } = {}):
   })
 }
 
+function bundledPrWorkflows(): { tools: string; state: string } {
+  const tools = app.isPackaged ? join(process.resourcesPath, 'pr-workflows') : join(app.getAppPath(), 'resources', 'pr-workflows')
+  return { tools, state: join(app.getPath('userData'), 'pr-workflow-state') }
+}
+
 async function createSessionTab(...args: Parameters<typeof startSessionTab>): Promise<DesktopState> {
   const profileId = (args[0] === undefined ? activeWorkspaceProfile(desktopConfig) : args[0])?.id
   if (!profileId) return startSessionTab(...args)
@@ -2264,7 +2269,7 @@ async function startSessionTab(
       desktopEnvironment = null
     } else {
       plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env, logBrowserError)
-      plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
+      plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset }, bundledPrWorkflows())
       desktopEnvironment = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
       if (desktopEnvironment) plan.env = desktopEnvironment
     }
@@ -4156,7 +4161,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env, logBrowserError)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset })
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }, bundledPrWorkflows())
     const desktopEnvironment = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
     if (desktopEnvironment) plan.env = desktopEnvironment
     await desktopControl?.unregister(tabId, 'Turned off: the session restarted.')

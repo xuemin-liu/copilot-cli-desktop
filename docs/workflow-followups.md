@@ -52,29 +52,13 @@ This supplies Phase 4 of the [plan](task-workflows-plan.md). The subsequent
 [meeting migration](workflow-meeting-recovery.md) retains meeting files for round state and uses the same journal
 for local prompt identities and submission recovery.
 
-## Starting a PR loop: just ask
+## Starting from chat
 
-In a Copilot tab, ask in your own words, as you would start a meeting:
+In the project’s Copilot sessions, type **fix-pr** in the author chat and **review-pr** in the reviewer chat. Both use the current branch’s pull request. You can also supply a PR number or URL. The reviewer uses an isolated checkout. Each session uses its usual tool permissions and the bundled workflow and watcher. Local sessions need Node.js 18+ and an authenticated GitHub CLI.
 
-- **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab. A PR that does not
-  exist yet (you are creating it in another tab) is checked for every thirty seconds for an hour and reviewed when it
-  opens. Once that review starts, Desktop also reviews your new PRs in this project. Say **"stop reviewing new PRs"** to turn off discovery.
-- **"review my PR"**: your one open PR here is reviewed; with several, Desktop lists them and you say which; with none,
-  it waits for your next new PR as below.
-- **"review new PRs in this repo"**: each new pull request of yours in this project gets a review loop as it opens, like
-  `/review-pr`'s wait for the next PR. A review that started turns this on as well, for the project it used;
-  **"stop reviewing new PRs"** turns it off, also while a check is under way. Desktop checks with `gh` every thirty
-  seconds, which uses no model and no tokens; a model runs only when a review starts. One review starts at a time, with
-  no daily cap. Only PRs opened after it was turned on count; a fork, someone else's PR or one already in review is
-  skipped. If the project's origin changes, nothing starts until you ask again.
-- **"watch PR 286 and fix the review feedback"** (or "fix PR 286", "address the comments on PR 286", or without a
-  number, **"fix my PR"** / "watch this PR and fix the review feedback" for the PR of the branch this conversation is on): this
-  conversation becomes the PR's fix loop, with your own account as the reviewer whose feedback counts, and the
-  feedback already on the PR first.
+The reviewer posts findings on GitHub. The author validates feedback, pushes fixes and replies on the thread. The reviewer checks the updated revision and posts inline approval for the exact commit. The author finishes when it verifies that approval and has addressed outstanding feedback.
 
-The session runs the helper's `pr-start`, and Desktop decides only from the message you typed, as it does for "join
-meeting K7QF": a PR comment, a file or the code under review cannot start a loop. A PR number means the PR in this
-project's GitHub repository. The Tasks entries below do the same with more choices.
+The Tasks panel also supports manually configured follow-ups. To opt into repository-wide discovery, ask “review new PRs in this repo.” Say “stop reviewing new PRs” to stop discovery.
 
 ## Fix loop (PR author)
 

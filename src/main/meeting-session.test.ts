@@ -243,6 +243,25 @@ test('the helper sends a PR review file and a PR read, and pr-review needs its f
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
 })
 
+test('ordinary local chats discover both packaged PR skills and preserve existing skill directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pr-chat-'))
+  try {
+    const tools = join(process.cwd(), 'resources', 'pr-workflows')
+    const state = join(directory, 'pr-state')
+    const control = {port: 1, token: 'test'}
+    const capability = {version: '1.0.114', sideChat: false, remote: false, preset: 'default' as const}
+    const env = await prepareMeetingSessionEnvironment(directory, control, {COPILOT_SKILLS_DIRS: 'existing'}, capability, {tools, state})
+    assert.equal(env.COPILOT_SKILLS_DIRS, 'existing,' + join(tools, 'skills'))
+    assert.equal(env.COPILOT_DESKTOP_PR_STATE, state)
+    for (const name of ['fix-pr', 'review-pr']) {
+      assert.match(await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8'), new RegExp('name: ' + name))
+    }
+    assert.ok((await stat(join(tools, 'pr-poll.mjs'))).isFile())
+    const remote = await prepareMeetingSessionEnvironment(directory, control, {}, {...capability, remote: true}, {tools, state})
+    assert.equal(remote.COPILOT_DESKTOP_PR_TOOLS, undefined)
+  } finally { await rm(directory, {recursive: true, force: true}) }
+})
+
 test('pr-start takes nothing but the person\'s message, and the instructions say when to use it', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pr-start-helper-'))
   const calls: MeetingCommand[] = []

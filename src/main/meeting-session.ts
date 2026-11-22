@@ -274,6 +274,11 @@ const PR_START_INSTRUCTIONS = `
 Pull request loops: when the person asks you, in their own message, to review a pull request (for example "review PR 287") or to watch, fix or address a pull request's review feedback (for example "watch PR 286 and fix the review feedback"), or to review new pull requests as they open ("review new PRs in this repo", or "stop reviewing new PRs"), run \`${MEETING_HELPER_COMMAND} pr-start\` once, in place of any review-pr or fix-pr skill or workflow you may also have: in this desktop the loop runs through the desktop. It reads the person's own message, starts the loop in the desktop, and prints what it did; tell the person that and end your turn. A review runs in a new sandboxed tab; a fix loop continues this conversation whenever new review feedback arrives.
 `
 
+const PR_CHAT_INSTRUCTIONS = `
+When the person asks for fix-pr or review-pr (including /fix-pr, /review-pr, "fix PR 42" or "review PR 287"), perform that role in this conversation. Invoke the matching fix-pr or review-pr skill and follow its instructions, including its bundled poller. A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
+For an explicit request to start or stop repository-wide discovery, use the meeting helper's pr-start command.
+`
+
 const PR_REPLY_INSTRUCTIONS = `
 Fix loops: when the desktop's continuation says you are the author of a pull request in its fix loop, reply on review threads only with this helper, never with gh: write the reply to a Markdown file and run \`${MEETING_HELPER_COMMAND} pr-reply -To <inline comment id> -File <file>\` (use \`-To conversation\` for the PR's conversation). Start every reply with the marker the continuation names. The desktop checks the PR, the thread and the account, posts the reply, and tells you whether it landed. Never post an approval and never reply on another PR.
 `
@@ -287,17 +292,21 @@ Task outcomes: Desktop tracks the first submitted request in this supported sess
 `
 
 /** Writes the helper and instructions into the session's helper folder (the browser's, already on the instructions path). */
-export async function prepareMeetingSessionEnvironment(directory: string, control: { port: number; token: string }, environment: NodeJS.ProcessEnv, taskCapability?: TaskReportingCapability): Promise<NodeJS.ProcessEnv> {
+export async function prepareMeetingSessionEnvironment(directory: string, control: { port: number; token: string }, environment: NodeJS.ProcessEnv, taskCapability?: TaskReportingCapability, prWorkflow?: { tools: string; state: string }): Promise<NodeJS.ProcessEnv> {
   const windows = process.platform === 'win32'
   const helper = join(directory, windows ? 'meeting.ps1' : 'meeting.sh')
   const state = join(directory, 'meeting-control.json')
   const taskReports = join(directory, 'task-reports')
   await mkdir(taskReports, { recursive: true, mode: 0o700 })
+  const chatWorkflows = prWorkflow && !taskCapability?.sideChat && !taskCapability?.remote && taskCapability?.preset !== 'read-only' ? prWorkflow : undefined
+  if (chatWorkflows) await mkdir(chatWorkflows.state, { recursive: true, mode: 0o700 })
   await writeFileAtomic(helper, windows ? MEETING_HELPER : MEETING_HELPER_SH)
   await writeFileAtomic(state, JSON.stringify({ pid: process.pid, port: control.port, token: control.token }))
-  await writeFileAtomic(join(directory, '.github', 'instructions', 'meeting.instructions.md'), MEETING_INSTRUCTIONS + PR_START_INSTRUCTIONS + PR_REPLY_INSTRUCTIONS + PR_REVIEW_INSTRUCTIONS + (supportsTaskReporting(taskCapability) ? TASK_INSTRUCTIONS : ''))
+  await writeFileAtomic(join(directory, '.github', 'instructions', 'meeting.instructions.md'), MEETING_INSTRUCTIONS + (chatWorkflows ? PR_CHAT_INSTRUCTIONS : PR_START_INSTRUCTIONS) + PR_REPLY_INSTRUCTIONS + PR_REVIEW_INSTRUCTIONS + (supportsTaskReporting(taskCapability) ? TASK_INSTRUCTIONS : ''))
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
   return { ...environment,
+    ...(chatWorkflows ? { COPILOT_DESKTOP_PR_TOOLS: chatWorkflows.tools, COPILOT_DESKTOP_PR_STATE: chatWorkflows.state,
+      COPILOT_SKILLS_DIRS: [...new Set([...(environment.COPILOT_SKILLS_DIRS?.split(',').filter(Boolean) ?? []), join(chatWorkflows.tools, 'skills')])].join(',') } : {}),
     COPILOT_DESKTOP_MEETING_STATE: state,
     COPILOT_DESKTOP_MEETING_HELPER: helper,
     COPILOT_DESKTOP_TASK_REPORT_DIR: taskReports,
