@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { authorPostProblem, DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
+import { approvalHead, authorPostProblem, DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
 import { GithubWriteRefused, type GithubApi, type GithubWrite } from './workflow-github.js'
 import type { FollowupGrant } from './workflow-followups.js'
 
@@ -71,7 +71,7 @@ export class PrLoopPosts {
    * came from, which must be the grant's.
    */
   async reply(grant: FollowupGrant | null, sessionId: string, request: ReplyRequest, authorized: () => boolean = () => true): Promise<PostReceipt> {
-    if (!grant || !grant.enabled || grant.role !== 'author') throw new PrPostRejected('This session has no active fix loop.')
+    if (!grant || !grant.enabled || (grant.role !== 'author' && grant.role !== 'reviewer')) throw new PrPostRejected('This session has no active fix loop or review loop.')
     if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the fix loop for that PR.')
     if (this.busy.has(grant.id)) throw new PrPostRejected('Another reply of this loop is being posted; try again in a moment.')
     this.busy.add(grant.id)
@@ -81,24 +81,33 @@ export class PrLoopPosts {
       if (!body) throw new PrPostRejected('The reply is empty.')
       if (body.length > MAX_BODY) throw new PrPostRejected('The reply is too long.')
       if (new RegExp(TAG.source).test(body)) throw new PrPostRejected('The reply may not carry a receipt tag.')
-      const problem = authorPostProblem(body, grant.marker ?? DEFAULT_PR_MARKER)
+      const reviewer = grant.role === 'reviewer'
+      const marker = grant.marker ?? DEFAULT_PR_MARKER
+      const problem = reviewer
+        ? (isMarked(body, marker) || /^approved\b/i.test(body) ? 'Reviewer replies must be unmarked. Post approvals with pr-review.' : null)
+        : authorPostProblem(body, marker)
       if (problem) throw new PrPostRejected(problem)
       const to = request.to
-      const target = to === 'conversation' ? null : /^[0-9]{1,19}$/.test(to) && Number.isSafeInteger(Number(to)) && Number(to) > 0 ? Number(to) : undefined
+      if (reviewer && to === 'conversation') throw new PrPostRejected('A reviewer replies on an existing inline thread.')
+      let target = to === 'conversation' ? null : /^[0-9]{1,19}$/.test(to) && Number.isSafeInteger(Number(to)) && Number(to) > 0 ? Number(to) : undefined
       if (target === undefined) throw new PrPostRejected('Name an inline comment id, or "conversation".')
 
       const me = await this.host.api('user') as { id?: unknown }
       if (!me || me.id !== grant.accountId) throw new PrPostRejected('GitHub is signed in to a different account than the one this loop was enrolled with.')
-      const pull = await this.host.api(`repos/${grant.repository}/pulls/${grant.number}`) as { state?: unknown }
-      if (!pull || pull.state !== 'open') throw new PrPostRejected('The pull request is not open.')
       if (target !== null) {
         // The id must be an inline comment on this PR, not on another one the session saw somewhere.
-        const comment = await this.host.api(`repos/${grant.repository}/pulls/comments/${target}`) as { pull_request_url?: unknown }
+        const comment = await this.host.api(`repos/${grant.repository}/pulls/comments/${target}`) as { pull_request_url?: unknown; in_reply_to_id?: number }
         const expected = `https://api.github.com/repos/${grant.repository}/pulls/${grant.number}`.toLowerCase()
         if (!comment || typeof comment.pull_request_url !== 'string' || comment.pull_request_url.toLowerCase() !== expected) {
           throw new PrPostRejected('That comment is not on this pull request.')
         }
+        // GitHub accepts replies on the root comment of the thread.
+        target = comment.in_reply_to_id ?? target
       }
+      const pull = await this.host.api(`repos/${grant.repository}/pulls/${grant.number}`) as { state?: unknown; head?: { sha?: string }; base?: { sha?: string } }
+      if (!pull || pull.state !== 'open') throw new PrPostRejected('The pull request is not open.')
+      if (reviewer && (!pull.head?.sha || !pull.base?.sha || pull.head.sha !== grant.checkedOut || pull.base.sha !== grant.checkedOutBase))
+        throw new PrPostRejected('The PR revision changed. Review its current head and base before replying.')
 
       // The lookups above took time: the loop may have been paused, or the session lost its grant, meanwhile.
       if (!authorized()) throw new PrPostRejected('The fix loop was stopped or changed; nothing was posted.')
@@ -193,6 +202,13 @@ export class PrLoopPosts {
       }
       const me = await this.host.api('user') as { id?: unknown }
       if (!me || me.id !== grant.accountId) throw new PrPostRejected('GitHub is signed in to a different account than the one this loop was enrolled with.')
+      const root = `repos/${grant.repository}/pulls/${grant.number}`
+      let approvalPath: string | undefined
+      if (request.approve) {
+        const files = await this.host.api(root + '/files?per_page=1')
+        approvalPath = Array.isArray(files) ? files[0]?.filename : undefined
+        if (typeof approvalPath !== 'string' || !approvalPath) throw new PrPostRejected('GitHub did not supply a changed file for the inline approval.')
+      }
       const pull = await this.host.api(`repos/${grant.repository}/pulls/${grant.number}`) as { state?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } }
       if (!pull || pull.state !== 'open') throw new PrPostRejected('The pull request is not open.')
       const head = typeof pull.head?.sha === 'string' ? pull.head.sha : '', base = typeof pull.base?.sha === 'string' ? pull.base.sha : ''
@@ -203,8 +219,8 @@ export class PrLoopPosts {
       const approves = /^approved\b/i.test(body)
       if (request.approve) {
         if (comments.length) throw new PrPostRejected('An approval carries no findings; post the findings as a review without -Approve.')
-        if (!body.startsWith(`Approved at ${head}`)) throw new PrPostRejected(`An approval starts with "Approved at ${head}".`)
-      } else if (approves || /Approved at [a-f0-9]{7,}/.test(body)) throw new PrPostRejected('A review with findings never approves. Approve separately with -Approve once nothing is left open.')
+        if (approvalHead(body) !== head) throw new PrPostRejected(`An approval starts with "Approved at ${head}".`)
+      } else if (approves || /Approved at [a-f0-9]{7,}/.test(body) || comments.some(comment => /^\s*approved\b/i.test(comment.body))) throw new PrPostRejected('A review with findings never approves. Approve separately with -Approve once nothing is left open.')
 
       // As for replies: the loop may have been stopped, or the session lost its grant, during the lookups above.
       if (!authorized()) throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.')
@@ -217,8 +233,10 @@ export class PrLoopPosts {
       if (!authorized()) { this.save({ ...receipt, state: 'dismissed' }); throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.') }
       let answer: unknown
       try {
-        answer = await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/reviews`,
-          { commit_id: head, event: 'COMMENT', body: posted, comments: comments.map((comment) => ({ path: comment.path, line: comment.line, side: 'RIGHT', body: comment.body })) })
+        answer = approvalPath
+          ? await this.host.write('POST', root + '/comments', { commit_id: head, subject_type: 'file', path: approvalPath, body: posted })
+          : await this.host.write('POST', root + '/reviews',
+            { commit_id: head, event: 'COMMENT', body: posted, comments: comments.map((comment) => ({ path: comment.path, line: comment.line, side: 'RIGHT', body: comment.body })) })
       } catch (error) {
         if (error instanceof GithubWriteRefused) {
           // A 4xx (an inline line outside the diff, say) created nothing: correct the review and send it once.

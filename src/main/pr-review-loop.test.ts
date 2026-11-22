@@ -29,6 +29,7 @@ async function setup() {
   const github = {
     api: async (path: string): Promise<unknown> => {
       if (path === 'users/reviewer') return { id: ME, login: 'reviewer' }
+      if (path.endsWith('/files?per_page=1')) return [{ filename: 'a.ts' }]
       if (path === 'user') return { id: ME }
       if (limited) throw new GithubReadFailed(403, true)
       if (path === 'repos/owner/repo/pulls/1') pullReads++
@@ -44,6 +45,12 @@ async function setup() {
   const posts = new PrLoopPosts(join(dir, 'posts.sqlite'), { now: () => now, api: github.api as never,
     write: async (_method, path, body) => {
       const id = 9000 + reviews.length
+      if (path.endsWith('/comments')) {
+        assert.equal(body.subject_type, 'file')
+        assert.equal(body.path, 'a.ts')
+        comments.push({ id, user: { id: ME }, body: body.body, commit_id: body.commit_id, original_commit_id: body.commit_id, updated_at: new Date(now).toISOString() })
+        return { id, html_url: 'https://github.com/owner/repo/pull/1#discussion_r' + id }
+      }
       reviews.push({ id, user: { id: ME }, state: 'COMMENTED', commit_id: body.commit_id, submitted_at: new Date(now).toISOString(), body: body.body })
       return { id, html_url: `https://github.com/owner/repo/pull/1#pullrequestreview-${id}`, path }
     } })
@@ -119,6 +126,8 @@ test('reviewer posts name the checked-out head, never approve with findings, and
   await refused({ body: '🤖 x', comments: [], approve: false }, /never start with/)
   await refused({ body: 'ok', comments: [{ path: 'a.ts', line: 1, body: '🤖 x' }], approve: false }, /never start with/)
   await refused({ body: `Approved at ${first}`, comments: [], approve: false }, /never approves/)
+  await refused({ body: 'Two findings', comments: [{ path: 'a.ts', line: 1, body: 'Blocking: race' },
+    { path: 'a.ts', line: 2, body: `Approved at ${first}` }], approve: false }, /never approves/)
   await refused({ body: 'Looks fine', comments: [], approve: true }, /starts with "Approved at/)
   await refused({ body: `Approved at ${first}`, comments: [{ path: 'a.ts', line: 1, body: 'Nit: x' }], approve: true }, /no findings/)
   await refused({ body: 'x', comments: [{ path: '../etc', line: 1, body: 'Nit' }], approve: false }, /invalid path/)
@@ -176,6 +185,7 @@ Ran the suite.`, comments: [], approve: true }, () => {})
   assert.equal(pending.enabled, true)
   assert.equal(pending.health, 'approval-pending')
   assert.equal(pending.approval?.kind, 'text')
+  assert.match(pending.approval!.ref, /\/inline\//)
   assert.equal(pending.approval?.head, first)
   finish(h)  // the approval's text reached the author as feedback; that turn ends first
   const confirmed = await h.controller.confirmApproval(fix.id, pending.approval!)

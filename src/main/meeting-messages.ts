@@ -31,6 +31,10 @@ export const MEETING_HELPER_NOTE = process.platform === 'win32'
   ? `\n   If PowerShell refuses because running scripts is disabled, use \`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"\` in place of \`${MEETING_HELPER_COMMAND}\`.`
   : ''
 
+export const REVIEW_HELPER_COMMAND = process.platform === 'win32'
+  ? 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
+  : MEETING_HELPER_COMMAND
+
 /** The code-fence language for helper commands in the instructions. */
 export const HELPER_SHELL_FENCE = process.platform === 'win32' ? 'powershell' : 'sh'
 

@@ -1,3 +1,4 @@
+import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
@@ -203,7 +204,7 @@ export async function reviewCheckoutState(runner: GitRunner, area: Pick<Reviewer
 /** The first prompt of a review loop: the full role, then the first review. */
 export function firstReviewPrompt(repository: string, number: number, head: string, marker: string): string {
   return `Review ${repository} pull request #${number} at head ${head}, in this sandboxed worktree of it that the desktop prepared. You are the reviewer in a review loop that the desktop keeps going: it wakes you when the author replies or pushes.
-1. Read the PR with the meeting helper's pr-read command, run as powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER" pr-read (gh has no login in this sandbox). Diff the head against its base (git diff <base sha>...HEAD); read changed files in full where needed.
+1. Read the PR with the meeting helper's pr-read command, run as ${REVIEW_HELPER_COMMAND} pr-read and read all pages using -Page <nextPage> until nextPage is null. Diff the head against its base (git diff <base sha>...HEAD); read changed files in full where needed.
 2. Run the project's type-check, build and tests that the sandbox allows (on Windows use npm.cmd, not npm). Say which ones you could not run and why.
 3. Look for correctness bugs, security and privacy problems, data loss, missing tests and convention breaks. Every finding is something you want changed, marked Blocking, Non-blocking or Nit.
 4. Post ONE review with the helper's pr-review command (a JSON file with body, comments, approve and checks). With findings, never approve. With nothing to change, post an approval instead: approve true, no comments, body starting "Approved at ${head}", and "checks": {"ran": [...], "missing": [...]} listing the checks you ran and the required ones that could not run here. If any is missing, the desktop posts it as a comment, not an approval: tell the person which, and only if they then say "approve anyway" in this tab, post the approval again with "approveAnyway": true.

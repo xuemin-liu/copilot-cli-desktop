@@ -152,7 +152,7 @@ test('leftover reviewer folders older than a week are removed; others and anythi
 
 test('the first review prompt names the head, the helper and the rules', () => {
   const text = firstReviewPrompt('owner/repo', 7, 'a'.repeat(40), '🤖 ')
-  assert.match(text, /pr-read/); assert.match(text, /pr-review/); assert.match(text, /ExecutionPolicy Bypass/)
+  assert.match(text, /pr-read/); assert.match(text, /pr-review/); assert.match(text, process.platform === 'win32' ? /ExecutionPolicy Bypass/ : /sh "\$COPILOT_DESKTOP_MEETING_HELPER"/)
   assert.match(text, new RegExp(`Approved at ${'a'.repeat(40)}`))
   assert.match(text, /never approve/i); assert.match(text, /never fix the code/)
 })

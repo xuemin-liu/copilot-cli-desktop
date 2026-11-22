@@ -27,6 +27,7 @@ param(
   [string]$Topic = '',
   [string]$File,
   [string]$To = '',
+  [string]$Page = '',
   [switch]$Changes
 )
 $ErrorActionPreference = 'Stop'
@@ -57,6 +58,10 @@ try {
     $meetingBody.text = [System.IO.File]::ReadAllText($meetingFile.FullName)
   } elseif ($File -or $Changes) { throw ('meeting.ps1 ' + $Command + ' takes no -File or -Changes.') }
   if ($Command -eq 'start') { $meetingBody.topic = $Topic }
+  if ($Page) {
+    if ($Command -ne 'pr-read' -or $Page -notmatch '^[1-9][0-9]{0,7}(-[0-9]{1,2}-[0-9]{1,7}-[a-f0-9]{16})?$') { throw 'Use pr-read -Page <nextPage cursor>.' }
+    $meetingBody.page = $Page
+  }
   if ($Command -eq 'pr-reply') {
     if ($To -notmatch '^([0-9]{1,19}|conversation)$') { throw 'Usage: meeting.ps1 pr-reply -To <comment id>|conversation -File <reply.md>' }
     $meetingBody.to = $To
@@ -119,12 +124,13 @@ fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
 quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
 command=status
 if [ $# -gt 0 ]; then command=$1; shift; fi
-topic=''; file=''; changes=0; to=''
+topic=''; file=''; changes=0; to=''; page=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
     -File) [ $# -ge 2 ] || fail 'Usage: -File <path>'; file=$2; shift 2 ;;
     -Changes) changes=1; shift ;;
+    -Page) [ $# -ge 2 ] || fail 'Usage: pr-read -Page <number>'; page=$2; shift 2 ;;
     -To) [ $# -ge 2 ] || fail 'Usage: -To <comment id>|conversation'; to=$2; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
@@ -133,6 +139,11 @@ case "$command" in start|join|round|propose-close|end|status|task-report|task-st
 if [ "$command" = pr-reply ]; then
   printf '%s' "$to" | grep -Eq '^([0-9]{1,19}|conversation)$' || fail 'Usage: meeting.sh pr-reply -To <comment id>|conversation -File <reply.md>'
 elif [ -n "$to" ]; then fail "meeting.sh $command takes no -To."; fi
+if [ -n "$page" ]; then
+  [ "$command" = pr-read ] || fail 'Only pr-read takes -Page.'
+  case "$page" in *[!0-9a-f-]*|0*) fail 'Invalid feedback cursor.' ;; esac
+  [ "$(printf %s "$page" | wc -c)" -le 48 ] || fail 'Invalid feedback cursor.'
+fi
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
 if [ -z "$state" ] || [ ! -f "$state" ]; then fail 'Meetings need a session started by Copilot CLI Desktop. Resume this session from the desktop once.'; fi
@@ -191,6 +202,12 @@ if [ "$changes" -eq 1 ]; then
   done < "$work/untracked"
   if ! grep -q '[^[:space:]]' "$work/changes"; then printf '# No uncommitted changes.' > "$work/changes"; fi
   printf 'form = "changes=<%s"\n' "$(quote "$work/changes")" >> "$work/config"
+fi
+if [ "$command" = pr-read ]; then
+  printf 'form-string = "format=pr-json"\n' >> "$work/config"
+  if [ -n "$page" ]; then printf 'form-string = "page=%s"\n' "$page" >> "$work/config"; fi
+  curl --fail-with-body -K - < "$work/config"
+  exit $?
 fi
 response=$(curl -K - < "$work/config") || fail 'The desktop did not answer. Is Copilot CLI Desktop still running?'
 message=$(printf '%s' "$response" | sed -e 's/^.*"message":"//' -e 's/"}$//' -e 's/\\"/"/g')
@@ -262,7 +279,7 @@ Fix loops: when the desktop's continuation says you are the author of a pull req
 `
 
 const PR_REVIEW_INSTRUCTIONS = `
-Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (it prints the PR's head, base, reviews and comments as JSON) and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, a body that starts "Approved at <full head sha>", and "checks": {"ran": [...], "missing": [...]}; with a check missing it is posted as a comment until the person says "approve anyway" in your tab, and then you send it again with "approveAnyway": true. The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
+Review loops: when the desktop's continuation says you are the reviewer of a pull request in its review loop, read the PR with \`${MEETING_HELPER_COMMAND} pr-read\` (read every page with -Page <nextPage> until nextPage is null, passing each cursor verbatim. Long comments continue under the same id with a bodyOffset). Use pr-reply -To <root comment id> -File <file> for an unmarked reply that verifies a fix or explains a disagreement and post only with \`${MEETING_HELPER_COMMAND} pr-review -File <review.json>\`, never with gh. The file holds {"body": "...", "comments": [{"path": "src/a.ts", "line": 12, "body": "Blocking: ..."}], "approve": false}; lines are in the new version of the file. An approval is its own pr-review with "approve": true, no comments, a body that starts "Approved at <full head sha>", and "checks": {"ran": [...], "missing": [...]}; with a check missing it is posted as a comment until the person says "approve anyway" in your tab, and then you send it again with "approveAnyway": true. The desktop checks the PR, the head in your worktree and the account, posts the review on that head, and tells you whether it landed.
 `
 
 const TASK_INSTRUCTIONS = `
@@ -290,7 +307,7 @@ export async function prepareMeetingSessionEnvironment(directory: string, contro
 
 export interface MeetingRequest { topic: string; text: string; changes: string | null; sessionId?: string
   /** pr-reply: the inline comment id to answer, or "conversation". */
-  to?: string }
+  page?: string; to?: string }
 export interface MeetingResponse { ok: boolean; message: string }
 export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest) => MeetingResponse | Promise<MeetingResponse>
 
@@ -368,8 +385,11 @@ export class MeetingControlServer {
           if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
           const text = (key: string): string => typeof body[key] === 'string' ? body[key] as string : ''
           const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
-            ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}) })
-          send(200, answer)
+            ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}) })
+          if (command === 'pr-read' && body.format === 'pr-json' && answer.ok) {
+            response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            response.end(answer.message)
+          } else send(command === 'pr-read' && body.format === 'pr-json' && !answer.ok ? 400 : 200, answer)
         }).catch(() => { if (!response.headersSent) send(500, { ok: false, message: 'The desktop could not handle the meeting command.' }) })
       })
       server.once('error', reject)

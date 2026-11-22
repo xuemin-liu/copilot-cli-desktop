@@ -56,3 +56,9 @@ test('an author reply starts with the marker and never reads as an approval', ()
   assert.match(authorPostProblem(`🤖 Approved at ${head}`, DEFAULT_PR_MARKER) ?? '', /approval/)
   assert.equal(authorPostProblem('🤖 The approved list is unchanged.', DEFAULT_PR_MARKER), null)
 })
+
+test('recognizes the legacy inline approval for its exact head', () => {
+  const body = `Approved: reviewed ${head}; no actionable findings remain.`
+  assert.equal(approvalOfHead(snapshot([], [comment(1, REVIEWER, body)]), allowed, DEFAULT_PR_MARKER)?.head, head)
+  assert.equal(approvalOfHead(snapshot([], [comment(2, REVIEWER, body.replace(head, old))]), allowed, DEFAULT_PR_MARKER), null)
+})
