@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { mkdir, readdir, rm, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
 import { githubRemoteRepository, type GithubSnapshot } from './workflow-github.js'
 import { reviewerDeniedPaths, writeReviewerHome, verifyReviewerHome, type ReviewerPathRoots } from './pr-reviewer-sandbox.js'
@@ -63,7 +63,10 @@ export async function removeReviewerArea(area: Pick<ReviewerArea, 'root' | 'chec
     if (!runner) return 'kept'
     let listed: string
     try { listed = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read') } catch { return 'kept' }
-    const checkout = await realPath(area.checkout)
+    // A failed start may have created the reviewer folder but never the checkout. Resolve its existing parent
+    // in that case so /var and /private/var (or a Windows junction) compare in the same namespace.
+    const missing = await lstat(area.checkout).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
+    const checkout = missing ? join(await realPath(dirname(area.checkout)), basename(area.checkout)) : await realPath(area.checkout)
     // Only this review's own folder: a checkout that resolves anywhere but the "checkout" folder inside its reviewer
     // folder (replaced by a link to another worktree, say) is not removed, whatever it matches.
     if (!samePath(checkout, join(await realPath(area.root), 'checkout'))) return 'kept'
