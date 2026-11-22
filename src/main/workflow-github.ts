@@ -177,14 +177,26 @@ export async function githubCliWrite(cwd: string): Promise<GithubWrite> {
   })
 }
 
+/**
+ * A failed read, with what the loops act on: GitHub's status (404: no such PR yet) and whether it was a rate limit, so
+ * polling backs off instead of spending what is left. The message never carries gh's output.
+ */
+export class GithubReadFailed extends Error {
+  constructor(readonly status: number | null, readonly rateLimited: boolean) { super('GitHub source is unavailable; check authentication, permissions, rate limits, or source size') }
+}
+export function readFailure(stderr: string): GithubReadFailed {
+  const status = Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1])
+  return new GithubReadFailed(Number.isInteger(status) ? status : null, /rate limit/i.test(stderr) || status === 429)
+}
+
 /** Uses an absolute gh executable and a non-project cwd, never a shell or repository command. */
 export async function githubCliApi(cwd: string): Promise<GithubApi> {
   const executable=await (process.platform==='win32' ? findWindowsExecutable('gh') : findPosixExecutable('gh'))
   if (!executable || !isAbsolute(executable)) throw new Error('Install GitHub CLI and sign in before enabling follow-ups')
   return (path,paged=false) => new Promise((resolve,reject) => {
     const args=['api','--hostname','github.com',path,...(paged?['--paginate','--slurp']:[])]
-    execFile(executable,args,{cwd,env:{...process.env,GH_PROMPT_DISABLED:'1'},windowsHide:true,timeout:30_000,maxBuffer:2*1024*1024},(error,stdout) => {
-      if (error) {reject(new Error('GitHub source is unavailable; check authentication, permissions, rate limits, or source size'));return}
+    execFile(executable,args,{cwd,env:{...process.env,GH_PROMPT_DISABLED:'1'},windowsHide:true,timeout:30_000,maxBuffer:2*1024*1024},(error,stdout,stderr) => {
+      if (error) {reject(readFailure(String(stderr??'')));return}
       try {resolve(JSON.parse(stdout))} catch {reject(new Error('GitHub returned an invalid response'))}
     })
   })

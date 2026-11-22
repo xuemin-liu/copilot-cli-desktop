@@ -39,3 +39,16 @@ test('reviewing new PRs is turned on and off by one short command', () => {
     assert.equal(prQueueRequest(text), null, text.slice(0, 60))
   assert.equal(prLoopRequest('review new PRs in this repo'), null, 'not a single-PR review')
 })
+
+test('a PR named without a number: "review my PR", "fix my PR", "watch this PR and fix the review feedback"', () => {
+  assert.deepEqual(prLoopRequest('review my PR'), { kind: 'review', number: null, repository: null })
+  assert.deepEqual(prLoopRequest('please review my pull request'), { kind: 'review', number: null, repository: null })
+  assert.deepEqual(prLoopRequest('fix my PR'), { kind: 'fix', number: null, repository: null })
+  assert.deepEqual(prLoopRequest('watch this PR and fix the review feedback'), { kind: 'fix', number: null, repository: null })
+  assert.deepEqual(prLoopRequest('address the comments on the current pull request'), { kind: 'fix', number: null, repository: null })
+  assert.equal(prLoopRequest('review this PR'), null, 'a review needs the person\'s own PRs')
+  assert.equal(prLoopRequest('watch my PR'), null, 'watching alone')
+  assert.equal(prLoopRequest('do not fix my PR'), null)
+  assert.equal(prLoopRequest('fix my PR and PR 12'), null, 'a number elsewhere makes it ambiguous')
+  assert.equal(prLoopRequest('review my code'), null)
+})

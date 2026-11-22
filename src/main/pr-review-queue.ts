@@ -3,36 +3,48 @@ import { writeFileAtomic } from './atomic-file.js'
 import type { ReviewCandidate } from './types.js'
 
 /**
- * New PRs, the desktop's Stage C of /review-pr: a project the person asked for ("review new PRs in this repo", or any
- * "review PR N") gets a review loop for each new pull request that qualifies (the same rules as a review started by hand). Turning it on takes no backlog: the PRs open then are recorded as seen.
- * A stored set of pending numbers, not a highest number, so PRs that open out of order or qualify later are not missed.
- * Starts are limited like automation rules: three a day and ten in all per opt-in, one at a time. The desktop checks
- * every thirty seconds with gh; no model runs until a review starts.
+ * New PRs, the desktop's Stage C of /review-pr: a project the person asked for ("review new PRs in this repo", or a
+ * "review PR N" that started) gets a review loop for each new pull request that qualifies, by the same rules as a
+ * review started by hand, one start at a time. The desktop checks every thirty seconds with gh; no model runs until a
+ * review starts.
+ *
+ * - "New" is opened after the queue was turned on, and not among the PRs open then: neither a missed page of the
+ *   listing nor an old PR that later qualifies starts a review of the backlog.
+ * - The queue belongs to one repository: if the project's origin changes, it starts nothing until the person asks again.
+ * - Turning it off wins over a check already under way, also one that fails: every write after an await is fenced by
+ *   the project's revision, which every enable and disable moves.
+ * - A "review PR N" for a PR that does not exist yet (just being created in another tab) waits here for up to an hour.
  */
 
 export interface QueueState {
-  enabled: boolean; repository: string | null; activatedAt: number
+  enabled: boolean
+  /** The repository the queue was turned on for, `owner/repo` in lower case. */
+  repository: string
+  activatedAt: number
   /** PRs handled: open when the queue was turned on, started, or refused for good. */
   seen: number[]
-  /** PRs that did not qualify yet (someone else's, a fork, already in review) and may later. */
+  /** New PRs that did not qualify yet (someone else's, a fork, already in review) and may later. */
   waiting: number[]
-  day: number; dayStarts: number; total: number
+  /** "review PR N" asked before PR N existed: started when it appears, until `until`. */
+  expected: { number: number; until: number }[]
   lastError: string | null
 }
+export interface QueueListing { repository: string; pulls: ReviewCandidate[] }
 export interface QueueHost {
-  candidates(profileId: string): Promise<ReviewCandidate[]>
+  /** Every open PR of the project's repository (all pages), and that repository as its origin names it now. */
+  candidates(profileId: string): Promise<QueueListing>
   start(url: string, profileId: string): Promise<void>
   /** Automatic work paused for this project (or everywhere): the queue starts nothing, and catches up on resume. */
   paused?(profileId: string): boolean
   now?: () => number
 }
 
-export const QUEUE_DAILY_STARTS = 3
-export const QUEUE_TOTAL_STARTS = 10
-const day = (time: number): number => Math.floor(time / 86_400_000)
+/** How long a "review PR N" waits for PR N to exist. */
+export const EXPECTED_PR_WAIT_MS = 60 * 60_000
 
 export class PrReviewQueue {
   private state: Record<string, QueueState> = {}
+  private readonly revisions = new Map<string, number>()
   private busy = false
   private loaded = false
   private readonly now: () => number
@@ -43,56 +55,108 @@ export class PrReviewQueue {
     try {
       const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const [id, value] of Object.entries(parsed as Record<string, QueueState>)) if (valid(value)) this.state[id] = value
+        for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) { const state = normalize(value); if (state) this.state[id] = state }
       }
     } catch { /* No queue yet, or an unreadable one: nothing is enabled. */ }
     this.loaded = true
   }
   views(): Record<string, QueueState> { return structuredClone(this.state) }
 
-  /** Turning it on records every PR open now as seen, so only PRs opened later start reviews. */
-  async enable(profileId: string): Promise<QueueState> {
+  private revision(profileId: string): number { return this.revisions.get(profileId) ?? 0 }
+  private bump(profileId: string): number { const next = this.revision(profileId) + 1; this.revisions.set(profileId, next); return next }
+
+  /**
+   * Turns the queue on for the project's repository, recording every PR open now as seen. Asking again changes
+   * nothing while it is on for the same repository. `repository`, when given, must be the project's: a review of
+   * another repository's PR never turns on this project's queue.
+   */
+  async enable(profileId: string, repository?: string): Promise<QueueState> {
     await this.load()
-    const open = await this.host.candidates(profileId)
-    const now = this.now()
-    const next: QueueState = { enabled: true, repository: open[0] ? repositoryOf(open[0].url) : this.state[profileId]?.repository ?? null, activatedAt: now,
-      seen: open.map((candidate) => candidate.number), waiting: [], day: day(now), dayStarts: 0, total: 0, lastError: null }
+    const revision = this.bump(profileId)
+    const listing = await this.host.candidates(profileId)
+    if (this.revision(profileId) !== revision) throw new Error('The new-PR queue was changed meanwhile; ask again')
+    const current = this.state[profileId]
+    if (repository !== undefined && listing.repository !== repository.toLowerCase()) throw new Error(`This project's origin is ${listing.repository}, not ${repository}`)
+    if (current?.enabled && current.repository === listing.repository) return structuredClone(current)
+    const next: QueueState = { enabled: true, repository: listing.repository, activatedAt: this.now(), seen: listing.pulls.map((candidate) => candidate.number).slice(-5000),
+      waiting: [], expected: current?.repository === listing.repository ? current.expected : [], lastError: null }
     this.state[profileId] = next
     await this.save()
     return structuredClone(next)
   }
   async disable(profileId: string): Promise<void> {
     await this.load()
+    this.bump(profileId)
     const current = this.state[profileId]
-    if (current) { this.state[profileId] = { ...current, enabled: false }; await this.save() }
+    if (current) { this.state[profileId] = { ...current, enabled: false, waiting: [] }; await this.save() }
+  }
+  /** A "review PR N" for a PR GitHub does not list yet: it starts when it appears, within the hour. */
+  async expect(profileId: string, repository: string, number: number): Promise<void> {
+    await this.load()
+    const repo = repository.toLowerCase(), current = this.state[profileId]
+    const base: QueueState = current?.repository === repo ? current : { enabled: false, repository: repo, activatedAt: this.now(), seen: [], waiting: [], expected: [], lastError: null }
+    // A queue on for another repository is not touched: the expected PR waits only with a queue of its own repository.
+    if (current && current.repository !== repo && current.enabled) throw new Error(`This project's queue watches ${current.repository}`)
+    this.state[profileId] = { ...base, expected: [...base.expected.filter((e) => e.number !== number), { number, until: this.now() + EXPECTED_PR_WAIT_MS }].slice(-20) }
+    await this.save()
   }
 
-  /** One pass over the enabled projects; at most one review starts per project per pass. */
+  /** Applies `change` to the latest state, only if nothing turned the queue on or off since `revision` was read. */
+  private apply(profileId: string, revision: number, change: (state: QueueState) => QueueState): boolean {
+    const latest = this.state[profileId]
+    if (!latest || this.revision(profileId) !== revision) return false
+    this.state[profileId] = change(latest)
+    return true
+  }
+
+  /** One pass over the projects; at most one review starts per project per pass, and one at a time. */
   async tick(): Promise<void> {
     if (this.busy) return
     this.busy = true
     try {
       await this.load()
-      for (const [profileId, current] of Object.entries(this.state)) {
-        if (!current.enabled || this.host.paused?.(profileId)) continue
-        const today = day(this.now())
-        const queue: QueueState = current.day === today ? { ...current, seen: [...current.seen], waiting: [...current.waiting] } : { ...current, seen: [...current.seen], waiting: [...current.waiting], day: today, dayStarts: 0 }
-        let candidates: ReviewCandidate[]
-        try { candidates = await this.host.candidates(profileId) } catch (error) { queue.lastError = message(error); this.state[profileId] = queue; continue }
-        queue.lastError = null
-        const fresh = candidates.filter((candidate) => !queue.seen.includes(candidate.number)).sort((a, b) => a.number - b.number)
-        queue.waiting = fresh.filter((candidate) => candidate.reason !== null).map((candidate) => candidate.number)
-        const next = fresh.find((candidate) => candidate.reason === null)
-        if (next && queue.total < QUEUE_TOTAL_STARTS && queue.dayStarts < QUEUE_DAILY_STARTS && this.state[profileId]?.enabled) {
-          // Counted before it starts, so a crash mid-start cannot start it twice; a failed start is not retried by itself.
-          queue.seen.push(next.number); queue.total++; queue.dayStarts++
-          this.state[profileId] = queue
-          await this.save()
-          try { await this.host.start(next.url, profileId) } catch (error) { queue.lastError = `#${next.number}: ${message(error)}` }
+      for (const profileId of Object.keys(this.state)) {
+        const current = this.state[profileId]
+        if (!current || (!current.enabled && !current.expected.length) || this.host.paused?.(profileId)) continue
+        const revision = this.revision(profileId)
+        let listing: QueueListing
+        try { listing = await this.host.candidates(profileId) } catch (error) {
+          if (this.apply(profileId, revision, (state) => ({ ...state, lastError: message(error) }))) await this.save()
+          continue
         }
-        this.state[profileId] = { ...queue, seen: queue.seen.slice(-1000), waiting: queue.waiting.slice(0, 200) }
+        const latest = this.state[profileId]
+        if (!latest || this.revision(profileId) !== revision) continue
+        if (listing.repository !== latest.repository) {
+          if (this.apply(profileId, revision, (state) => ({ ...state, lastError: `The project's origin is now ${listing.repository}, not ${state.repository}: ask again to review its new PRs.` }))) await this.save()
+          continue
+        }
+        const now = this.now(), done = new Set<number>()
+        let pick: ReviewCandidate | null = null, note: string | null = null
+        for (const expected of latest.expected) {
+          if (expected.until <= now) { done.add(expected.number); note = `PR #${expected.number} did not appear within the hour.`; continue }
+          const found = listing.pulls.find((candidate) => candidate.number === expected.number)
+          if (!found) continue
+          done.add(expected.number)
+          if (found.reason !== null) note = `#${found.number}: ${found.reason}`
+          else pick ??= found
+        }
+        const fresh = latest.enabled
+          ? listing.pulls.filter((candidate) => !latest.seen.includes(candidate.number) && candidate.createdAt >= latest.activatedAt).sort((a, b) => a.number - b.number)
+          : []
+        if (!pick) pick = fresh.find((candidate) => candidate.reason === null) ?? null
+        const started = pick
+        // Recorded before it starts, so a crash mid-start cannot start it twice; a failed start is not retried by itself.
+        const recorded = this.apply(profileId, revision, (state) => ({ ...state,
+          seen: started ? [...state.seen.filter((n) => n !== started.number), started.number].slice(-5000) : state.seen,
+          waiting: fresh.filter((candidate) => candidate.reason !== null && candidate.number !== started?.number).map((candidate) => candidate.number).slice(0, 200),
+          expected: state.expected.filter((e) => !done.has(e.number)), lastError: note }))
+        if (!recorded) continue
+        await this.save()
+        if (!started) continue
+        try { await this.host.start(started.url, profileId) } catch (error) {
+          if (this.apply(profileId, revision, (state) => ({ ...state, lastError: `#${started.number}: ${message(error)}` }))) await this.save()
+        }
       }
-      await this.save()
     } finally { this.busy = false }
   }
 
@@ -100,11 +164,13 @@ export class PrReviewQueue {
 }
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : 'failed').slice(0, 300)
-const repositoryOf = (url: string): string | null => /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+$/.exec(url)?.[1] ?? null
-const numbers = (value: unknown): boolean => Array.isArray(value) && value.length <= 1000 && value.every((n) => Number.isSafeInteger(n) && n > 0)
-function valid(value: unknown): value is QueueState {
-  const v = value as QueueState
-  return !!v && typeof v === 'object' && typeof v.enabled === 'boolean' && (v.repository === null || typeof v.repository === 'string') && Number.isFinite(v.activatedAt)
-    && numbers(v.seen) && numbers(v.waiting) && Number.isInteger(v.day) && Number.isInteger(v.dayStarts) && v.dayStarts >= 0 && v.dayStarts <= QUEUE_DAILY_STARTS
-    && Number.isInteger(v.total) && v.total >= 0 && v.total <= QUEUE_TOTAL_STARTS && (v.lastError === null || typeof v.lastError === 'string')
+const numbers = (value: unknown): value is number[] => Array.isArray(value) && value.length <= 5000 && value.every((n) => Number.isSafeInteger(n) && n > 0)
+const REPOSITORY = /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/
+/** A stored queue, or null. A queue saved before it knew its repository is dropped: it is turned on again by asking. */
+function normalize(value: unknown): QueueState | null {
+  const v = value as Partial<QueueState> | null
+  if (!v || typeof v !== 'object' || typeof v.enabled !== 'boolean' || typeof v.repository !== 'string' || !REPOSITORY.test(v.repository)
+    || !Number.isFinite(v.activatedAt) || !numbers(v.seen) || !numbers(v.waiting) || (v.lastError !== null && typeof v.lastError !== 'string')) return null
+  const expected = Array.isArray(v.expected) ? v.expected.filter((e) => e && Number.isSafeInteger(e.number) && e.number > 0 && Number.isFinite(e.until)).slice(-20) : []
+  return { enabled: v.enabled, repository: v.repository, activatedAt: v.activatedAt as number, seen: v.seen, waiting: v.waiting, expected, lastError: v.lastError ?? null }
 }

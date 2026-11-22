@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { readGithubPull, parseGithubPullUrl, validGithubRepository, type GithubApi, type GithubSnapshot,type GithubFeedback } from './workflow-github.js'
+import { GithubReadFailed, readGithubPull, parseGithubPullUrl, validGithubRepository, type GithubApi, type GithubSnapshot,type GithubFeedback } from './workflow-github.js'
 import type { WorkflowTask } from './workflow-types.js'
 import {WorkflowDeliveryRejected,type WorkflowDeliveries,type WorkflowDelivery} from './workflow-deliveries.js'
 import {githubBatchInput} from './workflow-feedback-batch.js'
@@ -52,6 +52,17 @@ export interface EnrollOptions {
  */
 export const PR_LOOP_POLL_MS=20_000
 export const FOLLOWUP_POLL_MS=120_000
+/**
+ * A fix loop and a review loop of the same PR (one account, two tabs) read it within seconds of each other: background
+ * polls share one read for fifteen seconds. Confirmations and enrollments always read fresh. A read with check data and
+ * one without are different snapshots and never stand in for each other.
+ */
+export const SNAPSHOT_CACHE_MS=15_000
+/** GitHub allows about 5000 calls an hour, shared with everything else gh does: past this, PR loops poll every 30 s. */
+export const BUSY_CALLS_PER_HOUR=2400
+export const BUSY_POLL_MS=30_000
+/** After a rate-limit answer, no grant reads GitHub for this long. */
+export const RATE_LIMIT_BACKOFF_MS=5*60_000
 const roleOf=(grant:Pick<FollowupGrant,'role'>):PrLoopRole=>grant.role??'follow-up'
 /** The evidence the person is shown: the same source, kind, head and base. */
 const sameApproval=(a:ApprovalEvidence,b:ApprovalEvidence):boolean=>a.ref===b.ref&&a.kind===b.kind&&a.head===b.head&&a.base===b.base
@@ -91,8 +102,14 @@ export class WorkflowFollowups {
   private readonly deliveryRetryAt=new Map<string,number>()
   private readonly defaultWrites=new Map<string,string>()
   private readonly busyAttempts=new Map<string,number>()
+  private readonly snapshots=new Map<string,{at:number;read:Promise<GithubSnapshot>}>()
+  private readonly calls:number[]=[]
+  private rateLimitedUntil=0
+  /** The host's API, counted: what PR loops cost per hour decides how often they poll. */
+  private readonly api:GithubApi
   constructor(path:string,private readonly host:FollowupHost) {
     this.now=host.now??Date.now
+    this.api=(path,paged)=>{this.calls.push(this.now());if(this.calls.length>20_000)this.calls.splice(0,this.calls.length-20_000);return host.api(path,paged)}
     this.db=new DatabaseSync(path)
     try {
       const version=(this.db.prepare('PRAGMA user_version').get() as {user_version:number}).user_version
@@ -176,7 +193,7 @@ export class WorkflowFollowups {
       if(!me||!Number.isSafeInteger(me.id)||Number(me.id)<=0)throw new Error('The GitHub account could not be verified')
       accountId=me.id as number
     }
-    const snapshot=await readGithubPull(this.host.api,pull.repository,pull.number,{checks:failedChecks||role==='follow-up'})
+    const snapshot=await readGithubPull(this.api,pull.repository,pull.number,{checks:failedChecks||role==='follow-up'})
     if(!snapshot.open)throw new Error('The pull request is closed')
     if(role==='reviewer'){
       // Reviewing means running the PR's code, so a fork's PR never starts work.
@@ -359,10 +376,10 @@ export class WorkflowFollowups {
     if(!this.intakeAuthorized(grant,task))return
     // A spent PR loop still reads the PR, so an approval or a merge is not missed; it only takes no new feedback.
     if(grant.total>=limitOf(grant)&&!grant.completeOnMerge&&!loop){this.health(grant,'limit');return}
-    if(Math.max(this.nextPoll.get(grant.id)??0,this.retryAt.get(grant.id)??0)>this.now())return
-    this.nextPoll.set(grant.id,this.now()+(loop?PR_LOOP_POLL_MS:FOLLOWUP_POLL_MS))
+    if(Math.max(this.nextPoll.get(grant.id)??0,this.retryAt.get(grant.id)??0,this.rateLimitedUntil)>this.now())return
+    this.nextPoll.set(grant.id,this.now()+(loop?(this.callsLastHour()>BUSY_CALLS_PER_HOUR?BUSY_POLL_MS:PR_LOOP_POLL_MS):FOLLOWUP_POLL_MS))
     let snapshot:GithubSnapshot
-    try{snapshot=await this.read(grant)}catch{this.health(grant,'source-unavailable');return}
+    try{snapshot=await this.read(grant,false)}catch{this.health(grant,'source-unavailable');return}
     if(this.stopped)return
     const current=this.grant(grant.id)
     if(!current?.enabled)return
@@ -497,9 +514,28 @@ export class WorkflowFollowups {
       for(const grant of retired.slice(-100))this.db.prepare('DELETE FROM followups WHERE id=?').run(grant.id)
     }
   }
-  private async read(grant:FollowupGrant):Promise<GithubSnapshot> {
+  /** GitHub calls in the last hour, by this controller. */
+  callsLastHour():number {
+    const since=this.now()-3_600_000
+    while(this.calls.length&&this.calls[0]!<=since)this.calls.shift()
+    return this.calls.length
+  }
+  private snapshot(repository:string,number:number,checks:boolean,fresh:boolean):Promise<GithubSnapshot> {
+    const key=`${repository.toLowerCase()}#${number}#${checks?'checks':'plain'}`,now=this.now()
+    for(const [k,v] of this.snapshots)if(now-v.at>=SNAPSHOT_CACHE_MS)this.snapshots.delete(k)
+    const hit=fresh?undefined:this.snapshots.get(key)
+    const read=hit?.read??readGithubPull(this.api,repository,number,{checks})
+    if(!hit){
+      this.snapshots.set(key,{at:now,read})
+      read.catch(()=>{if(this.snapshots.get(key)?.read===read)this.snapshots.delete(key)})
+    }
+    // Each reader gets its own copy: read() below edits the feedback list.
+    return read.then(snapshot=>structuredClone(snapshot))
+  }
+  /** `fresh`: a confirmation or a final check, never answered from another grant's recent read. */
+  private async read(grant:FollowupGrant,fresh=true):Promise<GithubSnapshot> {
     try {
-      const snapshot=await readGithubPull(this.host.api,grant.repository,grant.number,{checks:grant.failedChecks||roleOf(grant)==='follow-up'})
+      const snapshot=await this.snapshot(grant.repository,grant.number,Boolean(grant.failedChecks||roleOf(grant)==='follow-up'),fresh)
       const unique=new Map<string,GithubFeedback>()
       for(const event of snapshot.feedback){const old=unique.get(event.source);if(old&&old.version!==event.version)throw new Error('Feedback changed during pagination');unique.set(event.source,event)}
       snapshot.feedback=[...unique.values()]
@@ -510,6 +546,7 @@ export class WorkflowFollowups {
       const failures=(this.failures.get(grant.id)??0)+1
       this.failures.set(grant.id,failures)
       this.retryAt.set(grant.id,this.now()+Math.min(1_800_000,120_000*2**Math.min(failures-1,4)))
+      if(error instanceof GithubReadFailed&&error.rateLimited)this.rateLimitedUntil=Math.max(this.rateLimitedUntil,this.now()+RATE_LIMIT_BACKOFF_MS)
       throw error
     }
   }

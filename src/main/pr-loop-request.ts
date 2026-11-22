@@ -12,7 +12,14 @@ import { parseGithubPullUrl } from './workflow-github.js'
  * Not a start: "watch PR 286" (watching alone is not a request to change anything), "please do not review PR 287",
  * "is the review of PR 287 done?", or a request below the first lines of a longer message.
  */
-export interface PrLoopRequest { kind: 'review' | 'fix'; number: number; repository: string | null }
+export interface PrLoopRequest { kind: 'review' | 'fix'
+  /**
+   * null: no number was given. "review my PR" means the person's own open PR in this project (several: they choose);
+   * "fix my PR" / "watch this PR and fix the review feedback" means the PR of the branch this conversation is on.
+   */
+  number: number | null; repository: string | null }
+/** "my PR", "this PR", "the current pull request": a PR named without a number. */
+const UNNUMBERED = /\b(?:my|this|the\s+current)\s+(?:pr|pull\s+request)\b/i
 /** "review new PRs in this repo" turns the new-PR queue on; "stop reviewing new PRs" turns it off. */
 export interface PrQueueRequest { kind: 'queue-on' | 'queue-off' }
 
@@ -52,8 +59,12 @@ export function prLoopRequest(text: string): PrLoopRequest | null {
   for (const match of text.replace(/https:\/\/\S+/gi, ' ').matchAll(/\b(?:pr|pull\s+request)\s*#?\s*(\d{1,9})\b|#(\d{1,9})\b/gi)) bare.add(Number(match[1] ?? match[2]))
   if (urls.size > 1) return null
   const urlNumber = urls.size ? Number([...urls][0]!.split('#')[1]) : null
-  if (urlNumber !== null ? [...bare].some((n) => n !== urlNumber) : bare.size !== 1) return null
   const command = line.replace(OPENING, '')
+  // No number anywhere, and the command names "my PR" or "this PR" instead.
+  const unnumbered = urlNumber === null && bare.size === 0 && UNNUMBERED.test(command)
+  // "fix my PR and PR 12" names two PRs.
+  if (!unnumbered && UNNUMBERED.test(command)) return null
+  if (!unnumbered && (urlNumber !== null ? [...bare].some((n) => n !== urlNumber) : bare.size !== 1)) return null
   const verb = /^(review|fix|address|handle|resolve|watch)\b/i.exec(command)?.[1]?.toLowerCase()
   if (!verb) return null
   let kind: PrLoopRequest['kind']
@@ -65,6 +76,11 @@ export function prLoopRequest(text: string): PrLoopRequest | null {
   } else kind = 'fix'
   // A review command that also says fix ("review and fix PR 286") is ambiguous: the person decides by asking again.
   if (kind === 'review' && FIX_VERB.test(command)) return null
+  if (unnumbered) {
+    // A review needs the person's own PRs ("review my PR"): "review this PR" names nothing the desktop can find.
+    if (kind === 'review' && !/\bmy\s+(?:pr|pull\s+request)\b/i.test(command)) return null
+    return { kind, number: null, repository: null }
+  }
   const url = URL.exec(command)?.[0]
   let repository: string | null = null, number: number | null = null
   if (url) {
