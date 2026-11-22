@@ -24,6 +24,7 @@ handle, only input/output/resize events.
   helper folder and are removed by the helper. Side chats, read-only/remote sessions, and unsupported CLI versions do
   not receive reporting instructions or create tracked tasks.
 - **PR loops, by asking**: say "review PR 287" or "watch PR 286 and fix the review feedback" in a Copilot tab.
+  A review also reviews the project's next new PRs as they open ("stop reviewing new PRs" turns that off).
 - **Fix loop**: the desktop watches your task's PR for review feedback, continues the session on
   each new finding, posts its replies on the PR after checking them, and asks you to confirm an approval of the current
   head. Author and reviewer may share one GitHub account. See [the fix loop](docs/workflow-followups.md#fix-loop-pr-author).

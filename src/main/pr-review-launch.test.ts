@@ -172,3 +172,13 @@ test('a base that moved while the head stayed is fetched before the reviewer is 
     await assert.rejects(refreshReviewCheckout(f.runner, area, upstream, head, 9, 'e'.repeat(40)), /base commit could not be fetched/)
   } finally { f.cleanup() }
 })
+
+test('a new PR is reviewed only if it is your own, from the same repository, and not already in review', async () => {
+  const { reviewCandidateReason } = await import('./pr-review-launch.js')
+  const own = { user: { id: 42 }, head: { repo: { full_name: 'Owner/Repo' } }, base: { repo: { full_name: 'owner/repo' } } }
+  assert.equal(reviewCandidateReason(own, 42, false), null)
+  assert.match(reviewCandidateReason({ ...own, head: { repo: { full_name: 'fork/repo' } } }, 42, false) ?? '', /fork/)
+  assert.match(reviewCandidateReason({ ...own, head: { repo: null } }, 42, false) ?? '', /fork/, 'a deleted fork')
+  assert.match(reviewCandidateReason({ ...own, user: { id: 7 } }, 42, false) ?? '', /Not your pull request/)
+  assert.match(reviewCandidateReason(own, 42, true) ?? '', /already has a review loop/)
+})

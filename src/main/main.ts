@@ -4,8 +4,9 @@ import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReportin
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
-import { prLoopRequest } from './pr-loop-request.js'
-import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
+import { PrReviewQueue } from './pr-review-queue.js'
+import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, pruneReviewerAreas, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -961,7 +962,14 @@ async function startPrLoopFromChat(tab:DesktopSessionTab,sessionId:string,asked:
   if(asked.kind==='review'){
     void startPrReview(url,profile?.id).then(()=>{workflowNotice=`Review loop started for PR #${asked.number}.`;broadcastState()},
       (error:unknown)=>{workflowNotice=`The review of PR #${asked.number} did not start: ${error instanceof Error?error.message:'unknown error'}`;broadcastState()})
-    return {ok:true,message:`Starting a sandboxed review of ${url} in a new tab. It posts its review on the PR and reviews again when the author pushes or replies; you confirm any approval. If it cannot start, the Tasks section says why.`}
+    // Like /review-pr's Stage C: once asked to review, the project's next new PRs are reviewed too.
+    let queued=''
+    if(profile&&!profile.general){
+      try{const queue=await openReviewQueue();if(!queue.views()[profile.id]?.enabled){await queue.enable(profile.id);broadcastState()}
+        queued=' New pull requests in this project will be reviewed the same way as they open (say "stop reviewing new PRs" to turn that off).'}
+      catch{queued=' New pull requests could not be watched: GitHub did not list them.'}
+    }
+    return {ok:true,message:`Starting a sandboxed review of ${url} in a new tab. It posts its review on the PR and reviews again when the author pushes or replies; you confirm any approval. If it cannot start, the Tasks section says why.${queued}`}
   }
   try{
     const controller=await openFollowups(),store=workflows()
@@ -975,6 +983,47 @@ async function startPrLoopFromChat(tab:DesktopSessionTab,sessionId:string,asked:
     workflows()?.link(grant.sessionId,{pullUrl:url});broadcastState()
     return {ok:true,message:`The fix loop is on for ${url}. Desktop continues this conversation whenever new review feedback from ${me.login} arrives (feedback already on the PR comes first); reply on threads with pr-reply, starting each reply with the marker. It ends when you confirm an approval of the PR's current head, or when the PR is merged or closed.`}
   }catch(error){return {ok:false,message:`The fix loop did not start: ${error instanceof Error?error.message:'unknown error'}`}}
+}
+/** The open PRs (at most fifty) of a project's repository, each with why it cannot be reviewed, if it cannot. */
+async function reviewCandidates(profileId:string):Promise<import('./types.js').ReviewCandidate[]>{
+  const profile=desktopConfig.profiles.find(candidate=>candidate.id===profileId),runner=await meetingGitRunner()
+  if(!profile||profile.general)throw new Error('Choose a project first')
+  if(!runner)throw new Error('Git is not available')
+  const originResult=await runner.run({cwd:profile.path,args:['remote','get-url','origin'],kind:'read',timeoutMs:30_000,maxStdoutBytes:64_000})
+  const repository=originResult.exitCode===0?githubRemoteRepository(originResult.stdout.toString('utf8').trim()):null
+  if(!repository)throw new Error('This project\'s origin is not a github.com repository')
+  const api=await githubCliApi(app.getPath('userData'))
+  const [pulls,me]=await Promise.all([api(`repos/${repository}/pulls?state=open&per_page=50`),api('user')]) as [unknown,{id?:unknown}]
+  if(!Array.isArray(pulls)||!me||!Number.isSafeInteger(me.id))throw new Error('GitHub did not list the pull requests')
+  const loops=new Set((followups?.list()??[]).filter(g=>g.enabled&&g.role==='reviewer'&&g.repository.toLowerCase()===repository).map(g=>g.number))
+  return pulls.filter((pull):pull is Record<string,any>=>pull&&typeof pull==='object'&&Number.isSafeInteger(pull.number)).map(pull=>({
+    number:pull.number,title:typeof pull.title==='string'?pull.title.slice(0,200):'',author:typeof pull.user?.login==='string'?pull.user.login:'',
+    url:`https://github.com/${repository}/pull/${pull.number}`,reason:reviewCandidateReason(pull,me.id as number,loops.has(pull.number))}))
+}
+/** New PRs reviewed by themselves (Stage C): opened on first use, polled every two minutes with gh, no model involved. */
+let reviewQueue:PrReviewQueue|null=null
+let reviewQueueTimer:NodeJS.Timeout|null=null
+async function openReviewQueue():Promise<PrReviewQueue>{
+  if(!reviewQueue){
+    reviewQueue=new PrReviewQueue(join(app.getPath('userData'),'pr-review-queue.json'),{candidates:reviewCandidates,start:(url,profileId)=>startPrReview(url,profileId),
+      paused:profileId=>workflowsPaused(profileId)})
+    await reviewQueue.load()
+  }
+  if(!reviewQueueTimer){reviewQueueTimer=setInterval(()=>{if(shuttingDown())return;void reviewQueue?.tick().then(()=>broadcastState()).catch(()=>{})},120_000);reviewQueueTimer.unref()}
+  return reviewQueue
+}
+async function setReviewQueueFromChat(tab:DesktopSessionTab,on:boolean):Promise<MeetingResponse>{
+  const profile=desktopConfig.profiles.find(candidate=>candidate.id===tab.workspaceProfileId)
+  if(!profile||profile.general)return {ok:false,message:'Ask from a Copilot tab in the project whose new pull requests should be reviewed.'}
+  try{
+    const queue=await openReviewQueue()
+    if(on){
+      await queue.enable(profile.id);broadcastState()
+      return {ok:true,message:`New pull requests in ${profile.name} are now reviewed as they open: each of yours from this repository gets a sandboxed review loop in its own tab, one at a time, at most three a day and ten in all. PRs open now are not reviewed (ask "review PR <n>" for one). Watching uses no model; say "stop reviewing new PRs" to turn it off.`}
+    }
+    await queue.disable(profile.id);broadcastState()
+    return {ok:true,message:`New pull requests in ${profile.name} are no longer reviewed by themselves. Review loops already running keep going.`}
+  }catch(error){return {ok:false,message:`That did not work: ${error instanceof Error?error.message:'unknown error'}`}}
 }
 /** Only what the Tasks view shows: receipts that still need settling, without bodies. */
 function prPostViews():import('./types.js').PrPostView[]{
@@ -1044,7 +1093,10 @@ async function openFollowups():Promise<WorkflowFollowups> {
         return result.result==='sent'?'sent':'busy'
       },interrupt:interruptAutomatic,changed:()=>broadcastState(),
     })
-    followups=controller;followupError=null;controller.start();return controller
+    followups=controller;followupError=null;controller.start()
+    // A project that had new-PR reviews on keeps them after a restart.
+    void openReviewQueue().catch(()=>{})
+    return controller
   })()
   try{return await followupOpening}finally{followupOpening=null}
 }
@@ -3396,8 +3448,10 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
           return { ok: false, message: 'Starting a PR loop requires one verified foreground CLI session.' }
         const prompt = meetingReader(tabId).activePersonPrompt
+        const queue = prompt === null ? null : prQueueRequest(prompt)
+        if (queue) return setReviewQueueFromChat(currentTab, queue.kind === 'queue-on')
         const asked = prompt === null ? null : prLoopRequest(prompt)
-        if (!asked) return { ok: false, message: 'Ask in a new message of your own, for example "review PR 287" or "watch PR 286 and fix the review feedback".' }
+        if (!asked) return { ok: false, message: 'Ask in a new message of your own, for example "review PR 287", "watch PR 286 and fix the review feedback" or "review new PRs in this repo".' }
         return startPrLoopFromChat(currentTab, request.sessionId, asked)
       }
       case 'pr-review':
@@ -6882,4 +6936,4 @@ app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
 
-app.once('will-quit', () => { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null; if(prPostTimer)clearInterval(prPostTimer); prPostTimer=null; prPosts?.close(); prPosts=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })
+app.once('will-quit', () => { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null; if(prPostTimer)clearInterval(prPostTimer); prPostTimer=null; if(reviewQueueTimer)clearInterval(reviewQueueTimer); reviewQueueTimer=null; prPosts?.close(); prPosts=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })

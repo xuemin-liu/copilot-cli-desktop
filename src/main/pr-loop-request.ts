@@ -13,6 +13,22 @@ import { parseGithubPullUrl } from './workflow-github.js'
  * "is the review of PR 287 done?", or a request below the first lines of a longer message.
  */
 export interface PrLoopRequest { kind: 'review' | 'fix'; number: number; repository: string | null }
+/** "review new PRs in this repo" turns the new-PR queue on; "stop reviewing new PRs" turns it off. */
+export interface PrQueueRequest { kind: 'queue-on' | 'queue-off' }
+
+const QUEUE_ON = /^(?:review|watch(?:\s+for)?(?:\s+and\s+review)?)\s+(?:all\s+|any\s+|every\s+)?(?:new|incoming|upcoming|future)\s+(?:prs?|pull\s+requests?)\b(?:\s+(?:in|for|on)\s+(?:this|the)\s+(?:repo(?:sitory)?|project))?\s*[.!]?$/i
+const QUEUE_OFF = /^(?:stop|don'?t\s+keep|no\s+longer)\s+(?:reviewing|watching(?:\s+for)?)\s+(?:all\s+|any\s+)?(?:new|incoming)\s+(?:prs?|pull\s+requests?)\b(?:\s+(?:in|for|on)\s+(?:this|the)\s+(?:repo(?:sitory)?|project))?\s*[.!]?$/i
+
+/** The whole message, one short line, is the request: anything more is not read as consent. */
+export function prQueueRequest(text: string): PrQueueRequest | null {
+  if (typeof text !== 'string' || text.length > 200) return null
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (lines.length !== 1) return null
+  const command = lines[0]!.replace(OPENING, '')
+  if (QUEUE_OFF.test(command)) return { kind: 'queue-off' }
+  if (NEGATION.test(command)) return null
+  return QUEUE_ON.test(command) ? { kind: 'queue-on' } : null
+}
 
 const URL = /https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?(?=[\s.,;:!?)]|$)/i
 const NUMBER = /\b(?:pr|pull\s+request)\s*#?\s*(\d{1,9})\b|#(\d{1,9})\b/i

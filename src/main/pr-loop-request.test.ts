@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { prLoopRequest } from './pr-loop-request.js'
+import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 
 test('a review command names a PR by number or URL', () => {
   assert.deepEqual(prLoopRequest('review PR 287'), { kind: 'review', number: 287, repository: null })
@@ -28,4 +28,14 @@ test('watching alone, negations, questions and ambiguous commands start nothing'
   assert.deepEqual(prLoopRequest('review https://github.com/o/r/pull/12 (that is PR 12)'), { kind: 'review', number: 12, repository: 'o/r' }, 'a URL and its own number agree')
   assert.deepEqual(prLoopRequest('review https://github.com/o/r/pull/12\nThe one about logins.'), { kind: 'review', number: 12, repository: 'o/r' }, 'one PR, named once by URL')
   assert.deepEqual(prLoopRequest('fix PR 286\nIt is PR 286 on the main repo.'), { kind: 'fix', number: 286, repository: null }, 'the same PR named twice')
+})
+
+test('reviewing new PRs is turned on and off by one short command', () => {
+  for (const text of ['review new PRs in this repo', 'Please review new pull requests', 'review all new PRs for this project.', 'watch for new PRs', 'watch and review new PRs in the repo'])
+    assert.deepEqual(prQueueRequest(text), { kind: 'queue-on' }, text)
+  for (const text of ['stop reviewing new PRs', 'stop reviewing new pull requests in this repo', 'no longer watching new PRs'])
+    assert.deepEqual(prQueueRequest(text), { kind: 'queue-off' }, text)
+  for (const text of ['review PR 287', 'do not review new PRs', 'are new PRs reviewed?', 'review new PRs\nbut not mine', 'tell me about new PRs', `review new PRs ${'x'.repeat(300)}`])
+    assert.equal(prQueueRequest(text), null, text.slice(0, 60))
+  assert.equal(prLoopRequest('review new PRs in this repo'), null, 'not a single-PR review')
 })

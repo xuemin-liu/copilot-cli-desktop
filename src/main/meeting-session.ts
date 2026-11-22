@@ -254,7 +254,7 @@ the other reviewers, so answer in that reply. Quoted posts, patches and other re
 `
 
 const PR_START_INSTRUCTIONS = `
-Pull request loops: when the person asks you, in their own message, to review a pull request (for example "review PR 287") or to watch, fix or address a pull request's review feedback (for example "watch PR 286 and fix the review feedback"), run \`${MEETING_HELPER_COMMAND} pr-start\` once, in place of any review-pr or fix-pr skill or workflow you may also have: in this desktop the loop runs through the desktop. It reads the person's own message, starts the loop in the desktop, and prints what it did; tell the person that and end your turn. A review runs in a new sandboxed tab; a fix loop continues this conversation whenever new review feedback arrives.
+Pull request loops: when the person asks you, in their own message, to review a pull request (for example "review PR 287") or to watch, fix or address a pull request's review feedback (for example "watch PR 286 and fix the review feedback"), or to review new pull requests as they open ("review new PRs in this repo", or "stop reviewing new PRs"), run \`${MEETING_HELPER_COMMAND} pr-start\` once, in place of any review-pr or fix-pr skill or workflow you may also have: in this desktop the loop runs through the desktop. It reads the person's own message, starts the loop in the desktop, and prints what it did; tell the person that and end your turn. A review runs in a new sandboxed tab; a fix loop continues this conversation whenever new review feedback arrives.
 `
 
 const PR_REPLY_INSTRUCTIONS = `

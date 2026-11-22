@@ -154,3 +154,17 @@ export async function pruneReviewerAreas(base: string, keep: ReadonlySet<string>
   }
   return removed
 }
+
+/**
+ * Why an open PR cannot be reviewed here, or null: a fork never, only the person's own PRs for now, one review loop
+ * per PR. Starting a review checks all of it again.
+ */
+export function reviewCandidateReason(pull: { user?: { id?: unknown } | null; head?: { repo?: { full_name?: unknown } | null } | null; base?: { repo?: { full_name?: unknown } | null } | null },
+  me: number, reviewed: boolean): string | null {
+  const head = typeof pull.head?.repo?.full_name === 'string' ? pull.head.repo.full_name.toLowerCase() : null
+  const base = typeof pull.base?.repo?.full_name === 'string' ? pull.base.repo.full_name.toLowerCase() : null
+  if (!head || !base || head !== base) return 'From a fork: never reviewed here, because reviewing runs its code.'
+  if (pull.user?.id !== me) return 'Not your pull request: only your own can be reviewed here for now.'
+  if (reviewed) return 'It already has a review loop.'
+  return null
+}
