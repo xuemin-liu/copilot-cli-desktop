@@ -41,6 +41,16 @@ export interface QueueHost {
   write?: (path: string, text: string) => Promise<void>
 }
 
+/** The queue's file in the desktop's data folder. */
+export const QUEUE_FILE = 'pr-review-queue.json'
+/**
+ * What startup reopens from the data folder. The queue reopens from its own file: turning it on (or waiting for a PR
+ * number) saves it before any review has run, so before the follow-up database may exist.
+ */
+export function startupReopens(exists: (name: string) => boolean): { followups: boolean; queue: boolean } {
+  return { followups: exists('workflow-followups.sqlite'), queue: exists(QUEUE_FILE) }
+}
+
 /** How long a "review PR N" waits for PR N to exist. */
 export const EXPECTED_PR_WAIT_MS = 60 * 60_000
 

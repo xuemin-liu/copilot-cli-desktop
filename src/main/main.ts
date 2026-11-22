@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
-import { PrReviewQueue } from './pr-review-queue.js'
+import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
 import { cloneForReview, endedReviewNote, firstReviewPrompt, makeReviewerArea, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
@@ -1107,7 +1107,7 @@ let reviewQueue:PrReviewQueue|null=null
 let reviewQueueTimer:NodeJS.Timeout|null=null
 async function openReviewQueue():Promise<PrReviewQueue>{
   if(!reviewQueue){
-    reviewQueue=new PrReviewQueue(join(app.getPath('userData'),'pr-review-queue.json'),{candidates:reviewCandidates,start:(url,profileId)=>startPrReview(url,profileId).then(()=>{}),
+    reviewQueue=new PrReviewQueue(join(app.getPath('userData'),QUEUE_FILE),{candidates:reviewCandidates,start:(url,profileId)=>startPrReview(url,profileId).then(()=>{}),
       paused:profileId=>workflowsPaused(profileId)})
     await reviewQueue.load()
   }
@@ -6857,7 +6857,10 @@ if (!app.requestSingleInstanceLock()) {
     // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
     void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
     void sweepReviewerAreas().catch(()=>{})
-    if(existsSync(join(app.getPath('userData'),'workflow-followups.sqlite')))void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
+    const reopen=startupReopens(name=>existsSync(join(app.getPath('userData'),name)))
+    if(reopen.followups)void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
+    // A queue turned on before any review ran has no follow-up database yet: it restarts from its own file.
+    if(reopen.queue)void openReviewQueue().catch(()=>{})
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')

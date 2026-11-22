@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EXPECTED_PR_WAIT_MS, PrReviewQueue, type QueueListing } from './pr-review-queue.js'
+import { EXPECTED_PR_WAIT_MS, PrReviewQueue, QUEUE_FILE, startupReopens, type QueueListing } from './pr-review-queue.js'
 import type { ReviewCandidate } from './types.js'
 
 const T0 = Date.parse('2026-11-02T12:00:00Z')
@@ -252,4 +252,23 @@ test('Stop or a pause while a start is being recorded holds that start', async (
     await queue.tick()
     assert.deepEqual(started, [url(42), url(41)])
   } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('a queue turned on before any review ran restarts from its own file, with no follow-up database', async () => {
+  const { existsSync } = await import('node:fs')
+  const data = await mkdtemp(join(tmpdir(), 'pr-review-queue-restart-'))
+  const listing = (pulls: ReviewCandidate[]) => async (): Promise<QueueListing> => ({ repository: 'owner/repo', pulls })
+  const pr = (number: number): ReviewCandidate => ({ number, title: '', author: 'me', url: url(number), reason: null, createdAt: Date.now() + 60_000 })
+  try {
+    assert.deepEqual(startupReopens((name) => existsSync(join(data, name))), { followups: false, queue: false }, 'a fresh profile reopens nothing')
+    // "review new PRs" and "review PR 50" (not open yet) on a fresh profile: only the queue's own file is written.
+    const first = new PrReviewQueue(join(data, QUEUE_FILE), { candidates: listing([]), start: async () => {} })
+    await first.enable('project')
+    await first.expect('project', 'owner/repo', 50)
+    assert.deepEqual(startupReopens((name) => existsSync(join(data, name))), { followups: false, queue: true }, 'the restart reopens the queue')
+    const started: string[] = []
+    const reopened = new PrReviewQueue(join(data, QUEUE_FILE), { candidates: listing([pr(50), pr(51)]), start: async (target) => { started.push(target) } })
+    await reopened.tick(); await reopened.tick()
+    assert.deepEqual(started, [url(50), url(51)], 'the PR it waited for, then a new one')
+  } finally { await rm(data, { recursive: true, force: true }) }
 })
