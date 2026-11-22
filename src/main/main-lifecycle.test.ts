@@ -87,6 +87,8 @@ interface Harness {
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
+  holdMeetingWrite(predicate:(path:string)=>boolean,work:()=>Promise<void>,started?:()=>void):void
+  flushMeetingWrites(meetingId:string):Promise<void>
   queueLegacyMeeting(tabId:string):void
   queueRejectedMeeting(tabId:string):void
   deferTaskEnter():void
@@ -270,6 +272,21 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           return result;
         }
       `,
+      './meeting-session.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'meeting-session.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'meeting-session.js'))};
+        let gate = null;
+        export function holdMeetingWrite(predicate, work, started) { gate = { predicate, work, started }; }
+        export async function writeMeetingFile(root, meetingId, path, text) {
+          if (gate && gate.predicate(path)) {
+            const current = gate;
+            gate = null;
+            current.started?.();
+            await current.work();
+          }
+          return real.writeMeetingFile(root, meetingId, path, text);
+        }
+      `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
@@ -298,6 +315,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { maintenanceCalls, holdCopilotCommand } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
+        import { holdMeetingWrite } from './meeting-session.js';
         import { browserStorageClears } from 'electron';
         import { SessionBindingReader as BindingReaderForTest } from './session-binding.js';
         const diagnosticWrites = [];
@@ -373,6 +391,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             interruptAutomatic(grant);endAutomatic(tabId,false);
           },
           meetingWrite: async(id,path,text)=>{meetingHub.effects.write(id,path,text);await meetingWrites.get(id);return meetingWriteFailures.has(id)},
+          holdMeetingWrite,
+          flushMeetingWrites: async id => { await meetingWrites.get(id) },
           composedPaste: tabId=>sendSessionTask(tabId,'Person-composed task'),
           composedCommand: tabId=>sendSessionCommand(tabId,'/add-dir example'),
           makeBindingUnreadable: tabId=>{managedTabs.get(tabId).session.bindingReader.read=async()=>{throw new Error('Temporary inventory failure')}},
@@ -440,7 +460,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
       banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
@@ -3724,4 +3744,549 @@ test('natural CLI exit revokes its browser bridge while keeping project pages', 
   const after=await harness.request<any>('desktop:tools-state');
   assert.equal(after.connections.length,0);
   assert.equal(after.projects[0].tabs.length,2,'completed CLI can open an unbound browser');
+}))
+
+test('retrying an uncertain meeting digest from Handoffs re-enqueues and delivers it after an aborted send', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  // Let the host's /add-dir setup command settle (200 ms Enter + 2 s quiet window).
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+  // Defer Enter before the reviewer finishes so the automatic pump of the host digest pauses before Enter.
+  h.deferTaskEnter()
+  const beforeAttempt = hostSpawn.written.length
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.request('desktop:get-state')).meetings![0]!.stage, 'host', 'meeting moved to host stage')
+
+  // First attempt to deliver the round-1 digest to the host aborts before Enter, leaving it uncertain.
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeAttempt).some(chunk => chunk.includes('Four agreed findings.')))
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  const uncertain = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(uncertain?.state, 'uncertain')
+
+  // Restoring the host binding and clicking Send again in Handoffs must re-enqueue and deliver the digest.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(2100)
+  const beforeRetry = hostSpawn.written.length
+  await h.request('desktop:delivery-action', uncertain!.id, 'retry')
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeRetry).some(chunk => chunk.includes('Four agreed findings.')), 'Send again re-enqueues and pastes the digest')
+  h.flushTaskEnter()
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === uncertain!.id)?.state, 'submitted')
+}))
+
+test('host manually proposing to close after an uncertain digest clears the block so the closing vote result reaches the host', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+  h.deferTaskEnter()
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.request('desktop:get-state')).meetings![0]!.stage, 'host', 'meeting moved to host stage')
+
+  // Round-1 digest fails to reach host and becomes uncertain.
+  await h.pumpMeetingDelivery()
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  const stale = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(stale?.state, 'uncertain')
+
+  // Host manually retrieves the reply and sends the four agreed findings for a closing vote.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'propose-close', hostSessionId, 'Four agreed findings')).ok, true)
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state, 'cancelled', 'resolved round-1 digest stops blocking the host')
+
+  // Reviewer votes AGREE on round 2; the closing agreed message must reach the host tab automatically.
+  await pause(2100)
+  await h.pumpMeetingDelivery()
+  h.flushTaskEnter()
+  const beforeClose = hostSpawn.written.length
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nVote`, interactionId: 'rev-r2' }) +
+    line('assistant.turn_start', { turnId: 'rev-r2' }) +
+    line('assistant.message', { interactionId: 'rev-r2', phase: 'final_answer', content: 'AGREE' }) +
+    line('assistant.turn_end', { turnId: 'rev-r2' }))
+  await h.refreshRecords(reviewerId)
+
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(2100)
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeClose).some(chunk => chunk.includes('All 1 reviewers agreed.')), 'closing vote result reaches the host automatically')
+  h.flushTaskEnter()
+}))
+
+test('a live conversation turn clears uncertain command state so dialog-like assistant text does not block meeting delivery', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.tabs = [{ title: 'Host', lastSessionId: SOURCE }]
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const log = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(log), { recursive: true })
+  await writeFile(log, line('session.start', { sessionId: SOURCE, startTime: new Date().toISOString() }))
+  await h.restoreSaved()
+  const tab = (await h.request('desktop:get-state')).activeTabId!
+  const spawn = h.spawns[0]!
+  await writeFile(join(dirname(log), 'inuse.7700.lock'), '')
+  h.configureBinding(tab, 7700, [7700])
+  await h.refreshRecords(tab)
+
+  // User edits a normal prompt with Left Arrow before pressing Enter, then Copilot replies with text containing dialog hints.
+  await h.request('desktop:write-tab', tab, 'start a meeting')
+  await h.request('desktop:write-tab', tab, '\x1b[D')
+  await h.request('desktop:write-tab', tab, '\r')
+  spawn.emitData('\x1b[?2004hPress Esc to cancel if needed.\r\n')
+  await appendFile(log,
+    line('user.message', { content: 'start a meeting', interactionId: 'u1' }) +
+    line('assistant.turn_start', { turnId: 't1' }) +
+    line('assistant.message', { interactionId: 'u1', phase: 'final_answer', content: 'Press Esc to cancel if needed.' }) +
+    line('assistant.turn_end', { turnId: 't1' }))
+  await h.refreshRecords(tab)
+  await pause(2100)
+
+  h.queueMeetingDelivery(tab, 'post', 'Reviewer reply digest')
+  await h.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(chunk => chunk.includes('Reviewer reply digest')), 'meeting delivery is not blocked by a false-positive dialog check')
+}))
+
+test('manual host post waits for durable snapshot before cancelling prior digest and preserves recovery across restart if snapshot write fails', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+
+  // Round-1 digest fails to reach host and becomes uncertain; ensure the round-1 snapshot is on disk.
+  h.deferTaskEnter()
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  await h.pumpMeetingDelivery()
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  await h.flushMeetingWrites(meetingId)
+  const stale = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(stale?.state, 'uncertain')
+
+  // Defer the round-2 meeting.json write, verify the prior digest is not cancelled while the write is pending,
+  // then fail the snapshot write and verify the prior digest stays uncertain for restart recovery.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  let snapshotStarted!: () => void
+  const started = new Promise<void>(resolve => { snapshotStarted = resolve })
+  let rejectSnapshot!: (error: Error) => void
+  const deferredSnapshot = new Promise<void>((_resolve, reject) => { rejectSnapshot = reject })
+  h.holdMeetingWrite(path => path.endsWith('meeting.json'), () => deferredSnapshot, snapshotStarted)
+
+  const post = h.meetingCommand(hostId, 'propose-close', hostSessionId, 'Four agreed findings')
+  await started
+  assert.equal(
+    (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state,
+    'uncertain',
+    'prior host digest stays uncancelled until the new round snapshot lands on disk',
+  )
+  rejectSnapshot(new Error('ENOSPC: snapshot write failed'))
+  assert.equal((await post).ok, true)
+  assert.equal(
+    (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state,
+    'uncertain',
+    'failed snapshot write preserves uncertain host handoff for restart recovery',
+  )
+
+  // Verify the restart boundary: shut down the first instance and restore from the on-disk snapshot + SQLite journal.
+  const meetingFolder = join(directory, 'meetings', meetingId)
+  const saved = JSON.parse(await readFile(join(meetingFolder, 'meeting.json'), 'utf8'))
+  assert.equal(saved.stage, 'host', 'on-disk snapshot remains on the old host round')
+  assert.equal(saved.round, 1)
+  const transcript = await readFile(join(meetingFolder, 'transcript.md'), 'utf8')
+  await h.cleanup()
+
+  const { WorkflowDeliveries } = await import('./workflow-deliveries.js')
+  const { journalMeetingDelivery } = await import('./workflow-meeting-journal.js')
+  const { MeetingHub } = await import('./meeting.js')
+  const { MeetingOutbox } = await import('./meeting-delivery.js')
+  const restoredJournal = new WorkflowDeliveries(join(directory, 'workflow-deliveries.sqlite'))
+  try {
+    let clock = 0
+    const typed: Array<{ tabId: string; text: string }> = []
+    const sessionsByTab: Record<string, string> = { host: hostSessionId, reviewer: reviewerSessionId }
+    const outbox = new MeetingOutbox({
+      settled: (tabId, delivery) => {
+        if (hub.superseded(tabId, delivery)) return true
+        if (delivery.kind === 'add-dir') return false
+        const item = journalMeetingDelivery(restoredJournal, sessionsByTab[tabId]!, delivery)
+        return item !== null && ['answered', 'cancelled'].includes(item.state)
+      },
+      sendTask: (tabId, text, delivery) => {
+        const item = journalMeetingDelivery(restoredJournal, sessionsByTab[tabId]!, delivery)
+        if (!item || item.state !== 'queued') return { result: 'busy', message: 'waiting for reconciliation' }
+        restoredJournal.begin(item.id, () => true)
+        typed.push({ tabId, text })
+        return { result: 'sent' }
+      },
+      sendCommand: () => true,
+      sent: () => {},
+      refused: () => {},
+      now: () => clock,
+    })
+    const hub = new MeetingHub(() => join(directory, 'meetings'), {
+      deliver: (tabId, delivery) => outbox.enqueue(tabId, delivery),
+      cancel: (id, tabId) => outbox.cancel(id, tabId),
+      write: () => {},
+      changed: () => {},
+      notify: () => {},
+      sessionIdOf: tabId => sessionsByTab[tabId] ?? null,
+    }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }))
+
+    hub.restore(saved, transcript, sessionId => sessionId === hostSessionId
+      ? { tabId: 'host', title: 'Host', folder: directory }
+      : sessionId === reviewerSessionId ? { tabId: 'reviewer', title: 'Reviewer', folder: directory } : null)
+    assert.equal(hub.views()[0]?.stage, 'host')
+    assert.equal(hub.views()[0]?.round, 1)
+
+    // Let /add-dir settle, then pump the restored digest: it must stay queued for recovery, not be dropped as cancelled.
+    outbox.pump()
+    clock += 2_000
+    outbox.pump()
+    assert.equal(restoredJournal.get(stale!.id)?.state, 'uncertain')
+    assert.equal(typed.length, 0)
+    assert.equal(outbox.next('host')?.kind, 'digest', 'restored digest stays available in the outbox instead of being dropped')
+
+    // Retrying from Handoffs after restart delivers the round-1 digest cleanly.
+    restoredJournal.retry(stale!.id)
+    outbox.pump()
+    assert.equal(typed.length, 1)
+    assert.ok(typed[0]!.text.includes('Four agreed findings.'), 'retried host digest is delivered after restart')
+  } finally {
+    restoredJournal.close()
+  }
+}))
+
+test('restoring a meeting whose new-round snapshot landed before journal settlement retires only the superseded host digest', async () => fixture(async (h, directory) => {
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  for (const [id, pid] of [[SOURCE, 7700], [FORK, 7701]] as const) {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }))
+    await writeFile(join(dirname(sessionPath(id)), `inuse.${pid}.lock`), '')
+  }
+
+  // Simulate process exit right after the round-2 propose-close snapshot landed on disk, before settleHostDelivery ran.
+  const meetingId = 'RZFW'
+  const meetingFolder = join(directory, 'meetings', meetingId)
+  await mkdir(join(meetingFolder, 'round-2'), { recursive: true })
+  await writeFile(join(meetingFolder, 'transcript.md'), `# Meeting ${meetingId}\n`)
+  await writeFile(join(meetingFolder, 'round-2', 'post.md'), 'Four agreed findings\n')
+  const voteDeliveryId = '33333333-3333-4333-8333-333333333333'
+  const staleDigestId = '44444444-4444-4444-8444-444444444444'
+  await writeFile(join(meetingFolder, 'meeting.json'), JSON.stringify({
+    version: 1,
+    id: meetingId,
+    topic: 'Test proposal',
+    host: { sessionId: SOURCE, title: 'Host', folder: directory, role: null, counted: { nanoAiu: 0, premiumRequests: 0 } },
+    participants: [{
+      sessionId: FORK, title: 'Reviewer', folder: directory, role: null, counted: { nanoAiu: 0, premiumRequests: 0 },
+      joinedRound: 1, reply: null, awaited: true, missed: 0,
+    }],
+    stage: 'reviewing',
+    round: 2,
+    maxRounds: 6,
+    vote: true,
+    post: 'Four agreed findings',
+    hasChanges: false,
+    late: [],
+    discussing: false,
+    reviewed: null,
+    held: null,
+    pauseReason: null,
+    remindedHost: false,
+    outcome: null,
+    cost: { nanoAiu: 0, premiumRequests: 0 },
+    outstanding: [{
+      sessionId: FORK,
+      delivery: {
+        meetingId,
+        round: 2,
+        kind: 'vote',
+        text: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nFour agreed findings`,
+        id: voteDeliveryId,
+      },
+    }],
+  }))
+
+  const { WorkflowDeliveries } = await import('./workflow-deliveries.js')
+  const { journalMeetingDelivery } = await import('./workflow-meeting-journal.js')
+  const preCrashJournal = new WorkflowDeliveries(join(directory, 'workflow-deliveries.sqlite'))
+  let staleRowId: string
+  let otherMeetingRowId: string
+  try {
+    const staleRow = journalMeetingDelivery(preCrashJournal, SOURCE, { meetingId, round: 1, kind: 'digest', text: 'R1 replies', id: staleDigestId })!
+    preCrashJournal.begin(staleRow.id, () => true)
+    preCrashJournal.submitted(staleRow.id)
+    preCrashJournal.uncertain(staleRow.id)
+    staleRowId = staleRow.id
+
+    // An unrelated non-meeting uncertain handoff for the reviewer session must not be touched by RZFW's restore.
+    const otherRow = preCrashJournal.enqueue({ sessionId: FORK, source: 'github/1', revision: 'v1', scope: 'grant-1', text: 'Unrelated handoff' })
+    preCrashJournal.begin(otherRow.id, () => true)
+    preCrashJournal.uncertain(otherRow.id)
+    otherMeetingRowId = otherRow.id
+  } finally {
+    preCrashJournal.close()
+  }
+
+  // Configure and restore the new app instance over the pre-crash SQLite journal and round-2 snapshot.
+  const { profile } = configure(h, directory)
+  profile.tabs = [
+    { title: 'Host', lastSessionId: SOURCE, active: true },
+    { title: 'Reviewer', lastSessionId: FORK },
+  ]
+  await h.restoreSaved()
+  const state = await h.request('desktop:get-state')
+  assert.equal(state.workflowDeliveries?.find(d => d.id === staleRowId)?.state, 'cancelled', 'superseded round-1 host digest is retired on restore')
+  assert.equal(state.workflowDeliveries?.find(d => d.id === otherMeetingRowId)?.state, 'uncertain', 'unrelated uncertain handoff stays untouched')
+
+  const hostTab = state.tabs.find(tab => tab.lastSessionId === SOURCE)!
+  const reviewerTab = state.tabs.find(tab => tab.lastSessionId === FORK)!
+  // Wait for both restored tabs' PTY spawns to start.
+  await waitFor(async () => h.spawns.length, n => n === 2, 'both restored tabs started')
+  const hostSpawn = h.spawns[0]!
+  const reviewerSpawn = h.spawns[1]!
+  h.configureBinding(hostTab.id, 7700, [7700])
+  h.configureBinding(reviewerTab.id, 7701, [7701])
+  await h.refreshRecords(hostTab.id)
+  await h.refreshRecords(reviewerTab.id)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  // Pump /add-dir for the unblocked host tab, then unblock FORK's unrelated handoff so FORK receives /add-dir and its round-2 vote.
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.request('desktop:delivery-action', otherMeetingRowId, 'discard')
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Four agreed findings')), 'reviewer received restored round-2 vote')
+
+  const beforeClose = hostSpawn.written.length
+  await appendFile(sessionPath(FORK),
+    line('user.message', { content: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nFour agreed findings`, interactionId: 'rev-r2' }) +
+    line('assistant.turn_start', { turnId: 'rev-r2' }) +
+    line('assistant.message', { interactionId: 'rev-r2', phase: 'final_answer', content: 'AGREE' }) +
+    line('assistant.turn_end', { turnId: 'rev-r2' }))
+  await h.refreshRecords(reviewerTab.id)
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeClose).some(chunk => chunk.includes('All 1 reviewers agreed.')), 'closing agreed message reaches host automatically without being blocked by superseded round-1 digest')
+}))
+
+test('an overlapping pumpMeetingOutbox call coalesces and delivers work queued while the first pass is awaiting prepareMeetingDelivery', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const firstState = await h.createMain()
+  const first = firstState.activeTabId!
+  const firstSessionId = firstState.tabs.find(tab => tab.id === first)!.lastSessionId!
+  const secondState = await h.request('desktop:create-tab', 'new', profile.id)
+  const second = secondState.activeTabId!
+  const secondSessionId = secondState.tabs.find(tab => tab.id === second)!.lastSessionId!
+  const firstSpawn = h.spawns[0]!
+  const secondSpawn = h.spawns[1]!
+
+  for (const [tabId, sessionId, pid, spawn] of [
+    [first, firstSessionId, 7710, firstSpawn],
+    [second, secondSessionId, 7711, secondSpawn],
+  ] as const) {
+    await mkdir(dirname(sessionPath(sessionId)), { recursive: true })
+    await writeFile(sessionPath(sessionId), line('session.start', { sessionId, startTime: new Date().toISOString() }))
+    await writeFile(join(dirname(sessionPath(sessionId)), `inuse.${pid}.lock`), '')
+    h.configureBinding(tabId, pid, [pid])
+    await h.refreshRecords(tabId)
+    spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  }
+  await pause(1600)
+
+  // Hold the first pump inside first's prepareMeetingDelivery() after pass 1 has already captured readyTabs().
+  const reader = h.bindingReader(first)
+  const originalRead = reader.read.bind(reader)
+  let readStarted!: () => void
+  const started = new Promise<void>(resolve => { readStarted = resolve })
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  reader.read = async (...args) => {
+    readStarted()
+    await gate
+    reader.read = originalRead
+    return originalRead(...args)
+  }
+
+  h.queueMeetingDelivery(first, 'post', 'First tab delivery')
+  const firstPump = h.pumpMeetingDelivery()
+  await started
+
+  // Queue work for the second tab and start an overlapping pump while pass 1 is still suspended.
+  h.queueMeetingDelivery(second, 'post', 'Second tab delivery queued mid-pump')
+  const secondPump = h.pumpMeetingDelivery()
+  releaseRead()
+  await Promise.all([firstPump, secondPump])
+
+  assert.ok(firstSpawn.written.some(chunk => chunk.includes('First tab delivery')), 'first pass delivered to the first tab')
+  assert.ok(secondSpawn.written.some(chunk => chunk.includes('Second tab delivery queued mid-pump')), 'overlapping pump coalesced and delivered mid-pump work without a third pump')
 }))
