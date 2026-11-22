@@ -64,11 +64,14 @@ export async function removeReviewerArea(area: Pick<ReviewerArea, 'root' | 'chec
     let listed: string
     try { listed = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read') } catch { return 'kept' }
     const checkout = await realPath(area.checkout)
+    // Only this review's own folder: a checkout that resolves anywhere but the "checkout" folder inside its reviewer
+    // folder (replaced by a link to another worktree, say) is not removed, whatever it matches.
+    if (!samePath(checkout, join(await realPath(area.root), 'checkout'))) return 'kept'
     let registered = false
     for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
     // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
     if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) return 'kept'
-    if (registered && !await git(runner, area.project, ['worktree', 'remove', '--', area.checkout]).then(() => true, () => false)) return 'kept'
+    if (registered && !await git(runner, area.project, ['worktree', 'remove', '--', checkout]).then(() => true, () => false)) return 'kept'
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   await rm(area.root, { recursive: true, force: true, maxRetries: 3 })

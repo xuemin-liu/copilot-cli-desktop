@@ -260,3 +260,20 @@ test('a reviewer folder reached through a link (macOS /var, a Windows short name
     assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), /real-reviewers/, 'and its registration went with it')
   } finally { f.cleanup() }
 })
+
+test('a checkout replaced by a link to another worktree is never removed, nor is that worktree', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+    const other = join(f.root, 'other-worktree')
+    f.plain(project, 'worktree', 'add', '-q', '--detach', other, base)
+    // What sandboxed code could do: swap the review's checkout for a link to the person's other worktree.
+    rmSync(area.checkout, { recursive: true, force: true })
+    symlinkSync(other, area.checkout, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.equal(await removeReviewerArea(area, f.runner), 'kept')
+    assert.ok(existsSync(join(other, 'a.txt')), 'the other worktree is untouched')
+    assert.match(f.plain(project, 'worktree', 'list'), /other-worktree/)
+  } finally { f.cleanup() }
+})
