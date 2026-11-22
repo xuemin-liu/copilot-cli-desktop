@@ -46,7 +46,7 @@ async function setup() {
     } })
   let controller: WorkflowFollowups
   const host: FollowupHost = { journal, task: (id) => tasks.list().find((t) => t.id === id) ?? null,
-    permissionKey: () => 'a'.repeat(64), verifyRepository: async (_task, snapshot, role) => { if (role === 'reviewer') { const g = controller.list().find((x) => x.role === 'reviewer' && x.enabled); if (g) controller.markCheckedOut(g.id, snapshot.head) } },
+    permissionKey: () => 'a'.repeat(64), verifyRepository: async (_task, snapshot, role) => { if (role === 'reviewer') { const g = controller.list().find((x) => x.role === 'reviewer' && x.enabled); if (g) controller.markCheckedOut(g.id, snapshot.head, snapshot.base) } },
     now: () => now, changed: () => {}, interrupt: () => {}, postsSettled: (id) => posts.settled(id),
     verifiedApproval: async (grant, snapshot) => { verified.push(grant.id); return posts.verifiedApproval(grant.repository, grant.number, snapshot.head, snapshot.base) },
     api: github.api as never,
@@ -171,4 +171,16 @@ test('a receipted approval of an older base does not end the fix loop', () => fi
   h.advance(); await h.controller.tick()
   assert.equal(h.controller.grant(fix.id)?.enabled, true, 'the approval covered the old base only')
   assert.equal(h.journal.list().filter((d) => d.scope === fix.id && d.state !== 'cancelled').length, 1, 'the approval text reaches the author as feedback instead')
+}))
+
+test('a review is refused when the base moved after the desktop presented the diff', () => fixture(async (h) => {
+  const grant = await enrollReview(h)
+  assert.equal(h.controller.grant(grant.id)?.checkedOutBase, base)
+  h.moveBase()
+  await assert.rejects(h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: `Approved at ${first}`, comments: [], approve: true }, () => {}), /base moved/)
+  assert.equal(h.posts.list().length, 0, 'no receipt for the newer base')
+  h.advance(); await h.controller.tick()
+  assert.equal(h.controller.grant(grant.id)?.checkedOutBase, base2, 'the next continuation presents the new base')
+  const receipt = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: `Approved at ${first}`, comments: [], approve: true }, () => {})
+  assert.equal(receipt.base, base2)
 }))

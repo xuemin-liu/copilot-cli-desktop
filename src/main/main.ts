@@ -4,7 +4,7 @@ import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReportin
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
-import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, refreshReviewCheckout, removeReviewerArea, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -859,6 +859,8 @@ async function prReadView(grant:FollowupGrant):Promise<string>{
 }
 /** Review loops started in this run: their clone and policy. A restart leaves them for the person (needs-person). */
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
+/** Review loops being enrolled, by session: the session's first helper call waits for its loop. */
+const reviewEnrollments=new Map<string,Promise<unknown>>()
 /** Where reviewer folders live: beside the desktop's data, never inside it, because the sandbox denies that folder. */
 function reviewerAreaBase():string{return join(dirname(app.getPath('userData')),`${basename(app.getPath('userData'))}-pr-reviewers`)}
 
@@ -911,7 +913,10 @@ async function startPrReview(url:string):Promise<void>{
       if(!taskId)await new Promise(resolve=>setTimeout(resolve,250))
     }
     if(!taskId)throw new Error('The review session did not reach a prompt; inspect it')
-    await controller.enroll(taskId,url,[],false,false,{role:'reviewer'})
+    const sessionId=tabsState.tabs.find(t=>t.id===createdTab)?.lastSessionId
+    const enrolling=controller.enroll(taskId,url,[],false,false,{role:'reviewer'})
+    if(sessionId)reviewEnrollments.set(sessionId,enrolling.catch(()=>{}))
+    try{await enrolling}finally{if(sessionId)reviewEnrollments.delete(sessionId)}
     broadcastState()
   }catch(error){
     // A session that started keeps its folder, so the person can look at it; only an unused folder is removed.
@@ -957,7 +962,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
           await verifyReviewerPolicy(review.area,review.policy)
           const head=await refreshReviewCheckout(runner,review.area.checkout,review.origin,pr.head,review.number)
           const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
-          if(grant)followups?.markCheckedOut(grant.id,head)
+          if(grant)followups?.markCheckedOut(grant.id,head,pr.base)
           return
         }
         await verifyWorkflowCheckout(folder,pr,runner,gitTrustStore())
@@ -3318,7 +3323,12 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
           return { ok: false, message: 'PR reviews require one verified foreground CLI session.' }
         if (!followups || !prPosts) return { ok: false, message: 'PR loops are not running in the desktop.' }
-        const grant = followups.list().find((candidate) => candidate.enabled && candidate.role === 'reviewer' && candidate.sessionId === request.sessionId) ?? null
+        const findGrant = (): FollowupGrant | null => followups?.list().find((candidate) => candidate.enabled && candidate.role === 'reviewer' && candidate.sessionId === request.sessionId) ?? null
+        let grant = findGrant()
+        // The first review prompt is typed before the loop can be enrolled (the session is proven only by its first
+        // prompt), so a first-turn call waits for that enrollment instead of failing.
+        const enrolling = grant ? undefined : reviewEnrollments.get(request.sessionId)
+        if (enrolling) { await Promise.race([enrolling, new Promise((resolveWait) => setTimeout(resolveWait, 60_000))]); grant = findGrant() }
         if (command === 'pr-read') {
           if (!grant) return { ok: false, message: 'This session has no active review loop.' }
           try { return { ok: true, message: await prReadView(grant) } } catch { return { ok: false, message: 'The desktop could not read the pull request.' } }
@@ -3328,6 +3338,12 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         const fields = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
         if (!fields || Object.keys(fields).some((key) => !['body', 'comments', 'approve'].includes(key)) || (fields.approve !== undefined && typeof fields.approve !== 'boolean'))
           return { ok: false, message: 'The review file takes only "body", "comments" and "approve".' }
+        // The checkout must still be clean and at the head the desktop presented when the review is posted.
+        const review = grant ? reviewerTasks.get(grant.taskId) : undefined, runner = await meetingGitRunner()
+        if (grant && review && runner) {
+          const checkout = await reviewCheckoutState(runner, review.area.checkout).catch(() => null)
+          if (!checkout || checkout.head !== grant.checkedOut || !checkout.clean) return { ok: false, message: 'Your checkout has local changes or is not at the head the desktop prepared. Undo your edits (git stash or git checkout .), then review again.' }
+        } else if (grant) return { ok: false, message: 'This review loop\'s checkout is not known to the desktop; start a new review.' }
         try {
           const receipt = await prPosts.review(grant, request.sessionId, { body: typeof fields.body === 'string' ? fields.body : '',
             comments: (Array.isArray(fields.comments) ? fields.comments : fields.comments === undefined ? [] : null) as never, approve: fields.approve === true },

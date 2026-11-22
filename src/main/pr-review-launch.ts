@@ -80,11 +80,12 @@ async function fetchHead(runner: GitRunner, checkout: string, origin: string, he
 export async function refreshReviewCheckout(runner: GitRunner, checkout: string, origin: string, head: string, number: number): Promise<string> {
   if (!SHA.test(head)) throw new Error('Invalid pull request revision')
   const current = await git(runner, checkout, ['rev-parse', '--verify', '--quiet', 'HEAD'], 'read').catch(() => '')
-  if (current === head) return head
   if (current) {
+    // Also at the same head (an author reply or a base move): a review of local edits is not a review of the PR.
     const status = await git(runner, checkout, ['status', '--porcelain=v1', '--untracked-files=normal'], 'read')
     if (status) throw new Error('The reviewer\'s checkout has changes; the person has to look at it before the review continues')
   }
+  if (current === head) return head
   await fetchHead(runner, checkout, origin, head, number)
   await git(runner, checkout, ['checkout', '--quiet', '--detach', head])
   return head

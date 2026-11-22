@@ -37,6 +37,9 @@ test('the reviewer clone holds the PR head detached, keeps no remote, runs no ho
     assert.equal(await refreshReviewCheckout(f.runner, area.checkout, upstream, second, 7), second)
     assert.equal(readFileSync(join(area.checkout, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'second\n')
     assert.equal(await refreshReviewCheckout(f.runner, area.checkout, upstream, second, 7), second, 'already there')
+    writeFileSync(join(area.checkout, 'a.txt'), 'reviewer edit\n')
+    await assert.rejects(refreshReviewCheckout(f.runner, area.checkout, upstream, second, 7), /has changes/, 'dirty at the same head too')
+    f.plain(area.checkout, 'checkout', '--', 'a.txt')
     await assert.rejects(cloneForReview(f.runner, project, upstream, area, { head: 'not-a-sha' }, 7), /Invalid/)
 
     await removeReviewerArea(area)

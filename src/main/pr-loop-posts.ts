@@ -189,6 +189,8 @@ export class PrLoopPosts {
       const head = typeof pull.head?.sha === 'string' ? pull.head.sha : '', base = typeof pull.base?.sha === 'string' ? pull.base.sha : ''
       if (!/^[a-f0-9]{40,64}$/.test(head) || !/^[a-f0-9]{40,64}$/.test(base)) throw new PrPostRejected('GitHub did not name the PR head.')
       if (grant.checkedOut !== head) throw new PrPostRejected('The PR has moved past the head in your worktree. Wait for the desktop to bring it up to date, then review the new commits.')
+      // The review covers the diff the desktop presented: a base that moved since then changes that diff.
+      if (grant.checkedOutBase !== base) throw new PrPostRejected('The PR\'s base moved since your worktree was prepared. Wait for the desktop\'s next message, then review the diff against the new base.')
       const approves = /^approved\b/i.test(body)
       if (request.approve) {
         if (comments.length) throw new PrPostRejected('An approval carries no findings; post the findings as a review without -Approve.')

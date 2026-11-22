@@ -31,8 +31,9 @@ export interface FollowupGrant {
   /** Review loop: the head and base the reviewer last posted a review of, through the helper. */
   reviewedHead?: string|null
   reviewedBase?: string|null
-  /** Review loop: the head the desktop checked out in the reviewer's own worktree. */
+  /** Review loop: the head the desktop checked out in the reviewer's own worktree, and the PR's base at that moment. */
   checkedOut?: string|null
+  checkedOutBase?: string|null
 }
 /** The desktop's own note that a review loop's PR moved: one source per PR, a new version per head and base. */
 export function headEvent(repository:string,number:number,snapshot:Pick<GithubSnapshot,'head'|'base'>,at:number):GithubFeedback{
@@ -197,7 +198,7 @@ export class WorkflowFollowups {
       permissionKey,repository:pull.repository,number:pull.number,reviewers,failedChecks,completeOnMerge,enabled:true,activatedAt,
       seen:Object.fromEntries(seenEvents.filter(event=>!pending.has(event.source)).map(event=>[event.source,event.version])),head:snapshot.head,headCounts:{},total:0,health:'watching',checks:snapshot.checks,
       ...(role==='author'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,approval:null}:{}),
-      ...(role==='reviewer'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,authorId:snapshot.author as number,reviewedHead:null,reviewedBase:null,checkedOut:snapshot.head}:{})}
+      ...(role==='reviewer'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,authorId:snapshot.author as number,reviewedHead:null,reviewedBase:null,checkedOut:snapshot.head,checkedOutBase:snapshot.base}:{})}
     // The uniqueness checks and the save commit together, so two enrollments racing for one PR cannot both land.
     this.db.exec('BEGIN IMMEDIATE')
     try{
@@ -215,11 +216,11 @@ export class WorkflowFollowups {
     if(!grant?.enabled||roleOf(grant)!=='reviewer'||!/^[a-f0-9]{40,64}$/.test(head)||!/^[a-f0-9]{40,64}$/.test(base))return
     this.save({...grant,reviewedHead:head,reviewedBase:base})
   }
-  /** The desktop moved the reviewer's worktree to this head (or found it there). */
-  markCheckedOut(id:string,head:string):void{
+  /** The desktop moved the reviewer's worktree to this head (or found it there), with the PR on this base. */
+  markCheckedOut(id:string,head:string,base:string):void{
     const grant=this.grant(id)
-    if(!grant?.enabled||roleOf(grant)!=='reviewer'||!/^[a-f0-9]{40,64}$/.test(head))return
-    if(grant.checkedOut!==head)this.save({...grant,checkedOut:head})
+    if(!grant?.enabled||roleOf(grant)!=='reviewer'||!/^[a-f0-9]{40,64}$/.test(head)||!/^[a-f0-9]{40,64}$/.test(base))return
+    if(grant.checkedOut!==head||grant.checkedOutBase!==base)this.save({...grant,checkedOut:head,checkedOutBase:base})
   }
   /** The person's choice when a PR loop ran out of continuations: ten more, up to a fixed ceiling. */
   extendLimit(id:string):FollowupGrant{
@@ -543,9 +544,9 @@ export class WorkflowFollowups {
       const sha=(value:unknown):boolean=>value===null||(typeof value==='string'&&/^[a-f0-9]{40,64}$/.test(value))
       if(!validMarker(grant.marker)||!Number.isSafeInteger(grant.accountId)||Number(grant.accountId)<=0||!Number.isSafeInteger(grant.authorId)||Number(grant.authorId)<=0)return false
       if(!Number.isInteger(grant.limit)||Number(grant.limit)<PR_LOOP_LIMIT||Number(grant.limit)>PR_LOOP_MAX_LIMIT)return false
-      return sha(grant.reviewedHead)&&sha(grant.reviewedBase)&&sha(grant.checkedOut)&&grant.approval===undefined&&grant.health!=='approval-pending'&&grant.health!=='approved'
+      return sha(grant.reviewedHead)&&sha(grant.reviewedBase)&&sha(grant.checkedOut)&&sha(grant.checkedOutBase)&&grant.approval===undefined&&grant.health!=='approval-pending'&&grant.health!=='approved'
     }
-    if(grant.authorId!==undefined||grant.reviewedHead!==undefined||grant.reviewedBase!==undefined||grant.checkedOut!==undefined)return false
+    if(grant.authorId!==undefined||grant.reviewedHead!==undefined||grant.reviewedBase!==undefined||grant.checkedOut!==undefined||grant.checkedOutBase!==undefined)return false
     if(grant.role!=='author')return false
     if(!validMarker(grant.marker)||!Number.isSafeInteger(grant.accountId)||Number(grant.accountId)<=0)return false
     if(!Number.isInteger(grant.limit)||Number(grant.limit)<PR_LOOP_LIMIT||Number(grant.limit)>PR_LOOP_MAX_LIMIT)return false
