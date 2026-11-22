@@ -132,3 +132,15 @@ test('a loop stopped while the reply was being checked posts nothing', () => fix
   assert.equal(h.writes.length, 0)
   assert.equal(h.posts.settled(grant().id), true, 'nothing is left in doubt')
 }))
+
+test('a reply GitHub refused (4xx) leaves nothing in doubt and can be corrected and sent once', () => fixture(async (h) => {
+  const { GithubWriteRefused } = await import('./workflow-github.js')
+  const host = h.posts['host' as never] as { write: (...args: unknown[]) => Promise<unknown> }
+  const write = host.write
+  host.write = async () => { throw new GithubWriteRefused(422, 'Validation Failed (HTTP 422)') }
+  await assert.rejects(h.posts.reply(grant(), 'session', { to: '100', body: '🤖 Fixed.' }), /refused the reply \(HTTP 422\).*send it once/)
+  assert.equal(h.posts.list()[0]!.state, 'dismissed')
+  assert.equal(h.posts.settled(grant().id), true)
+  host.write = write
+  assert.equal((await h.posts.reply(grant(), 'session', { to: '100', body: '🤖 Fixed.' })).state, 'posted')
+}))

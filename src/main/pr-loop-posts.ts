@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { authorPostProblem, DEFAULT_PR_MARKER } from './pr-loop-rules.js'
-import type { GithubApi, GithubWrite } from './workflow-github.js'
+import { GithubWriteRefused, type GithubApi, type GithubWrite } from './workflow-github.js'
 import type { FollowupGrant } from './workflow-followups.js'
 
 /**
@@ -105,7 +105,12 @@ export class PrLoopPosts {
         answer = target === null
           ? await this.host.write('POST', `repos/${grant.repository}/issues/${grant.number}/comments`, { body: posted })
           : await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/comments/${target}/replies`, { body: posted })
-      } catch {
+      } catch (error) {
+        if (error instanceof GithubWriteRefused) {
+          // GitHub said no, so nothing exists to reconcile: the reply can be corrected and sent once.
+          this.save({ ...receipt, state: 'dismissed' })
+          throw new PrPostRejected(`GitHub refused the reply (HTTP ${error.status}): ${error.detail || 'no reason given'}. Nothing was posted; correct it and send it once.`)
+        }
         // It may still have landed: the receipt stays an intent, and reconciliation looks for its tag.
         throw new PrPostRejected('GitHub did not confirm the reply. The desktop will check whether it landed; do not post it again.')
       }

@@ -678,6 +678,7 @@ let followupError: string | null = null
 let followupOpening: Promise<WorkflowFollowups> | null = null
 /** The PR loops' checked GitHub writes and their receipts (pr-loop-posts.ts); opened with follow-ups. */
 let prPosts: PrLoopPosts | null = null
+let prPostsError: string | null = null
 let prPostTimer: NodeJS.Timeout | null = null
 /** A PR loop's turn runs the build and tests, so it may take longer than a follow-up's ten minutes. */
 const automaticTurnLimit=(grant:FollowupGrant):number=>(grant.role===undefined?10:30)*60_000
@@ -852,7 +853,10 @@ async function openFollowups():Promise<WorkflowFollowups> {
     const api=await githubCliApi(app.getPath('userData'))
     const write=await githubCliWrite(app.getPath('userData'))
     if(shuttingDown())throw new Error('Desktop is closing')
-    prPosts??=new PrLoopPosts(join(app.getPath('userData'),'pr-loop-posts.sqlite'),{api,write})
+    if(!prPosts){
+      try{prPosts=new PrLoopPosts(join(app.getPath('userData'),'pr-loop-posts.sqlite'),{api,write});prPostsError=null}
+      catch{prPostsError='PR loops are unavailable: their reply records could not be opened. Task follow-ups still work; restart Desktop to try again.';void writeAppLog('PR loop receipts could not be opened').catch(()=>{})}
+    }
     if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{})},60_000);prPostTimer.unref()}
     const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
       api,journal:deliveryJournal,projectAvailable:id=>desktopConfig.profiles.some(profile=>profile.id===id),
@@ -929,7 +933,7 @@ const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   else if(item&&tabsState.tabs.some(tab=>tab.id===item.tabId))activateSessionTab(item.tabId)
   else restoreMainWindow()
 }))
-function attentionItems(view?:DesktopState):AttentionItem[]{return view?workflowAttention(view.tabs,view.meetings??[],view.workflowTasks??[],view.workflowFollowups??[],view.workflowDeliveries??[]):workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews())}
+function attentionItems(view?:DesktopState):AttentionItem[]{return view?workflowAttention(view.tabs,view.meetings??[],view.workflowTasks??[],view.workflowFollowups??[],view.workflowDeliveries??[],view.workflowPrPosts??[]):workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews(),prPostViews())}
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
   try { return workflowResources.views(workflowStore?.list()??[],new Set(tabsState.tabs.map(tab=>tab.lastSessionId).filter((id):id is string=>id!==null))) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
@@ -957,6 +961,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     workflowTasks: workflowViews(),
     workflowFollowups: followupViews(),
     workflowPrPosts: prPostViews(),
+    workflowPrPostsError: prPostsError,
     workflowFollowupDefaults:followupDefaultViews(),
     workflowFollowupError: followupError,
     workflowAutomation: automationViews(),
@@ -3206,7 +3211,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         const binding = callerSession?.bindingDiagnostic
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
           return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
-        if (!followups || !prPosts) return { ok: false, message: 'PR loops are not running in the desktop.' }
+        if (!followups || !prPosts) return { ok: false, message: prPostsError ?? 'PR loops are not running in the desktop.' }
         const grant = followups.list().find((candidate) => candidate.enabled && candidate.role === 'author' && candidate.sessionId === request.sessionId) ?? null
         try {
           const sessionId = request.sessionId

@@ -65,3 +65,11 @@ test('checks: false reads no check runs or statuses at all', async () => {
   assert.equal(snapshot.checks,'absent')
   assert.ok(!seen.some(path=>/check-runs|statuses/.test(path)))
 })
+test('only a 4xx answer counts as a refused write; anything else may have landed', async () => {
+  const { writeFailure, GithubWriteRefused } = await import('./workflow-github.js')
+  const refused = writeFailure('gh: Validation Failed (HTTP 422)\n{"message":"line must be part of the diff"}')
+  assert.ok(refused instanceof GithubWriteRefused); assert.equal((refused as InstanceType<typeof GithubWriteRefused>).status, 422)
+  assert.match((refused as InstanceType<typeof GithubWriteRefused>).detail, /Validation Failed/)
+  for (const unknown of ['gh: Server Error (HTTP 502)', 'error connecting to api.github.com', 'context deadline exceeded', ''])
+    assert.ok(!(writeFailure(unknown) instanceof GithubWriteRefused), unknown)
+})

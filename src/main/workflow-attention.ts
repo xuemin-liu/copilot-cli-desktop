@@ -4,8 +4,9 @@ import { redactDiagnosticText } from './desktop-diagnostics.js'
 import type { WorkflowTask } from './workflow-types.js'
 import type { FollowupGrant } from './workflow-followups.js'
 import type { WorkflowDelivery } from './workflow-deliveries.js'
+import type { PrPostView } from './types.js'
 
-export type AttentionReason = 'Session stopped unexpectedly' | 'Needs approval' | 'Review meeting paused' | 'Task needs input' | 'Ready for review' | 'Task blocked or failed' | 'Follow-ups need attention' | 'Handoff needs reconciliation' | 'Task resource unavailable' | 'Task outcome needs review'
+export type AttentionReason = 'Session stopped unexpectedly' | 'Needs approval' | 'Review meeting paused' | 'Task needs input' | 'Ready for review' | 'Task blocked or failed' | 'Follow-ups need attention' | 'Handoff needs reconciliation' | 'Task resource unavailable' | 'Task outcome needs review' | 'PR post needs checking'
 export interface AttentionItem { tabId: string; sessionId?: string; subjectId?:string; evidence?:string[]; title: string; reasons: AttentionReason[]; key: string }
 export function attentionTitle(value: string): string {
   return redactDiagnosticText(value.replace(/[\p{Cc}\p{Cf}]/gu, '')).slice(0, 120).trim() || 'Copilot session'
@@ -16,11 +17,17 @@ function evidence(subject:string,reasons:readonly AttentionReason[],task:Workflo
       :reason==='Review meeting paused'?paused.map(meeting=>[meeting.id,meeting.round,meeting.pauseReason])
       :reason==='Follow-ups need attention'?[grant?.id,grant?.health]
       :reason==='Handoff needs reconciliation'?uncertain.map(delivery=>delivery.id).sort()
+      :reason==='PR post needs checking'?grant?.id??null
       :reason==='Task resource unavailable'?task?.id:null]))
 }
 /** Activity is not an outcome: idle/completed/dormant processes never imply a reviewable result. */
-export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: readonly MeetingView[], tasks: readonly WorkflowTask[] = [],grants:readonly FollowupGrant[]=[],deliveries:readonly WorkflowDelivery[]=[]): AttentionItem[] {
+/** A PR-loop post whose landing is unknown blocks the loop's next post: uncertain, or an intent not settled for five minutes. */
+const POST_STUCK_MS = 5 * 60_000
+const SETTLED_HEALTH = ['watching', 'paused', 'closed', 'approved']
+export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: readonly MeetingView[], tasks: readonly WorkflowTask[] = [],grants:readonly FollowupGrant[]=[],deliveries:readonly WorkflowDelivery[]=[],posts:readonly PrPostView[]=[],now=Date.now()): AttentionItem[] {
   const result: AttentionItem[] = []
+  const stuck=new Set(posts.filter(post=>post.state==='uncertain'||now-post.createdAt>=POST_STUCK_MS).map(post=>post.grantId))
+  const unsettled=(sessionId:string|null|undefined):FollowupGrant|undefined=>grants.find(g=>g.sessionId===sessionId&&stuck.has(g.id))
   for (const tab of tabs) {
     const reasons: AttentionReason[] = []
     if (tab.status === 'crashed') reasons.push('Session stopped unexpectedly')
@@ -33,11 +40,13 @@ export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: 
     if (task?.outcome === 'ready') reasons.push('Ready for review')
     if (task?.outcome === 'needs-input') reasons.push('Task needs input')
     if (task?.outcome === 'blocked' || task?.outcome === 'failed') reasons.push('Task blocked or failed')
-    const grant=grants.find(g=>g.sessionId===tab.lastSessionId&&g.health!=='watching'&&g.health!=='paused'&&g.health!=='closed')
+    const grant=grants.find(g=>g.sessionId===tab.lastSessionId&&!SETTLED_HEALTH.includes(g.health))
     if(grant)reasons.push('Follow-ups need attention')
+    const postGrant=unsettled(tab.lastSessionId)
+    if(postGrant)reasons.push('PR post needs checking')
     const uncertain=deliveries.filter(d=>d.sessionId===tab.lastSessionId&&d.state==='uncertain')
     if(uncertain.length)reasons.push('Handoff needs reconciliation')
-    if(reasons.length){const subject=tab.lastSessionId??tab.id,facts=evidence(subject,reasons,task,paused,grant,uncertain)
+    if(reasons.length){const subject=tab.lastSessionId??tab.id,facts=evidence(subject,reasons,task,paused,grant??postGrant,uncertain)
       result.push({tabId:tab.id,subjectId:subject,title:attentionTitle(tab.title),reasons,evidence:facts,key:JSON.stringify(facts)})}
 
   }
@@ -52,11 +61,13 @@ export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: 
     if(task.outcome==='needs-input')reasons.push('Task needs input')
     if(task.outcome==='blocked'||task.outcome==='failed')reasons.push('Task blocked or failed')
     if(task.outcome==='ready')reasons.push('Ready for review')
-    const grant=grants.find(grant=>grant.taskId===task.id&&grant.enabled&&!['watching','paused','closed'].includes(grant.health))
+    const grant=grants.find(grant=>grant.taskId===task.id&&grant.enabled&&!SETTLED_HEALTH.includes(grant.health))
     if(grant)reasons.push('Follow-ups need attention')
+    const postGrant=unsettled(task.sessionId)
+    if(postGrant)reasons.push('PR post needs checking')
     const uncertain=deliveries.filter(delivery=>delivery.sessionId===task.sessionId&&delivery.state==='uncertain')
     if(uncertain.length)reasons.push('Handoff needs reconciliation')
-    if(reasons.length){const facts=evidence(task.sessionId,reasons,task,[],grant,uncertain)
+    if(reasons.length){const facts=evidence(task.sessionId,reasons,task,[],grant??postGrant,uncertain)
       result.push({tabId:`task:${task.id}`,sessionId:task.sessionId,subjectId:task.sessionId,title:attentionTitle(task.title),reasons,evidence:facts,key:JSON.stringify(facts)})}
 
   }
@@ -68,7 +79,7 @@ export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: 
     result.push({tabId:`handoff:${delivery.sessionId}`,sessionId:delivery.sessionId,subjectId:delivery.sessionId,title:'Workflow handoff',reasons,evidence:facts,key:JSON.stringify(facts)})
   }
   const rank = (item: AttentionItem): number => item.reasons.includes('Session stopped unexpectedly') ? 0 : item.reasons.includes('Needs approval') ? 1
-    : item.reasons.some(reason=>reason==='Task blocked or failed'||reason==='Handoff needs reconciliation'||reason==='Follow-ups need attention'||reason==='Task resource unavailable')?2
+    : item.reasons.some(reason=>reason==='Task blocked or failed'||reason==='Handoff needs reconciliation'||reason==='Follow-ups need attention'||reason==='Task resource unavailable'||reason==='PR post needs checking')?2
     : item.reasons.some(reason=>reason==='Task needs input'||reason==='Review meeting paused'||reason==='Task outcome needs review')?3:4
   return result.sort((a, b) => rank(a) - rank(b))
 }
