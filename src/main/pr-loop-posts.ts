@@ -233,20 +233,6 @@ export class PrLoopPosts {
     }
   }
 
-  /**
-   * True when a review loop on this PR posted an approval of exactly this head and base through the helper, and GitHub
-   * still holds that review with the body that was posted (an edited, deleted or unknown review does not count).
-   */
-  async verifiedApproval(repository: string, number: number, head: string, base: string): Promise<boolean> {
-    const candidates = this.list().filter((receipt) => receipt.kind === 'approval' && receipt.state === 'posted' && receipt.repository.toLowerCase() === repository.toLowerCase()
-      && receipt.number === number && receipt.head === head && receipt.base === base && receipt.githubId !== null)
-    for (const receipt of candidates.reverse()) {
-      const review = await this.host.api(`repos/${receipt.repository}/pulls/${receipt.number}/reviews/${receipt.githubId}`) as { body?: unknown; commit_id?: unknown; state?: unknown } | null
-      if (review && typeof review.body === 'string' && sha256(review.body.replace(/\r\n/g, '\n')) === receipt.bodyHash && review.commit_id === head && review.state !== 'DISMISSED') return true
-    }
-    return false
-  }
-
   /** The person looked at an uncertain post: it is settled either way, and nothing is posted again. */
   dismiss(id: string): void {
     const receipt = this.list().find((item) => item.id === id)

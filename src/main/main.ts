@@ -4,7 +4,7 @@ import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReportin
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
-import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -860,6 +860,20 @@ async function prReadView(grant:FollowupGrant):Promise<string>{
 }
 /** Review loops started in this run: their clone and policy. A restart leaves them for the person (needs-person). */
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
+/**
+ * A review loop that ended (merged, closed, stopped) and whose tab is gone leaves its clone, its Copilot home and a dead
+ * session's token behind: remove the folder. A restart forgets these loops; startup removes week-old folders instead.
+ */
+async function sweepReviewerAreas():Promise<void>{
+  for(const [taskId,review] of reviewerTasks){
+    const grant=followups?.list().find(g=>g.taskId===taskId&&g.role==='reviewer')
+    if(grant?.enabled)continue
+    const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&samePath(resolve(session.sessionCwd),resolve(review.area.checkout)))
+    if(open)continue
+    reviewerTasks.delete(taskId)
+    await removeReviewerArea(review.area).catch(()=>{})
+  }
+}
 /** Review loops being enrolled, by session: the session's first helper call waits for its loop. */
 const reviewEnrollments=new Map<string,Promise<unknown>>()
 /** Where reviewer folders live: beside the desktop's data, never inside it, because the sandbox denies that folder. */
@@ -946,11 +960,10 @@ async function openFollowups():Promise<WorkflowFollowups> {
       try{prPosts=new PrLoopPosts(join(app.getPath('userData'),'pr-loop-posts.sqlite'),{api,write});prPostsError=null}
       catch{prPostsError='PR loops are unavailable: their reply records could not be opened. Task follow-ups still work; restart Desktop to try again.';void writeAppLog('PR loop receipts could not be opened').catch(()=>{})}
     }
-    if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{})},60_000);prPostTimer.unref()}
+    if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{});void sweepReviewerAreas().catch(()=>{})},60_000);prPostTimer.unref()}
     const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
       api,journal:deliveryJournal,projectAvailable:id=>desktopConfig.profiles.some(profile=>profile.id===id),
       postsSettled:id=>prPosts?.settled(id)??false,
-      verifiedApproval:async(grant,snapshot)=>prPosts?prPosts.verifiedApproval(grant.repository,grant.number,snapshot.head,snapshot.base):false,
       complete:(task,snapshot,grant)=>{
         const store=workflows(),current=store?.active(task.sessionId)
         if(!store||snapshot.open||snapshot.merged!==true||current?.id!==task.id||current.assignmentId!==task.assignmentId||current.scopeRevision!==task.scopeRevision)throw new Error('Task changed before verified merge completion')
@@ -964,7 +977,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
           const review=reviewerTasks.get(task.id)
           if(!review||!samePath(resolve(folder),resolve(review.area.checkout)))throw new Error('The review session is not in its own checkout')
           await verifyReviewerPolicy(review.area,review.policy)
-          const head=await refreshReviewCheckout(runner,review.area.checkout,review.origin,pr.head,review.number)
+          const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number)
           const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
           if(grant)followups?.markCheckedOut(grant.id,head,pr.base)
           return
@@ -3346,8 +3359,8 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         // The checkout must still be clean and at the head the desktop presented when the review is posted.
         const review = grant ? reviewerTasks.get(grant.taskId) : undefined, runner = await meetingGitRunner()
         if (grant && review && runner) {
-          const checkout = await reviewCheckoutState(runner, review.area.checkout).catch(() => null)
-          if (!checkout || checkout.head !== grant.checkedOut || !checkout.clean) return { ok: false, message: 'Your checkout has local changes or is not at the head the desktop prepared. Undo your edits (git stash or git checkout .), then review again.' }
+          const checkout = await reviewCheckoutState(runner, review.area).catch(() => null)
+          if (!checkout || checkout.head !== grant.checkedOut || !checkout.clean) return { ok: false, message: 'Your checkout has local changes or is not at the head the desktop prepared. Remove the files you added and restore the ones you changed (git show HEAD:<path> > <path>), then review again.' }
         } else if (grant) return { ok: false, message: 'This review loop\'s checkout is not known to the desktop; start a new review.' }
         try {
           const receipt = await prPosts.review(grant, request.sessionId, { body: typeof fields.body === 'string' ? fields.body : '',
@@ -6547,6 +6560,7 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     if(existsSync(join(app.getPath('userData'),'workflow-automations.sqlite')))try{openAutomations()}catch{automationError='Automation history is unavailable; automatic work is disabled.'}
     setInterval(()=>{for(const run of automaticTurns.values())if(!run.authorized())interruptAutomatic(run.grant)},1000).unref()
+    void pruneReviewerAreas(reviewerAreaBase(),new Set(),Date.now()).catch(()=>{})
     if(existsSync(join(app.getPath('userData'),'workflow-followups.sqlite')))void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()

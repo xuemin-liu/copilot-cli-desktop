@@ -91,8 +91,13 @@ own consent, because the review session runs the PR's code.
 - When the author pushes, or the base moves, Desktop brings the reviewer's checkout to the new head (only while it is
   clean) and wakes the session with the last reviewed head, so it reviews the new commits. A marked reply from the
   author wakes it too; its own comments never do. A merge or close ends the loop; Desktop never merges.
-- A receipted approval of the fix loop's current head and base, still unchanged on GitHub, ends a fix loop on the same
-  PR by itself. Any other approval still waits for **Confirm approval**.
+- A review loop's approval never ends a fix loop by itself: the PR's own code runs in the same sandbox as the reviewer
+  and could post one through the helper, so it shows as **Confirm approval** like any other.
+- The clone copies every object (it shares no file with your repository), and its Git directory sits outside the
+  checkout, read-only to the sandbox. Desktop's own Git commands name that directory directly and never follow the
+  checkout's `.git` pointer, so nothing the PR's code writes into its checkout is run by Desktop.
+- A reviewer folder is removed when its loop has ended and its tab is closed; folders a restart left behind are
+  removed after a week.
 - Known limits: inside Copilot's Windows sandbox, this repository's own esbuild build, its tests and `pnpm install` do
   not run, so the reviewer reports them as not run. A review session started before a restart does not resume into
   its loop; start a new review.

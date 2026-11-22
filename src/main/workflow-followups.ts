@@ -4,7 +4,7 @@ import { readGithubPull, parseGithubPullUrl, validGithubRepository, type GithubA
 import type { WorkflowTask } from './workflow-types.js'
 import {WorkflowDeliveryRejected,type WorkflowDeliveries,type WorkflowDelivery} from './workflow-deliveries.js'
 import {githubBatchInput} from './workflow-feedback-batch.js'
-import {approvalOfHead,approvesHeadText,DEFAULT_PR_MARKER,isMarked,PR_LOOP_EXTENSION,PR_LOOP_LIMIT,PR_LOOP_MAX_LIMIT,validMarker,type ApprovalEvidence,type PrLoopRole} from './pr-loop-rules.js'
+import {approvalOfHead,DEFAULT_PR_MARKER,isMarked,PR_LOOP_EXTENSION,PR_LOOP_LIMIT,PR_LOOP_MAX_LIMIT,validMarker,type ApprovalEvidence,type PrLoopRole} from './pr-loop-rules.js'
 
 export interface FollowupDefault {
   revision:string;projectId:string;repository:string;reviewers:{id:number;login:string}[];
@@ -62,11 +62,6 @@ export interface FollowupHost {
   verifyRepository(task:WorkflowTask,snapshot:GithubSnapshot,role?:PrLoopRole): Promise<void>;
   /** PR loops: false while a post of this grant is not known to have landed or not (pr-loop-posts.ts). */
   postsSettled?(grantId:string):boolean;
-  /**
-   * Fix loop: true when a review loop on this PR posted, through the helper, an approval of exactly this head and base,
-   * and GitHub still holds that post unchanged. Only such an approval ends a fix loop by itself.
-   */
-  verifiedApproval?(grant:FollowupGrant,snapshot:GithubSnapshot):Promise<boolean>;
   send(delivery:WorkflowDelivery,grant:FollowupGrant): Promise<'sent'|'busy'>;
   interrupt(grant:FollowupGrant): void;
   changed(): void;
@@ -382,17 +377,6 @@ export class WorkflowFollowups {
       if(!known)tracked++
       if((!known&&event.at<next.activatedAt)||!this.eligible(event,next,snapshot.head)||accepted.has(this.eventKey(event.source,event.version))){next.seen[event.source]=event.version;continue}
       candidates.push(event)
-    }
-    if(roleOf(next)==='author'&&this.host.verifiedApproval&&await this.host.verifiedApproval(next,snapshot).catch(()=>false)){
-      // A receipted approval of exactly this head and base ends the loop by itself. The approval's own text is not
-      // feedback to fix; anything else new, queued, in flight or unsettled still is, and keeps the loop going.
-      const rest=candidates.filter(event=>!approvesHeadText(event,snapshot.head))
-      const latest=this.grant(next.id)
-      const busy=this.host.journal.list().some(d=>d.scope===next.id&&['queued','submitting','submitted','uncertain'].includes(d.state))
-      if(latest?.enabled&&!busy&&!rest.length&&this.host.postsSettled?.(next.id)!==false){
-        for(const event of candidates)next.seen[event.source]=event.version
-        this.save({...next,enabled:false,health:'approved',approval:null});this.nextPoll.delete(next.id);return
-      }
     }
     const limit=limitOf(next)
     if(loop&&candidates.length&&next.total>=limit)next.health='limit'

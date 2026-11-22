@@ -48,7 +48,6 @@ async function setup() {
   const host: FollowupHost = { journal, task: (id) => tasks.list().find((t) => t.id === id) ?? null,
     permissionKey: () => 'a'.repeat(64), verifyRepository: async (_task, snapshot, role) => { if (role === 'reviewer') { const g = controller.list().find((x) => x.role === 'reviewer' && x.enabled); if (g) controller.markCheckedOut(g.id, snapshot.head, snapshot.base) } },
     now: () => now, changed: () => {}, interrupt: () => {}, postsSettled: (id) => posts.settled(id),
-    verifiedApproval: async (grant, snapshot) => { verified.push(grant.id); return posts.verifiedApproval(grant.repository, grant.number, snapshot.head, snapshot.base) },
     api: github.api as never,
     send: async (delivery, grant) => {
       if (!journal.begin(delivery.id, () => controller.authorized(grant))) return 'busy'
@@ -128,30 +127,6 @@ test('reviewer posts name the checked-out head, never approve with findings, and
   assert.equal(current().reviewedHead, first)
 }))
 
-test('a receipted approval of the current head and base ends the fix loop by itself; an edited one does not', () => fixture(async (h) => {
-  const review = await enrollReview(h)
-  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
-  const approval = await h.posts.review(h.controller.grant(review.id), 'reviewer-session', { body: `Approved at ${first}\nRan the suite.`, comments: [], approve: true }, () => {})
-  h.editReview(approval.githubId!, `Approved at ${first}\nedited ${receiptTag(approval.id)}`)
-  h.advance(); await h.controller.tick()
-  assert.equal(h.controller.grant(fix.id)?.enabled, true, 'an edited approval is not the one that was posted')
-  h.editReview(approval.githubId!, `Approved at ${first}\nRan the suite.\n\n${receiptTag(approval.id)}`)
-  h.moveBase(); h.advance(); await h.controller.tick()
-  assert.equal(h.controller.grant(fix.id)?.enabled, true, 'a base move voids it')
-}))
-
-test('a receipted approval ends the fix loop without the person', () => fixture(async (h) => {
-  const review = await enrollReview(h)
-  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
-  await h.posts.review(h.controller.grant(review.id), 'reviewer-session', { body: `Approved at ${first}\nRan the suite.`, comments: [], approve: true }, () => {})
-  h.advance(); await h.controller.tick()
-  const ended = h.controller.grant(fix.id)!
-  assert.equal(ended.enabled, false); assert.equal(ended.health, 'approved')
-  assert.equal(h.controller.grant(review.id)?.enabled, true, 'the review loop keeps watching until merge')
-  h.close(); h.advance(); await h.controller.tick()
-  assert.equal(h.controller.grant(review.id)?.health, 'closed')
-}))
-
 test('a review loop stopped while its review was being checked posts nothing', () => fixture(async (h) => {
   const grant = await enrollReview(h)
   let live = true
@@ -161,16 +136,6 @@ test('a review loop stopped while its review was being checked posts nothing', (
   await assert.rejects(h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'Findings.', comments: [], approve: false }, () => {}, () => live), /stopped or changed/)
   assert.equal(h.posts.list().filter((r) => r.state === 'posted').length, 0)
   assert.equal(h.posts.settled(grant.id), true)
-}))
-
-test('a receipted approval of an older base does not end the fix loop', () => fixture(async (h) => {
-  const review = await enrollReview(h)
-  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
-  await h.posts.review(h.controller.grant(review.id), 'reviewer-session', { body: `Approved at ${first}\nRan the suite.`, comments: [], approve: true }, () => {})
-  h.moveBase()
-  h.advance(); await h.controller.tick()
-  assert.equal(h.controller.grant(fix.id)?.enabled, true, 'the approval covered the old base only')
-  assert.equal(h.journal.list().filter((d) => d.scope === fix.id && d.state !== 'cancelled').length, 1, 'the approval text reaches the author as feedback instead')
 }))
 
 test('a review is refused when the base moved after the desktop presented the diff', () => fixture(async (h) => {
@@ -195,4 +160,23 @@ test('a review GitHub refused (4xx) leaves nothing in doubt and can be corrected
   assert.equal(h.posts.settled(grant.id), true)
   host.write = write
   assert.equal((await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'One finding.', comments: [{ path: 'a.ts', line: 3, body: 'Nit: x' }], approve: false }, () => {})).state, 'posted')
+}))
+
+test('a reviewer approval never ends the fix loop by itself: the code under review could have posted it', () => fixture(async (h) => {
+  const review = await enrollReview(h)
+  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
+  await h.posts.review(h.controller.grant(review.id), 'reviewer-session', { body: `Approved at ${first}
+Ran the suite.`, comments: [], approve: true }, () => {})
+  h.advance(); await h.controller.tick()
+  const pending = h.controller.grant(fix.id)!
+  assert.equal(pending.enabled, true)
+  assert.equal(pending.health, 'approval-pending')
+  assert.equal(pending.approval?.kind, 'text')
+  assert.equal(pending.approval?.head, first)
+  finish(h)  // the approval's text reached the author as feedback; that turn ends first
+  const confirmed = await h.controller.confirmApproval(fix.id, pending.approval!)
+  assert.equal(confirmed.health, 'approved')
+  assert.equal(h.controller.grant(review.id)?.enabled, true, 'the review loop keeps watching until merge')
+  h.close(); h.advance(); await h.controller.tick()
+  assert.equal(h.controller.grant(review.id)?.health, 'closed')
 }))

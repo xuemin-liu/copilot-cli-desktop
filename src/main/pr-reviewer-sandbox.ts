@@ -130,6 +130,8 @@ export function reviewerEnvironment(env: NodeJS.ProcessEnv, reviewerHome: string
   const next: NodeJS.ProcessEnv = { ...env, COPILOT_HOME: resolve(reviewerHome) }
   for (const key of Object.keys(next)) if ((GITHUB_TOKEN_VARIABLES as readonly string[]).includes(key.toUpperCase()) || key.toUpperCase() === 'GH_CONFIG_DIR') delete next[key]
   next.GH_CONFIG_DIR = resolve(githubCliConfig)
+  // The clone's Git directory is read-only to the sandbox: read commands must not try to refresh the index.
+  next.GIT_OPTIONAL_LOCKS = '0'
   return next
 }
 

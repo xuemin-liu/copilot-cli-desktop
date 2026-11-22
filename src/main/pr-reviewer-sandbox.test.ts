@@ -93,7 +93,7 @@ test('the launch environment carries no GitHub token, in any letter case, and it
   const home = resolve(tmpdir(), 'reviewer-home'), gh = resolve(tmpdir(), 'reviewer-gh')
   const env = reviewerEnvironment({ PATH: 'p', GH_TOKEN: 'a', GITHUB_TOKEN: 'b', COPILOT_GITHUB_TOKEN: 'c', GH_ENTERPRISE_TOKEN: 'd',
     GITHUB_ENTERPRISE_TOKEN: 'e', gh_token: 'f', COPILOT_HOME: 'person', GH_CONFIG_DIR: 'C:\\person\\gh', gh_config_dir: 'x', OTHER: 'kept' }, home, gh)
-  assert.deepEqual(Object.keys(env).sort(), ['COPILOT_HOME', 'GH_CONFIG_DIR', 'OTHER', 'PATH'])
+  assert.deepEqual(Object.keys(env).sort(), ['COPILOT_HOME', 'GH_CONFIG_DIR', 'GIT_OPTIONAL_LOCKS', 'OTHER', 'PATH'])
   assert.equal(env.COPILOT_HOME, home)
   assert.equal(env.GH_CONFIG_DIR, gh)
   assert.equal(env.OTHER, 'kept')
