@@ -235,3 +235,8 @@ test('a merged or closed PR is reported only from a clear answer; a failed read 
   assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'approval', head: b, createdAt: 1 }]) ?? '', /had not approved \(it approved bbbbbbbbbbbb\)/)
   assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'reply', head: a, createdAt: 1 }]) ?? '', /had not approved\.$/)
 })
+
+test('an approval held for missing checks is not reported as open findings', () => {
+  const a = 'a'.repeat(40)
+  assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'review', head: a, createdAt: 1, heldApproval: true }]) ?? '', /held its approval .* because some checks could not run/)
+})

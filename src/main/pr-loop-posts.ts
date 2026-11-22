@@ -18,9 +18,13 @@ export interface PostReceipt {
   githubId: number | null; url: string | null; createdAt: number
   /** A review or approval: the head it names (its commit) and the base the PR had when it was posted. */
   head?: string | null; base?: string | null
+  /** A review that is an approval held back for missing checks, not a review with findings. */
+  heldApproval?: boolean
 }
 export interface ReviewComment { path: string; line: number; body: string }
-export interface ReviewRequest { body: string; comments: ReviewComment[]; approve: boolean }
+export interface ReviewRequest { body: string; comments: ReviewComment[]; approve: boolean
+  /** Set by the desktop, never by the reviewer: this comment stands in for an approval held for missing checks. */
+  heldApproval?: boolean }
 export interface PostHost { api: GithubApi; write: GithubWrite; now?: () => number }
 export interface ReplyRequest { to: string; body: string }
 
@@ -205,7 +209,8 @@ export class PrLoopPosts {
       // As for replies: the loop may have been stopped, or the session lost its grant, during the lookups above.
       if (!authorized()) throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.')
       const receipt: PostReceipt = { id: randomUUID(), grantId: grant.id, sessionId, repository: grant.repository, number: grant.number,
-        kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base }
+        kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base,
+        ...(!request.approve && request.heldApproval === true && !comments.length ? { heldApproval: true } : {}) }
       const posted = `${body}\n\n${receiptTag(receipt.id)}`
       receipt.bodyHash = sha256(posted)
       this.save(receipt)

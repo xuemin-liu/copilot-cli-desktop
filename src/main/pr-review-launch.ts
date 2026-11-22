@@ -195,7 +195,7 @@ The author's replies start with "${marker.trimEnd()}"; yours never do. You are t
  * not approved or with the last review's findings open, or closed. `pull` is GitHub's answer for the PR, or null when
  * the read failed; null is returned whenever GitHub did not say clearly that the PR is closed, so the caller asks again.
  */
-export function endedReviewNote(number: number, pull: unknown, posts: readonly { kind: string; head?: string | null; createdAt: number }[]): string | null {
+export function endedReviewNote(number: number, pull: unknown, posts: readonly { kind: string; head?: string | null; createdAt: number; heldApproval?: boolean }[]): string | null {
   const p = pull && typeof pull === 'object' ? pull as { state?: unknown; merged?: unknown; head?: { sha?: unknown } | null } : null
   if (!p || p.state !== 'closed' || typeof p.merged !== 'boolean') return null
   const head = typeof p.head?.sha === 'string' ? p.head.sha : null
@@ -203,6 +203,7 @@ export function endedReviewNote(number: number, pull: unknown, posts: readonly {
   const short = (sha: string | null | undefined): string => sha ? sha.slice(0, 12) : 'an unknown head'
   if (!p.merged) return `PR #${number} was closed without merging; its review loop ended.`
   if (last?.kind === 'approval' && last.head === head) return `PR #${number} was merged at the head its review loop approved (${short(head)}).`
+  if (last?.kind === 'review' && last.heldApproval) return `PR #${number} was merged at ${short(head)}, which its review loop had not approved: it held its approval of ${short(last.head)} because some checks could not run.`
   if (last?.kind === 'review') return `PR #${number} was merged at ${short(head)} while the findings of its last review (on ${short(last.head)}) were still open.`
   return `PR #${number} was merged at ${short(head)}, which its review loop had not approved${last?.kind === 'approval' ? ` (it approved ${short(last.head)})` : ''}.`
 }

@@ -3606,7 +3606,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         try {
           const held = fields.approve === true && !approve
           const receipt = await prPosts.review(grant, request.sessionId, { body,
-            comments: (Array.isArray(fields.comments) ? fields.comments : fields.comments === undefined ? [] : null) as never, approve },
+            comments: (Array.isArray(fields.comments) ? fields.comments : fields.comments === undefined ? [] : null) as never, approve, heldApproval: held },
           (head, base) => { if (grant) followups?.markReviewed(grant.id, head, base) },
           () => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'reviewer' && current.sessionId === request.sessionId && followups?.authorized(current)) })
           if (grant) { if (held && receipt.head) missingChecks.set(grant.id, receipt.head); else missingChecks.delete(grant.id) }

@@ -212,3 +212,12 @@ test('a rate-limit answer stops every loop reading GitHub for a while', () => fi
   assert.ok(h.pullReads() > before, 'reads again after the backoff')
   assert.ok(h.controller.callsLastHour() > 0)
 }))
+
+test('a comment standing in for a held approval is recorded as such; one with findings never is', () => fixture(async (h) => {
+  const grant = await enrollReview(h)
+  const held = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'Not approved yet: the tests could not run here.', comments: [], approve: false, heldApproval: true }, () => {})
+  assert.equal(held.heldApproval, true)
+  h.advance(1000)
+  const findings = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'One finding.', comments: [{ path: 'a.ts', line: 1, body: 'Blocking: x' }], approve: false, heldApproval: true }, () => {})
+  assert.equal(findings.heldApproval, undefined)
+}))

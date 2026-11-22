@@ -221,10 +221,25 @@ test('Stop or a pause while a start is being recorded holds that start', async (
     const tick = queue.tick()
     await settle()
     assert.ok(hold.gate, 'the start is being recorded')
-    await queue.disable('project')
-    hold.gate!(); await tick
+    // Stop takes effect at once; its save waits behind the check's slower one, and is written after it.
+    const stop = queue.disable('project')
+    await settle()
+    hold.gate!(); await tick; await stop
     assert.deepEqual(started, [], 'Stop came while the start was recorded: it never runs')
+    const reloaded = new PrReviewQueue(join(dir, 'q.json'), { candidates: async () => ({ repository: 'owner/repo', pulls: [] }), start: async () => { throw new Error('must not start') } })
+    await reloaded.load()
+    assert.equal(reloaded.views().project!.enabled, false, 'Stop is what the file holds after a restart')
+    // Asking again while it is on changes nothing, so a start being recorded meanwhile carries on.
+    await queue.enable('project')
+    now += 1000; pulls.push({ number: 42, title: '', author: 'me', url: url(42), reason: null, createdAt: now })
+    holdNext = true; hold.gate = null
+    const kept = queue.tick()
+    await settle()
+    await queue.enable('project')
+    hold.gate!(); await kept
+    assert.deepEqual(started, [url(42)], 'a no-op enable does not cancel the start')
     // A pause at that moment holds the start for the next pass instead of losing it.
+    await queue.disable('project')
     await queue.enable('project')
     now += 1000; pulls.push({ number: 41, title: '', author: 'me', url: url(41), reason: null, createdAt: now })
     holdNext = true; hold.gate = null
@@ -232,9 +247,9 @@ test('Stop or a pause while a start is being recorded holds that start', async (
     await settle()
     paused = true
     hold.gate!(); await paused1
-    assert.deepEqual(started, [])
+    assert.deepEqual(started, [url(42)], 'held by the pause')
     paused = false
     await queue.tick()
-    assert.deepEqual(started, [url(41)])
+    assert.deepEqual(started, [url(42), url(41)])
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

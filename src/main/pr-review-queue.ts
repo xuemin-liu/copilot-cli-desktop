@@ -74,12 +74,14 @@ export class PrReviewQueue {
    */
   async enable(profileId: string, repository?: string): Promise<QueueState> {
     await this.load()
-    const revision = this.bump(profileId)
+    const revision = this.revision(profileId)
     const listing = await this.host.candidates(profileId)
     if (this.revision(profileId) !== revision) throw new Error('The new-PR queue was changed meanwhile; ask again')
     const current = this.state[profileId]
     if (repository !== undefined && listing.repository !== repository.toLowerCase()) throw new Error(`This project's origin is ${listing.repository}, not ${repository}`)
+    // Already on for this repository: nothing changes, so a check under way (a start being recorded) carries on.
     if (current?.enabled && current.repository === listing.repository) return structuredClone(current)
+    this.bump(profileId)
     const next: QueueState = { enabled: true, repository: listing.repository, activatedAt: this.now(), seen: listing.pulls.map((candidate) => candidate.number).slice(-5000),
       waiting: [], expected: current?.repository === listing.repository ? current.expected : [], lastError: null }
     this.state[profileId] = next
@@ -171,7 +173,16 @@ export class PrReviewQueue {
     } finally { this.busy = false }
   }
 
-  private async save(): Promise<void> { await (this.host.write ?? writeFileAtomic)(this.path, JSON.stringify(this.state)) }
+  /**
+   * Saves run one after another, and each writes the state as it is when its turn comes, not when it was asked for:
+   * a check's save that was slow to finish can never land after a Stop's and turn the queue back on.
+   */
+  private save(): Promise<void> {
+    const next = this.writing.catch(() => {}).then(() => (this.host.write ?? writeFileAtomic)(this.path, JSON.stringify(this.state)))
+    this.writing = next
+    return next
+  }
+  private writing: Promise<void> = Promise.resolve()
 }
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : 'failed').slice(0, 300)
