@@ -26,6 +26,9 @@ handle, only input/output/resize events.
 - **Fix loop** (Tasks → GitHub follow-ups): the desktop watches your task's PR for review feedback, continues the session on
   each new finding, posts its replies on the PR after checking them, and asks you to confirm an approval of the current
   head. Author and reviewer may share one GitHub account. See [the fix loop](docs/workflow-followups.md#fix-loop-pr-author).
+- **Review loop** (Tasks → Review a PR): a sandboxed Copilot session reviews your PR in the desktop's own clone of it,
+  posts its reviews through the desktop's checks, and reviews again when you push or reply, approving only a head with
+  nothing left to fix. See [the review loop](docs/workflow-followups.md#review-loop-pr-reviewer).
 - **Needs you** collects approvals, crashed sessions, and paused review meetings across open projects. Open an item
   to reach its session; seeing it does not dismiss the underlying approval or question.
 - **Export and import your setup** from Settings → Migration: move CLI settings,

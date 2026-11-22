@@ -67,7 +67,7 @@ test('a fix loop records the account, the marker and its own budget, and needs n
   await assert.rejects(h.controller.enroll(h.task.id, URL, [], true, false, { role: 'author' }), /Name the reviewers/)
   const grant = await enrollFix(h)
   assert.equal(grant.role, 'author'); assert.equal(grant.accountId, AUTHOR); assert.equal(grant.marker, '🤖 '); assert.equal(grant.limit, 30)
-  await assert.rejects(h.controller.enroll(h.task.id, URL, ['reviewer'], false, false, { role: 'reviewer' as 'author' }), /Invalid/)
+  await assert.rejects(h.controller.enroll(h.task.id, URL, ['reviewer'], false, false, { role: 'owner' as 'author' }), /Invalid/)
   await assert.rejects(h.controller.enroll(h.task.id, URL, ['reviewer'], false, false, { includeExisting: true }), /Invalid/, 'only a fix loop takes existing feedback')
 }))
 

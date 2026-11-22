@@ -133,6 +133,7 @@ export interface CopilotDesktopBridge {
   confirmFollowupApproval(id:string):Promise<void>
   extendFollowup(id:string):Promise<void>
   dismissPrPost(id:string):Promise<void>
+  startPrReview(url:string,consent:boolean):Promise<void>
   saveFollowupDefault(projectId:string,url:string,reviewers:string[],checks:boolean,completeOnMerge:boolean):Promise<void>
   removeFollowupDefault(projectId:string):Promise<void>
   pauseFollowup(id:string):Promise<void>

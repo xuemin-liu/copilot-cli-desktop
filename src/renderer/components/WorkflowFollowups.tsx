@@ -21,6 +21,33 @@ function FixLoopStatus({grant,posts,run,pending}:{grant:FollowupGrant;posts:read
   </>
 }
 
+/** A review loop's state: what it reviewed, what its checkout holds, and its budget. */
+function ReviewLoopStatus({grant}:{grant:FollowupGrant}):JSX.Element{
+  return <>
+    <p>Review loop · {grant.repository} #{grant.number} · {grant.total}/{grant.limit??30} continuations</p>
+    <p>{grant.reviewedHead?`Last review posted for head ${short(grant.reviewedHead)}.`:'No review posted yet.'} {grant.checkedOut?`Its sandboxed checkout is at ${short(grant.checkedOut)}.`:''}</p>
+    {grant.health==='closed'&&<p>The PR was merged or closed; the loop has ended. Desktop never merges.</p>}
+  </>
+}
+
+/**
+ * Review a PR: the desktop clones it into a folder of its own and starts a sandboxed reviewer session there. Its own
+ * consent, because the session runs the PR's code.
+ */
+export function ReviewPrForm():JSX.Element{
+  const [url,setUrl]=useState(''),[consent,setConsent]=useState(false),[error,setError]=useState<string|null>(null),[pending,setPending]=useState(false)
+  return <details className="workflow-review-start"><summary>Review a PR</summary>
+    <form onSubmit={event=>{event.preventDefault();setPending(true);setError(null)
+      void window.copilotDesktop.startPrReview(url,consent).then(()=>{setUrl('');setConsent(false)}).catch(error=>setError(error instanceof Error?error.message:'The review could not start')).finally(()=>setPending(false))}}>
+      <label>PR URL<input required type="url" value={url} onChange={event=>setUrl(event.target.value)} placeholder="https://github.com/owner/repo/pull/123" /></label>
+      <label><input type="checkbox" checked={consent} onChange={event=>setConsent(event.target.checked)} />The review session may run this PR's code (its build and tests), with network access, in Copilot's sandbox</label>
+      <p>Desktop clones the PR into a folder of its own and starts a Copilot session there inside Copilot CLI's command sandbox, with its own Copilot home and no GitHub login: it reads the PR and posts its reviews only through Desktop, which checks each one. It reviews again when the author replies or pushes, and approves only a head with nothing left to fix. Only your own same-repository PRs, for now; a PR from a fork never starts. A project whose origin is the PR's repository must be open in Desktop. Keep Desktop running.</p>
+      <button disabled={pending||!consent} type="submit">Start the review loop</button>
+    </form>
+    {error&&<p role="alert">{error}</p>}
+  </details>
+}
+
 export function TaskFollowups({taskId,grant,projectId,createdAt,projectDefault,posts=[]}:{taskId:string;grant?:FollowupGrant|undefined;projectId?:string;createdAt?:number|undefined;projectDefault?:FollowupDefault|undefined;posts?:readonly PrPostView[]}):JSX.Element {
   const [url,setUrl]=useState(''),[reviewers,setReviewers]=useState(''),[checks,setChecks]=useState(false)
   const [completeOnMerge,setCompleteOnMerge]=useState(false)
@@ -31,18 +58,22 @@ export function TaskFollowups({taskId,grant,projectId,createdAt,projectDefault,p
     setPending(true);setError(null)
     void action().catch(error=>setError(error instanceof Error?error.message:'Follow-up settings could not be saved')).finally(()=>setPending(false))
   }
-  const fixLoop=grant?.role==='author'
+  const fixLoop=grant?.role==='author',reviewLoop=grant?.role==='reviewer'
   const grantPosts=grant?posts.filter(post=>post.grantId===grant.id):[]
-  return <details className="workflow-followups"><summary>{fixLoop?'Fix loop':'GitHub follow-ups'}{grant?` · ${grant.health}`:''}</summary>
+  return <details className="workflow-followups"><summary>{fixLoop?'Fix loop':reviewLoop?'Review loop':'GitHub follow-ups'}{grant?` · ${grant.health}`:''}</summary>
     {grant&&fixLoop&&<FixLoopStatus grant={grant} posts={grantPosts} run={run} pending={pending} />}
-    {grant&&!fixLoop&&<p>{grant.repository} #{grant.number} · Checks: {grant.checks} · {grant.total}/10 continuations
+    {grant&&reviewLoop&&<><ReviewLoopStatus grant={grant} />{grantPosts.map(post=>post.state==='uncertain'
+      ?<p key={post.id}>A {post.kind} may not have reached GitHub. Look at the PR, then <button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.dismissPrPost(post.id))}>Mark as checked</button>.</p>
+      :<p key={post.id}>Checking whether a {post.kind} reached GitHub…</p>)}
+      {grant.health==='limit'&&grant.enabled&&<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.extendFollowup(grant.id))}>Allow ten more</button>}</>}
+    {grant&&!fixLoop&&!reviewLoop&&<p>{grant.repository} #{grant.number} · Checks: {grant.checks} · {grant.total}/10 continuations
       {grant.reviewers.length?` · Reviewers: ${grant.reviewers.map(r=>r.login).join(', ')}`:''}</p>}
     {projectDefault&&<p>Project default: {projectDefault.repository}. Offered only to tasks created after it was saved; no existing task is enrolled automatically.</p>}
     {projectDefault&&projectId&&<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.removeFollowupDefault(projectId))}>Remove project default</button>}
     {grant?.completeOnMerge&&<p>Verified PR merge completes this task. Desktop does not merge the PR.</p>}
     {grant?.health==='scope-changed'&&<p>Session permissions or scope changed. Reconcile the checkout and re-enroll to continue.</p>}
     {grant?.health==='needs-person'&&<p>Open the linked session and resolve its input, binding or permission state before continuing.</p>}
-    {grant?.enabled?<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.pauseFollowup(grant.id))}>{fixLoop?'Stop the fix loop':'Pause follow-ups'}</button>:<form onSubmit={event=>{
+    {grant?.enabled?<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.pauseFollowup(grant.id))}>{fixLoop?'Stop the fix loop':reviewLoop?'Stop the review loop':'Pause follow-ups'}</button>:reviewLoop?null:<form onSubmit={event=>{
       event.preventDefault()
       const names=reviewers.split(/[\s,]+/).filter(Boolean)
       run(()=>window.copilotDesktop.enrollFollowup(taskId,url,names,checks,completeOnMerge,role==='author'?{role:'author',includeExisting:existing}:{}))

@@ -1,10 +1,10 @@
 import { DatabaseSync } from 'node:sqlite'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readGithubPull, parseGithubPullUrl, validGithubRepository, type GithubApi, type GithubSnapshot,type GithubFeedback } from './workflow-github.js'
 import type { WorkflowTask } from './workflow-types.js'
 import {WorkflowDeliveryRejected,type WorkflowDeliveries,type WorkflowDelivery} from './workflow-deliveries.js'
 import {githubBatchInput} from './workflow-feedback-batch.js'
-import {approvalOfHead,DEFAULT_PR_MARKER,isMarked,PR_LOOP_EXTENSION,PR_LOOP_LIMIT,PR_LOOP_MAX_LIMIT,validMarker,type ApprovalEvidence,type PrLoopRole} from './pr-loop-rules.js'
+import {approvalOfHead,approvesHeadText,DEFAULT_PR_MARKER,isMarked,PR_LOOP_EXTENSION,PR_LOOP_LIMIT,PR_LOOP_MAX_LIMIT,validMarker,type ApprovalEvidence,type PrLoopRole} from './pr-loop-rules.js'
 
 export interface FollowupDefault {
   revision:string;projectId:string;repository:string;reviewers:{id:number;login:string}[];
@@ -26,9 +26,21 @@ export interface FollowupGrant {
   limit?: number
   /** An approval of the current head the person has not confirmed yet. Cleared when the head moves. */
   approval?: ApprovalEvidence|null
+  /** Review loop: the PR author, whose marked replies wake the reviewer. */
+  authorId?: number
+  /** Review loop: the head and base the reviewer last posted a review of, through the helper. */
+  reviewedHead?: string|null
+  reviewedBase?: string|null
+  /** Review loop: the head the desktop checked out in the reviewer's own worktree. */
+  checkedOut?: string|null
+}
+/** The desktop's own note that a review loop's PR moved: one source per PR, a new version per head and base. */
+export function headEvent(repository:string,number:number,snapshot:Pick<GithubSnapshot,'head'|'base'>,at:number):GithubFeedback{
+  return {source:`github/${repository}/pull/${number}/head`,version:createHash('sha256').update(`${snapshot.head}/${snapshot.base}`).digest('hex'),
+    actorId:null,kind:'head',body:`The pull request now points at head ${snapshot.head} on base ${snapshot.base}.`,head:snapshot.head,at}
 }
 export interface EnrollOptions {
-  role?: Exclude<PrLoopRole,'reviewer'>
+  role?: PrLoopRole
   /** Fix loop only: also take allowed reviewers' feedback that is already on the PR. */
   includeExisting?: boolean
   marker?: string
@@ -45,9 +57,15 @@ export interface FollowupHost {
   ready?(grant:FollowupGrant): boolean;
   projectAvailable?(projectId:string):boolean;
   complete?(task:WorkflowTask,snapshot:GithubSnapshot,grant:FollowupGrant):void;
-  verifyRepository(task:WorkflowTask,snapshot:GithubSnapshot): Promise<void>;
+  /** `role`: a review loop's checkout is the desktop's detached clone, not a branch (pr-review-launch.ts). */
+  verifyRepository(task:WorkflowTask,snapshot:GithubSnapshot,role?:PrLoopRole): Promise<void>;
   /** PR loops: false while a post of this grant is not known to have landed or not (pr-loop-posts.ts). */
   postsSettled?(grantId:string):boolean;
+  /**
+   * Fix loop: true when a review loop on this PR posted, through the helper, an approval of exactly this head and base,
+   * and GitHub still holds that post unchanged. Only such an approval ends a fix loop by itself.
+   */
+  verifiedApproval?(grant:FollowupGrant,snapshot:GithubSnapshot):Promise<boolean>;
   send(delivery:WorkflowDelivery,grant:FollowupGrant): Promise<'sent'|'busy'>;
   interrupt(grant:FollowupGrant): void;
   changed(): void;
@@ -126,10 +144,12 @@ export class WorkflowFollowups {
     if(!uuid(taskId)||typeof url!=='string'||url.length>300||!Array.isArray(reviewerLogins)||reviewerLogins.length>10||typeof failedChecks!=='boolean'||typeof completeOnMerge!=='boolean')throw new Error('Invalid follow-up settings')
     if(!options||typeof options!=='object')throw new Error('Invalid follow-up settings')
     const role:PrLoopRole=options.role??'follow-up'
-    if(role!=='follow-up'&&role!=='author')throw new Error('Invalid follow-up settings')
+    if(role!=='follow-up'&&role!=='author'&&role!=='reviewer')throw new Error('Invalid follow-up settings')
     const marker=options.marker??DEFAULT_PR_MARKER,includeExisting=options.includeExisting===true
     if(role==='author'&&!validMarker(marker))throw new Error('Invalid reply marker')
-    if(role!=='author'&&(options.includeExisting!==undefined||options.marker!==undefined))throw new Error('Invalid follow-up settings')
+    if(role==='reviewer'&&!validMarker(marker))throw new Error('Invalid reply marker')
+    if(role!=='author'&&options.includeExisting!==undefined)throw new Error('Invalid follow-up settings')
+    if(role==='follow-up'&&options.marker!==undefined)throw new Error('Invalid follow-up settings')
     if(completeOnMerge&&!this.host.complete)throw new Error('Task completion is unavailable')
     const task=this.host.task(taskId),permissionKey=task?this.host.permissionKey(task):null
     if(!task||terminal(task)||!permissionKey)throw new Error('Open the supported local task session before enrolling it')
@@ -146,17 +166,22 @@ export class WorkflowFollowups {
       if(!actor||!Number.isSafeInteger(actor.id)||Number(actor.id)<=0||typeof actor.login!=='string'||actor.login.toLowerCase()!==login.toLowerCase())throw new Error('Reviewer identity could not be verified')
       reviewers.push({id:actor.id as number,login:actor.login})
     }
-    if(!reviewers.length&&!failedChecks)throw new Error('Choose reviewers or failed CI checks')
+    if(!reviewers.length&&!failedChecks&&role!=='reviewer')throw new Error('Choose reviewers or failed CI checks')
     if(role==='author'&&!reviewers.length)throw new Error('Name the reviewers whose feedback the fix loop takes')
     let accountId:number|undefined
-    if(role==='author'){
+    if(role!=='follow-up'){
       const me=await this.host.api('user') as {id?:unknown}
       if(!me||!Number.isSafeInteger(me.id)||Number(me.id)<=0)throw new Error('The GitHub account could not be verified')
       accountId=me.id as number
     }
     const snapshot=await readGithubPull(this.host.api,pull.repository,pull.number,{checks:failedChecks||role==='follow-up'})
     if(!snapshot.open)throw new Error('The pull request is closed')
-    await this.host.verifyRepository(task,snapshot)
+    if(role==='reviewer'){
+      // Reviewing means running the PR's code, so a fork's PR never starts work.
+      if(!snapshot.baseRepository||snapshot.headRepository.toLowerCase()!==snapshot.baseRepository.toLowerCase())throw new Error('A pull request from a fork cannot be reviewed here')
+      if(!Number.isSafeInteger(snapshot.author))throw new Error('GitHub did not name the PR author')
+    }
+    await this.host.verifyRepository(task,snapshot,role)
     if(this.stopped)throw new Error('Follow-ups are stopping')
     const current=this.host.task(taskId)
     if(!current||terminal(current)||current.scopeRevision!==task.scopeRevision||this.host.permissionKey(current)!==permissionKey)throw new Error('Task changed while enrollment was being checked')
@@ -166,10 +191,13 @@ export class WorkflowFollowups {
     const backlog=role==='author'&&includeExisting?snapshot.feedback.filter(event=>event.kind==='review'&&event.actorId!==null&&reviewers.some(r=>r.id===event.actorId)&&!isMarked(event.body,marker)):[]
     const pending=new Set(backlog.map(event=>event.source))
     const activatedAt=backlog.length?Math.min(now,...backlog.map(event=>event.at))-1:now
+    // A review loop's first review is the session's first prompt, so the current head counts as delivered.
+    const seenEvents=role==='reviewer'?[...snapshot.feedback,headEvent(pull.repository,pull.number,snapshot,now)]:snapshot.feedback
     const grant:FollowupGrant={id:randomUUID(),taskId,sessionId:task.sessionId,projectId:task.projectId,scopeRevision:task.scopeRevision,
       permissionKey,repository:pull.repository,number:pull.number,reviewers,failedChecks,completeOnMerge,enabled:true,activatedAt,
-      seen:Object.fromEntries(snapshot.feedback.filter(event=>!pending.has(event.source)).map(event=>[event.source,event.version])),head:snapshot.head,headCounts:{},total:0,health:'watching',checks:snapshot.checks,
-      ...(role==='author'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,approval:null}:{})}
+      seen:Object.fromEntries(seenEvents.filter(event=>!pending.has(event.source)).map(event=>[event.source,event.version])),head:snapshot.head,headCounts:{},total:0,health:'watching',checks:snapshot.checks,
+      ...(role==='author'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,approval:null}:{}),
+      ...(role==='reviewer'&&accountId!==undefined?{role,marker,accountId,limit:PR_LOOP_LIMIT,authorId:snapshot.author as number,reviewedHead:null,reviewedBase:null,checkedOut:snapshot.head}:{})}
     // The uniqueness checks and the save commit together, so two enrollments racing for one PR cannot both land.
     this.db.exec('BEGIN IMMEDIATE')
     try{
@@ -180,6 +208,18 @@ export class WorkflowFollowups {
       this.db.exec('COMMIT')
     }catch(error){this.db.exec('ROLLBACK');throw error}
     return grant
+  }
+  /** A review the reviewer posted through the helper covers this head and base. */
+  markReviewed(id:string,head:string,base:string):void{
+    const grant=this.grant(id)
+    if(!grant?.enabled||roleOf(grant)!=='reviewer'||!/^[a-f0-9]{40,64}$/.test(head)||!/^[a-f0-9]{40,64}$/.test(base))return
+    this.save({...grant,reviewedHead:head,reviewedBase:base})
+  }
+  /** The desktop moved the reviewer's worktree to this head (or found it there). */
+  markCheckedOut(id:string,head:string):void{
+    const grant=this.grant(id)
+    if(!grant?.enabled||roleOf(grant)!=='reviewer'||!/^[a-f0-9]{40,64}$/.test(head))return
+    if(grant.checkedOut!==head)this.save({...grant,checkedOut:head})
   }
   /** The person's choice when a PR loop ran out of continuations: ten more, up to a fixed ceiling. */
   extendLimit(id:string):FollowupGrant{
@@ -279,7 +319,7 @@ export class WorkflowFollowups {
         const task=this.host.task(grant.taskId)
         if(!task)continue
         if(this.host.ready?.(grant)===false){this.deliveryBusy(grant);continue}
-        try{await this.host.verifyRepository(task,snapshot)}catch{this.health(grant,'scope-changed');this.deliveryRetryAt.set(grant.id,this.now()+120000);continue}
+        try{await this.host.verifyRepository(task,snapshot,roleOf(grant))}catch{this.health(grant,'scope-changed');this.deliveryRetryAt.set(grant.id,this.now()+120000);continue}
         if(this.stopped)return
         if(!this.authorized(grant))continue
         try {
@@ -339,6 +379,17 @@ export class WorkflowFollowups {
       if((!known&&event.at<next.activatedAt)||!this.eligible(event,next,snapshot.head)||accepted.has(this.eventKey(event.source,event.version))){next.seen[event.source]=event.version;continue}
       candidates.push(event)
     }
+    if(roleOf(next)==='author'&&this.host.verifiedApproval&&await this.host.verifiedApproval(next,snapshot).catch(()=>false)){
+      // A receipted approval of exactly this head and base ends the loop by itself. The approval's own text is not
+      // feedback to fix; anything else new, queued, in flight or unsettled still is, and keeps the loop going.
+      const rest=candidates.filter(event=>!approvesHeadText(event,snapshot.head))
+      const latest=this.grant(next.id)
+      const busy=this.host.journal.list().some(d=>d.scope===next.id&&['queued','submitting','submitted','uncertain'].includes(d.state))
+      if(latest?.enabled&&!busy&&!rest.length&&this.host.postsSettled?.(next.id)!==false){
+        for(const event of candidates)next.seen[event.source]=event.version
+        this.save({...next,enabled:false,health:'approved',approval:null});this.nextPoll.delete(next.id);return
+      }
+    }
     const limit=limitOf(next)
     if(loop&&candidates.length&&next.total>=limit)next.health='limit'
     for(let offset=0;offset<candidates.length&&next.health!=='limit';offset+=10){
@@ -358,9 +409,9 @@ export class WorkflowFollowups {
     }
     this.save(next)
   }
-  private batchRole(grant:FollowupGrant):{role:PrLoopRole;marker:string;repository:string;number:number}|undefined{
+  private batchRole(grant:FollowupGrant):{role:PrLoopRole;marker:string;repository:string;number:number;reviewedHead?:string|null}|undefined{
     const role=roleOf(grant)
-    return role==='follow-up'?undefined:{role,marker:grant.marker??DEFAULT_PR_MARKER,repository:grant.repository,number:grant.number}
+    return role==='follow-up'?undefined:{role,marker:grant.marker??DEFAULT_PR_MARKER,repository:grant.repository,number:grant.number,...(role==='reviewer'?{reviewedHead:grant.reviewedHead??null}:{})}
   }
   private recoverBudget(grant:FollowupGrant,ledger:readonly WorkflowDelivery[]):FollowupGrant{
     const reservations=new Map<string,string>()
@@ -377,6 +428,9 @@ export class WorkflowFollowups {
   }
   private eligible(event:GithubFeedback,grant:FollowupGrant,head:string):boolean{
     if(event.kind==='ci')return grant.failedChecks&&(event.head===null||event.head===head)
+    if(event.kind==='head')return roleOf(grant)==='reviewer'
+    // A review loop hears only the author's marked replies; its own comments never wake it.
+    if(roleOf(grant)==='reviewer')return event.actorId!==null&&event.actorId===grant.authorId&&isMarked(event.body,grant.marker??DEFAULT_PR_MARKER)
     if(event.actorId===null||!grant.reviewers.some(actor=>actor.id===event.actorId))return false
     // A PR loop takes review comments whatever commit they were posted on, but never the author's own marked replies.
     if(roleOf(grant)==='author')return !isMarked(event.body,grant.marker??DEFAULT_PR_MARKER)
@@ -455,6 +509,7 @@ export class WorkflowFollowups {
       const unique=new Map<string,GithubFeedback>()
       for(const event of snapshot.feedback){const old=unique.get(event.source);if(old&&old.version!==event.version)throw new Error('Feedback changed during pagination');unique.set(event.source,event)}
       snapshot.feedback=[...unique.values()]
+      if(roleOf(grant)==='reviewer'&&snapshot.open)snapshot.feedback.push(headEvent(grant.repository,grant.number,snapshot,this.now()))
       this.failures.delete(grant.id);this.retryAt.delete(grant.id)
       return snapshot
     } catch(error) {
@@ -482,8 +537,15 @@ export class WorkflowFollowups {
   }
   /** The PR-loop fields: absent together on a legacy follow-up, present and well formed on a fix loop. */
   private validLoopFields(grant:FollowupGrant):boolean{
-    if(grant.role===undefined)return grant.marker===undefined&&grant.accountId===undefined&&grant.limit===undefined&&grant.approval===undefined
+    if(grant.role===undefined)return grant.marker===undefined&&grant.accountId===undefined&&grant.limit===undefined&&grant.approval===undefined&&grant.authorId===undefined&&grant.reviewedHead===undefined&&grant.checkedOut===undefined
       &&grant.health!=='approval-pending'&&grant.health!=='approved'
+    if(grant.role==='reviewer'){
+      const sha=(value:unknown):boolean=>value===null||(typeof value==='string'&&/^[a-f0-9]{40,64}$/.test(value))
+      if(!validMarker(grant.marker)||!Number.isSafeInteger(grant.accountId)||Number(grant.accountId)<=0||!Number.isSafeInteger(grant.authorId)||Number(grant.authorId)<=0)return false
+      if(!Number.isInteger(grant.limit)||Number(grant.limit)<PR_LOOP_LIMIT||Number(grant.limit)>PR_LOOP_MAX_LIMIT)return false
+      return sha(grant.reviewedHead)&&sha(grant.reviewedBase)&&sha(grant.checkedOut)&&grant.approval===undefined&&grant.health!=='approval-pending'&&grant.health!=='approved'
+    }
+    if(grant.authorId!==undefined||grant.reviewedHead!==undefined||grant.reviewedBase!==undefined||grant.checkedOut!==undefined)return false
     if(grant.role!=='author')return false
     if(!validMarker(grant.marker)||!Number.isSafeInteger(grant.accountId)||Number(grant.accountId)<=0)return false
     if(!Number.isInteger(grant.limit)||Number(grant.limit)<PR_LOOP_LIMIT||Number(grant.limit)>PR_LOOP_MAX_LIMIT)return false

@@ -238,4 +238,4 @@ export type DesktopEvent =
   | { type: 'session-completed'; tabId: string }
   | { type: 'session-crashed'; tabId: string; message: string }
 
-export interface PrPostView { id: string; grantId: string; state: 'intent' | 'uncertain'; kind: 'reply' | 'comment'; target: number | null; createdAt: number }
+export interface PrPostView { id: string; grantId: string; state: 'intent' | 'uncertain'; kind: 'reply' | 'comment' | 'review' | 'approval'; target: number | null; createdAt: number }

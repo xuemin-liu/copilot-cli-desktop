@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { authorPostProblem, DEFAULT_PR_MARKER } from './pr-loop-rules.js'
+import { authorPostProblem, DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
 import type { GithubApi, GithubWrite } from './workflow-github.js'
 import type { FollowupGrant } from './workflow-followups.js'
 
@@ -14,9 +14,13 @@ import type { FollowupGrant } from './workflow-followups.js'
 export type ReceiptState = 'intent' | 'posted' | 'uncertain' | 'dismissed'
 export interface PostReceipt {
   id: string; grantId: string; sessionId: string; repository: string; number: number
-  kind: 'reply' | 'comment'; target: number | null; bodyHash: string; state: ReceiptState
+  kind: 'reply' | 'comment' | 'review' | 'approval'; target: number | null; bodyHash: string; state: ReceiptState
   githubId: number | null; url: string | null; createdAt: number
+  /** A review or approval: the head it names (its commit) and the base the PR had when it was posted. */
+  head?: string | null; base?: string | null
 }
+export interface ReviewComment { path: string; line: number; body: string }
+export interface ReviewRequest { body: string; comments: ReviewComment[]; approve: boolean }
 export interface PostHost { api: GithubApi; write: GithubWrite; now?: () => number }
 export interface ReplyRequest { to: string; body: string }
 
@@ -134,6 +138,7 @@ export class PrLoopPosts {
         const pages = [
           await this.host.api(`repos/${repository}/pulls/${number}/comments?per_page=100`, true),
           await this.host.api(`repos/${repository}/issues/${number}/comments?per_page=100`, true),
+          await this.host.api(`repos/${repository}/pulls/${number}/reviews?per_page=100`, true),
         ]
         comments = pages.flatMap((paged) => Array.isArray(paged) ? paged.flat() : [])
           .filter((item): item is { id: number; body: string; html_url?: unknown } => !!item && typeof item === 'object' && Number.isSafeInteger((item as { id?: unknown }).id) && typeof (item as { body?: unknown }).body === 'string')
@@ -147,6 +152,84 @@ export class PrLoopPosts {
         else this.save({ ...current, state: 'uncertain' })
       }
     }
+  }
+
+  /**
+   * A reviewer's review or approval of the head the desktop checked out for it. `onPosted` records the reviewed head
+   * and base on the grant. An approval names that head in its first words and carries no findings.
+   */
+  async review(grant: FollowupGrant | null, sessionId: string, request: ReviewRequest, onPosted: (head: string, base: string) => void): Promise<PostReceipt> {
+    if (!grant || !grant.enabled || grant.role !== 'reviewer') throw new PrPostRejected('This session has no active review loop.')
+    if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the review loop for that PR.')
+    if (this.busy.has(grant.id)) throw new PrPostRejected('Another review of this loop is being posted; try again in a moment.')
+    this.busy.add(grant.id)
+    try {
+      if (!this.settled(grant.id)) throw new PrPostRejected('An earlier post may not have reached GitHub. The person has to check it in Needs you first.')
+      const marker = grant.marker ?? DEFAULT_PR_MARKER
+      const body = typeof request.body === 'string' ? request.body.replace(/\r\n/g, '\n').trim() : ''
+      const comments = Array.isArray(request.comments) ? request.comments : null
+      if (!comments || comments.length > 50) throw new PrPostRejected('Give at most fifty inline comments.')
+      if (!body && !comments.length) throw new PrPostRejected('The review is empty.')
+      if (body.length > MAX_BODY) throw new PrPostRejected('The review is too long.')
+      const texts = [body, ...comments.map((comment) => comment?.body)]
+      for (const text of texts) {
+        if (typeof text !== 'string') throw new PrPostRejected('Every inline comment needs a body.')
+        if (new RegExp(TAG.source).test(text)) throw new PrPostRejected('A review may not carry a receipt tag.')
+        if (text && isMarked(text, marker)) throw new PrPostRejected(`Reviewer posts never start with "${marker.trimEnd()}"; that marks the author's replies.`)
+      }
+      for (const comment of comments) {
+        if (typeof comment.path !== 'string' || !comment.path || comment.path.length > 400 || comment.path.startsWith('/') || comment.path.split(/[\\/]/).includes('..')) throw new PrPostRejected('An inline comment has an invalid path.')
+        if (!Number.isSafeInteger(comment.line) || comment.line < 1) throw new PrPostRejected('An inline comment has an invalid line.')
+        if (!comment.body.trim() || comment.body.length > 20_000) throw new PrPostRejected('An inline comment is empty or too long.')
+      }
+      const me = await this.host.api('user') as { id?: unknown }
+      if (!me || me.id !== grant.accountId) throw new PrPostRejected('GitHub is signed in to a different account than the one this loop was enrolled with.')
+      const pull = await this.host.api(`repos/${grant.repository}/pulls/${grant.number}`) as { state?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } }
+      if (!pull || pull.state !== 'open') throw new PrPostRejected('The pull request is not open.')
+      const head = typeof pull.head?.sha === 'string' ? pull.head.sha : '', base = typeof pull.base?.sha === 'string' ? pull.base.sha : ''
+      if (!/^[a-f0-9]{40,64}$/.test(head) || !/^[a-f0-9]{40,64}$/.test(base)) throw new PrPostRejected('GitHub did not name the PR head.')
+      if (grant.checkedOut !== head) throw new PrPostRejected('The PR has moved past the head in your worktree. Wait for the desktop to bring it up to date, then review the new commits.')
+      const approves = /^approved\b/i.test(body)
+      if (request.approve) {
+        if (comments.length) throw new PrPostRejected('An approval carries no findings; post the findings as a review without -Approve.')
+        if (!body.startsWith(`Approved at ${head}`)) throw new PrPostRejected(`An approval starts with "Approved at ${head}".`)
+      } else if (approves || /Approved at [a-f0-9]{7,}/.test(body)) throw new PrPostRejected('A review with findings never approves. Approve separately with -Approve once nothing is left open.')
+
+      const receipt: PostReceipt = { id: randomUUID(), grantId: grant.id, sessionId, repository: grant.repository, number: grant.number,
+        kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base }
+      const posted = `${body}\n\n${receiptTag(receipt.id)}`
+      receipt.bodyHash = sha256(posted)
+      this.save(receipt)
+      let answer: unknown
+      try {
+        answer = await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/reviews`,
+          { commit_id: head, event: 'COMMENT', body: posted, comments: comments.map((comment) => ({ path: comment.path, line: comment.line, side: 'RIGHT', body: comment.body })) })
+      } catch {
+        throw new PrPostRejected('GitHub did not confirm the review. The desktop will check whether it landed; do not post it again.')
+      }
+      const result = answer as { id?: unknown; html_url?: unknown } | null
+      if (!result || !Number.isSafeInteger(result.id)) throw new PrPostRejected('GitHub did not confirm the review. The desktop will check whether it landed; do not post it again.')
+      const done = { ...receipt, state: 'posted' as const, githubId: result.id as number, url: typeof result.html_url === 'string' ? result.html_url : null }
+      this.save(done)
+      onPosted(head, base)
+      return done
+    } finally {
+      this.busy.delete(grant.id)
+    }
+  }
+
+  /**
+   * True when a review loop on this PR posted an approval of exactly this head and base through the helper, and GitHub
+   * still holds that review with the body that was posted (an edited, deleted or unknown review does not count).
+   */
+  async verifiedApproval(repository: string, number: number, head: string, base: string): Promise<boolean> {
+    const candidates = this.list().filter((receipt) => receipt.kind === 'approval' && receipt.state === 'posted' && receipt.repository.toLowerCase() === repository.toLowerCase()
+      && receipt.number === number && receipt.head === head && receipt.base === base && receipt.githubId !== null)
+    for (const receipt of candidates.reverse()) {
+      const review = await this.host.api(`repos/${receipt.repository}/pulls/${receipt.number}/reviews/${receipt.githubId}`) as { body?: unknown; commit_id?: unknown; state?: unknown } | null
+      if (review && typeof review.body === 'string' && sha256(review.body.replace(/\r\n/g, '\n')) === receipt.bodyHash && review.commit_id === head && review.state !== 'DISMISSED') return true
+    }
+    return false
   }
 
   /** The person looked at an uncertain post: it is settled either way, and nothing is posted again. */

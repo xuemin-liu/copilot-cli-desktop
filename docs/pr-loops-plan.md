@@ -213,6 +213,14 @@ schema: the loop fields are optional and checked together, so no table changed, 
   worktree, a head that moves between the queue and Enter, merge after approval, and merge at an unapproved head. A
   real two-session check runs on a test PR (see Validation).
 
+**Revision after Phase 2.** The reviewer works in the desktop's own clone of the project, not a linked worktree: a
+fresh clone keeps no remote and holds nothing of the person's, and its first checkout can be forced. Its helper folder
+sits in that reviewer folder, which lives beside the desktop's data rather than inside it, because the sandbox denies
+the data folder (and with it other sessions' helper tokens). Inside the sandbox the helper runs only as
+`powershell.exe -ExecutionPolicy Bypass -File`, and its folder is granted read-only. A minimal **Review a PR** form in
+Tasks ships with this phase, so the loop is usable before Phase 3's dialog. A review loop does not survive a restart of
+the desktop.
+
 ### Phase 3: Review a PR from the new-session dialog
 
 - The dialog lists the project's open PRs through `gh`. A PR from a fork is refused, with the reason shown.

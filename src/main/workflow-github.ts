@@ -6,7 +6,8 @@ import { findPosixExecutable } from './posix-executables.js'
 
 export type GithubApi = (path: string, paged?: boolean) => Promise<unknown>
 export interface GithubFeedback {
-  source: string; version: string; actorId: number | null; kind: 'review' | 'ci'; body: string; head: string | null; at: number
+  /** `head`: the desktop's own note that a review loop's PR moved to a new head or base (no GitHub text). */
+  source: string; version: string; actorId: number | null; kind: 'review' | 'ci' | 'head'; body: string; head: string | null; at: number
   /** An inline comment's first commit (`original_commit_id`): where its anchor came from, whatever the PR's head is now. */
   anchor?: string | null
 }
@@ -19,6 +20,8 @@ export interface GithubSnapshot {
   checks: 'absent' | 'pending' | 'failed' | 'complete'; feedback: GithubFeedback[]
   /** The PR author's account id, when GitHub names one. */
   author?: number | null
+  /** The base branch's repository: a PR whose head lives elsewhere comes from a fork. */
+  baseRepository?: string
   reviews?: GithubReview[]
 }
 export interface GithubReadOptions {
@@ -79,7 +82,8 @@ export async function readGithubPull(api: GithubApi, repository: string, number:
   if (!/^[a-f0-9]{40,64}$/.test(headSha) || !/^[a-f0-9]{40,64}$/.test(baseSha)) throw new Error('Invalid GitHub revision')
   const author = pull.user && typeof pull.user === 'object' && Number.isSafeInteger((pull.user as Record<string, unknown>).id) ? (pull.user as Record<string, unknown>).id as number : null
   const result: GithubSnapshot = {repository, headRepository: head.repo ? string(record(head.repo).full_name) : '',
-    branch:string(head.ref),head:headSha,base:baseSha,open:pull.state==='open',merged:pull.merged===true,checks:'absent',feedback:[],author,reviews:[]}
+    branch:string(head.ref),head:headSha,base:baseSha,open:pull.state==='open',merged:pull.merged===true,checks:'absent',feedback:[],author,reviews:[],
+    baseRepository: base.repo ? string(record(base.repo).full_name) : ''}
   if (!result.open) return result
   const readChecks = options.checks !== false
   const [inline, conversation, reviews, checks, statuses] = await Promise.all([

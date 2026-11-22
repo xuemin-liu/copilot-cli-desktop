@@ -75,6 +75,11 @@ function textApproves(event: GithubFeedback, allowed: ReadonlySet<number>, marke
   return APPROVED_AT.exec(event.body)?.[1] === head
 }
 
+/** A comment whose text approves exactly this head ("Approved at <head>"), whoever wrote it. */
+export function approvesHeadText(event: GithubFeedback, head: string): boolean {
+  return event.kind === 'review' && APPROVED_AT.exec(event.body)?.[1] === head
+}
+
 /** An author's post must start with the marker and must not read as an approval of anything. */
 export function authorPostProblem(body: string, marker: string): string | null {
   if (!isMarked(body, marker)) return `Start the reply with "${marker.trimEnd()}" so the reviewer's loop can tell it is yours.`
