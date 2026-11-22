@@ -51,3 +51,26 @@ between paste and Enter alongside existing meeting binding paths. No live PR is 
 This supplies Phase 4 of the [plan](task-workflows-plan.md). The subsequent
 [meeting migration](workflow-meeting-recovery.md) retains meeting files for round state and uses the same journal
 for local prompt identities and submission recovery.
+
+## Fix loop (PR author)
+
+In a task's **GitHub follow-ups**, choose **Fix review feedback (fix loop)** to run the desktop's version of `/fix-pr`
+on that task's own PR ([plan](pr-loops-plan.md), Phase 1). It is a separate consent: the session keeps its own tool
+permissions, which govern its edits, commits and pushes, and, unlike a follow-up, it may post replies on this one PR.
+
+- New feedback from the named reviewers wakes the session, whatever commit it was posted on. Comments that start with
+  the marker `🤖 ` are the author's own replies and never wake it, so author and reviewer may share a GitHub account.
+  Optionally, the reviewers' feedback already on the PR is taken once at the start.
+- Replies go through the session helper's `pr-reply -To <comment id>|conversation -File <reply.md>`, never through
+  `gh`. Desktop checks that the loop belongs to that session, that GitHub is signed in to the account the loop was
+  enrolled with, that the PR is open and the comment is on it, and that the reply starts with the marker and is not an
+  approval. Each reply has a receipt: its intent is saved before the write, and a hidden tag in the body lets Desktop
+  find out later whether a reply whose write was not confirmed landed. If it cannot tell, the task shows the reply for
+  you to check, and nothing is posted again by itself.
+- A push does not drop feedback that is queued but not typed yet: the batch moves to the new head with its budget.
+- An approval of the current head (a formal approval from an allowed reviewer who is not the PR author, or a comment
+  starting `Approved at <full head sha>`) shows **Confirm approval**. GitHub does not record which base an outside
+  review saw, so the loop ends only when you confirm, the PR still points at that head, and nothing of the loop is
+  queued, in flight or unsettled. A changes-requested review after it, a dismissal or a push clears it.
+- Limits: three continuations per PR head and thirty in all; **Allow ten more** extends it up to a hundred. A spent
+  loop still notices approvals and merges. Each turn may run for thirty minutes. CI is read only when you ask for it.

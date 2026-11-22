@@ -86,11 +86,14 @@ export class WorkflowDeliveries {
     return structuredClone(this.cached)
   }
   /** Replace only proven unsubmitted batch work; identity/scope and both row writes commit together. */
-  reconcileBatch(id:string,input:Omit<WorkflowDelivery,'id'|'state'>,authorize:()=>boolean):WorkflowDelivery|null{
+  reconcileBatch(id:string,input:Omit<WorkflowDelivery,'id'|'state'>,authorize:()=>boolean,options:{newHead?:boolean}={}):WorkflowDelivery|null{
     this.db.exec('BEGIN IMMEDIATE')
     try{
       const old=this.get(id)
-      if(!old||old.state!=='queued'||!old.batch||!input.batch||old.batch.head!==input.batch.head||old.batch.reservation!==input.batch.reservation
+      // newHead: a PR loop carries unsent feedback to the PR's new head instead of dropping it; the reservation, and so
+      // the budget it holds, stays the same.
+      const headMatches=options.newHead?old?.batch?.head!==input.batch?.head:old?.batch?.head===input.batch?.head
+      if(!old||old.state!=='queued'||!old.batch||!input.batch||!headMatches||old.batch.reservation!==input.batch.reservation
         ||old.scope!==input.scope||old.sessionId!==input.sessionId||!authorize()){this.db.exec('COMMIT');return null}
       if(this.get(id)?.state!=='queued'){this.db.exec('COMMIT');return null}
       const next=this.enqueue(input)

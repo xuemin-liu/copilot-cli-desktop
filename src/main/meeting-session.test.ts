@@ -187,3 +187,32 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('the helper sends a PR reply with its target, and refuses a bad target or a stray -To before any request', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pr-reply-helper-'))
+  const calls: Array<{ command: MeetingCommand; request: MeetingRequest }> = []
+  const server = new MeetingControlServer((_tabId, command, request) => { calls.push({ command, request }); return { ok: true, message: 'Posted: https://github.com/o/r/pull/1#c' } })
+  try {
+    const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab-author'), { ...process.env, COPILOT_AGENT_SESSION_ID: '11111111-1111-4111-8111-111111111111' })
+    assert.match(await readFile(join(directory, 'helper', '.github', 'instructions', 'meeting.instructions.md'), 'utf8'), /pr-reply -To/)
+    await writeFile(join(directory, 'reply.md'), '🤖 Fixed in 1234567.\n')
+    const run = (...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => new Promise((resolveRun) => {
+      const [shell, ...shellArgs] = process.platform === 'win32' ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File'] : ['sh']
+      execFile(shell!, [...shellArgs, env.COPILOT_DESKTOP_MEETING_HELPER!, ...args], { cwd: directory, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 },
+        (error, stdout, stderr) => resolveRun({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr }))
+    })
+    const posted = await run('pr-reply', '-To', '123456', '-File', join(directory, 'reply.md'))
+    assert.equal(posted.code, 0, posted.stderr)
+    assert.match(posted.stdout, /Posted/)
+    assert.equal(calls[0]!.command, 'pr-reply')
+    assert.equal(calls[0]!.request.to, '123456')
+    assert.equal(calls[0]!.request.text.replace(/\r\n/g, '\n'), '🤖 Fixed in 1234567.\n')
+    assert.equal((await run('pr-reply', '-To', 'conversation', '-File', join(directory, 'reply.md'))).code, 0)
+    assert.equal(calls[1]!.request.to, 'conversation')
+    for (const args of [['pr-reply', '-To', '12; rm -rf /', '-File', join(directory, 'reply.md')], ['pr-reply', '-File', join(directory, 'reply.md')], ['pr-reply', '-To', '1'], ['status', '-To', '1']]) {
+      const refused = await run(...args)
+      assert.notEqual(refused.code, 0, args.join(' '))
+    }
+    assert.equal(calls.length, 2, 'nothing else reached the desktop')
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
+})

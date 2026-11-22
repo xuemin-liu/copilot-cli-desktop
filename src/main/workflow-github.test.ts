@@ -45,3 +45,23 @@ test('a head change or incomplete pagination yields no usable partial snapshot',
   },'owner/repo',1),/changed/)
   await assert.rejects(readGithubPull(fixture({'repos/owner/repo/pulls/1/comments?per_page=100':{message:'denied'}}),'owner/repo',1),/pagination/)
 })
+test('review states are kept apart from text: bodyless and dismissed reviews, the PR author and inline anchors', async () => {
+  const pullPath='repos/owner/repo/pulls/1'
+  const api=fixture({
+    [pullPath]:{state:'open',user:{id:42},head:{sha:head,ref:'feature',repo:{full_name:'owner/repo'}},base:{sha:base}},
+    [`${pullPath}/reviews?per_page=100`]:[[{id:1,user:{id:7},state:'APPROVED',commit_id:head,submitted_at:'2026-11-02T12:00:00Z',body:''},
+      {id:2,user:{id:8},state:'DISMISSED',commit_id:head,submitted_at:'2026-11-02T12:01:00Z',body:'old'},{id:3,user:{id:9},state:'PENDING',body:'draft'}]],
+    [`${pullPath}/comments?per_page=100`]:[[{id:4,user:{id:7},body:'Finding',updated_at:'2026-11-02T12:00:00Z',commit_id:head,original_commit_id:'c'.repeat(40)}]],
+  })
+  const snapshot=await readGithubPull(api,'owner/repo',1)
+  assert.equal(snapshot.author,42)
+  assert.deepEqual(snapshot.reviews!.map(r=>[r.id,r.state,r.body]),[[1,'APPROVED',''],[2,'DISMISSED','old']])
+  assert.equal(snapshot.feedback.filter(e=>e.source.includes('/review/')).length,0,'a bodyless approval is no feedback to act on')
+  assert.equal(snapshot.feedback.find(e=>e.source.endsWith('/inline/4'))?.anchor,'c'.repeat(40))
+})
+test('checks: false reads no check runs or statuses at all', async () => {
+  const seen:string[]=[];const api=fixture()
+  const snapshot=await readGithubPull(async(path,paged)=>{seen.push(path);if(/check-runs|statuses/.test(path))throw new Error('CI down');return api(path,paged)},'owner/repo',1,{checks:false})
+  assert.equal(snapshot.checks,'absent')
+  assert.ok(!seen.some(path=>/check-runs|statuses/.test(path)))
+})

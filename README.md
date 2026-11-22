@@ -23,6 +23,9 @@ handle, only input/output/resize events.
   once at the final handoff, and uses current shell permissions, so an approval may be needed. Report files stay in the
   helper folder and are removed by the helper. Side chats, read-only/remote sessions, and unsupported CLI versions do
   not receive reporting instructions or create tracked tasks.
+- **Fix loop** (Tasks → GitHub follow-ups): the desktop watches your task's PR for review feedback, continues the session on
+  each new finding, posts its replies on the PR after checking them, and asks you to confirm an approval of the current
+  head. Author and reviewer may share one GitHub account. See [the fix loop](docs/workflow-followups.md#fix-loop-pr-author).
 - **Needs you** collects approvals, crashed sessions, and paused review meetings across open projects. Open an item
   to reach its session; seeing it does not dismiss the underlying approval or question.
 - **Export and import your setup** from Settings → Migration: move CLI settings,

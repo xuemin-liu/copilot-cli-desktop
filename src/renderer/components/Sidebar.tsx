@@ -90,6 +90,7 @@ export interface SidebarProps {
   workflowAutomationError?:string|null
   workflowFollowupDefaults?: readonly import('../../main/workflow-followups.js').FollowupDefault[]
   workflowFollowups?: readonly import('../../main/workflow-followups.js').FollowupGrant[]
+  workflowPrPosts?: readonly import('../../main/types.js').PrPostView[]
   workflowFollowupError?: string | null
   workflowDeliveries?: readonly WorkflowDelivery[]
   workflowDeliveryError?: string | null
@@ -127,7 +128,7 @@ export interface SidebarProps {
 
 export function Sidebar({
   workflowAutomation={rules:[],previews:[]},workflowAutomaticPaused=false,workflowPausedProjects=[],workflowAutomationError,
-  workflowFollowups=[],workflowFollowupDefaults=[],workflowFollowupError,
+  workflowFollowups=[],workflowPrPosts=[],workflowFollowupDefaults=[],workflowFollowupError,
   workflowDeliveries = [], workflowDeliveryError,
   workflowTasks = [], workflowError,
   profiles,
@@ -470,7 +471,7 @@ export function Sidebar({
       </div>, document.body)}
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks,workflowFollowups,workflowDeliveries)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
-      {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} defaults={workflowFollowupDefaults} error={workflowError ?? workflowFollowupError ?? null} />}
+      {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} prPosts={workflowPrPosts} defaults={workflowFollowupDefaults} error={workflowError ?? workflowFollowupError ?? null} />}
       {!collapsed && <WorkflowAutomations profiles={profiles} rules={workflowAutomation.rules} previews={workflowAutomation.previews} paused={workflowAutomaticPaused} pausedProjects={workflowPausedProjects} error={workflowAutomationError??null} />}
       {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (

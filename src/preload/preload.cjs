@@ -15,7 +15,10 @@ window.addEventListener('DOMContentLoaded', () => {
 contextBridge.exposeInMainWorld('copilotDesktop', {
   createTask: (tabId,title,replace) => ipcRenderer.invoke('desktop:task-create',tabId,title,replace),
   taskAction: (id, action) => ipcRenderer.invoke('desktop:task-action', id, action),
-  enrollFollowup: (taskId, url, reviewers, checks,completeOnMerge=false) => ipcRenderer.invoke('desktop:followup-enroll', taskId, url, reviewers, checks,completeOnMerge),
+  enrollFollowup: (taskId, url, reviewers, checks,completeOnMerge=false,options={}) => ipcRenderer.invoke('desktop:followup-enroll', taskId, url, reviewers, checks,completeOnMerge,options),
+  confirmFollowupApproval: (id) => ipcRenderer.invoke('desktop:followup-confirm-approval', id),
+  extendFollowup: (id) => ipcRenderer.invoke('desktop:followup-extend', id),
+  dismissPrPost: (id) => ipcRenderer.invoke('desktop:pr-post-dismiss', id),
   saveFollowupDefault:(projectId,url,reviewers,checks,complete)=>ipcRenderer.invoke('desktop:followup-default-save',projectId,url,reviewers,checks,complete),
   removeFollowupDefault:projectId=>ipcRenderer.invoke('desktop:followup-default-remove',projectId),
   pauseFollowup: (id) => ipcRenderer.invoke('desktop:followup-pause', id),

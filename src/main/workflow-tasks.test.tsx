@@ -87,7 +87,7 @@ test('project defaults are offered only to newer tasks and still require explici
   assert.match(fresh,/Use project defaults for this task/)
   assert.match(fresh,/Enable follow-ups for this task/)
   assert.match(fresh,/verified merged/)
-  assert.doesNotMatch(fresh,/<input[^>]*checked=""/,'the template has not silently enabled any checkboxes')
+  assert.doesNotMatch(fresh,/<input type="checkbox"[^>]*checked=""/,'the template has not silently enabled any checkboxes')
 })
 
 test('untrusted artifact destinations and earlier report references remain visible before navigation',async()=>{
@@ -103,4 +103,22 @@ test('untrusted artifact destinations and earlier report references remain visib
     assert.match(markup,/\/reports\/baseline\.txt/)
     assert.match(markup,/>Open the PR on GitHub[^<]*github-login\.example\.net/,'the actual destination is visible in the action text')
   }finally{store.close();await rm(dir,{recursive:true,force:true})}
+})
+
+test('a fix loop shows its consent, a pending approval, a spent budget and an unsettled reply', () => {
+  const form=renderToStaticMarkup(<TaskFollowups taskId="t" />)
+  assert.match(form,/Fix review feedback \(fix loop\)/)
+  const grant={id:'11111111-1111-4111-8111-111111111111',taskId:'t',sessionId:'s',projectId:'p',scopeRevision:1,permissionKey:'a'.repeat(64),repository:'owner/repo',number:5,
+    reviewers:[{id:7,login:'reviewer'}],failedChecks:false,enabled:true,activatedAt:0,seen:{},head:'a'.repeat(40),headCounts:{},total:4,health:'approval-pending' as const,checks:'absent' as const,
+    role:'author' as const,marker:'🤖 ',accountId:42,limit:30,approval:{kind:'review' as const,head:'a'.repeat(40),base:'b'.repeat(40),ref:'9',at:1}}
+  const pending=renderToStaticMarkup(<TaskFollowups taskId="t" grant={grant} />)
+  assert.match(pending,/Confirm approval/)
+  assert.match(pending,/4\/30 continuations/)
+  assert.match(pending,/does not record which base/)
+  const spent=renderToStaticMarkup(<TaskFollowups taskId="t" grant={{...grant,health:'limit',approval:null}} posts={[{id:'p1',grantId:grant.id,state:'uncertain',kind:'reply',target:100,createdAt:1}]} />)
+  assert.match(spent,/Allow ten more/)
+  assert.match(spent,/may not have reached GitHub/)
+  assert.doesNotMatch(spent,/Confirm approval/)
+  const ended=renderToStaticMarkup(<TaskFollowups taskId="t" grant={{...grant,enabled:false,health:'approved',approval:null}} />)
+  assert.match(ended,/Approved at aaaaaaaaaaaa/)
 })

@@ -6,7 +6,7 @@ import { isWorkflowCliVersion, supportsTaskReporting, WORKFLOW_CLI_VERSION, work
 import type { FollowupGrant,FollowupDefault } from '../../main/workflow-followups.js'
 import { TaskFollowups } from './WorkflowFollowups.js'
 
-export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],installedCliVersion=null,onRestart }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[];defaults?:readonly FollowupDefault[];tabs?:readonly DesktopSessionTab[];installedCliVersion?:string|null;onRestart?:(tabId:string)=>void }): JSX.Element | null {
+export function WorkflowTasks({ tasks, error,followups=[],prPosts=[],defaults=[],tabs=[],installedCliVersion=null,onRestart }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[];prPosts?:readonly import('../../main/types.js').PrPostView[];defaults?:readonly FollowupDefault[];tabs?:readonly DesktopSessionTab[];installedCliVersion?:string|null;onRestart?:(tabId:string)=>void }): JSX.Element | null {
   const [failure, setFailure] = useState<string | null>(null)
   const [historyLimit, setHistoryLimit] = useState(50)
   const [sessionChoice,setSessionChoice]=useState(''),[title,setTitle]=useState(''),[pending,setPending]=useState(false)
@@ -71,7 +71,7 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
         })()}
         <button type="button" onClick={() => finish(task.id, 'completed')}>Mark complete</button>
         <button type="button" title="End task tracking; the CLI session keeps running" onClick={() => finish(task.id, 'cancelled')}>End tracking</button>
-        <TaskFollowups taskId={task.id} projectId={task.projectId} createdAt={task.createdAt} projectDefault={defaults.find(value=>value.projectId===task.projectId)} grant={followups.find(g=>g.taskId===task.id)} />
+        <TaskFollowups taskId={task.id} projectId={task.projectId} createdAt={task.createdAt} projectDefault={defaults.find(value=>value.projectId===task.projectId)} grant={followups.find(g=>g.taskId===task.id)} posts={prPosts} />
       </>}
       {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>{if(window.confirm(`Delete local task history for "${task.title}"? Its request copy and report history will be removed. Sessions, files, worktrees and handoff evidence are kept.`))finish(task.id,'delete')}}>Delete task history</button>}
     </li>)}</ul>

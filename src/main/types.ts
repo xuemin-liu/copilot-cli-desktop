@@ -197,6 +197,8 @@ export interface DesktopState {
   workflowTasks?: import('./workflow-types.js').WorkflowTask[]
   workflowFollowupDefaults?: import('./workflow-followups.js').FollowupDefault[]
   workflowFollowups?: import('./workflow-followups.js').FollowupGrant[]
+  /** PR-loop replies that are not settled yet (pr-loop-posts.ts). */
+  workflowPrPosts?: PrPostView[]
   workflowFollowupError?: string | null
   workflowAutomation?: {rules:import('./workflow-automations.js').AutomationRule[];previews:import('./workflow-automations.js').AutomationPreview[]}
   workflowAutomaticPaused?:boolean
@@ -235,3 +237,5 @@ export type DesktopEvent =
   | { type: 'approval-needed'; tabId: string }
   | { type: 'session-completed'; tabId: string }
   | { type: 'session-crashed'; tabId: string; message: string }
+
+export interface PrPostView { id: string; grantId: string; state: 'intent' | 'uncertain'; kind: 'reply' | 'comment'; target: number | null; createdAt: number }
