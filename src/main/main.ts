@@ -1009,7 +1009,7 @@ async function openReviewQueue():Promise<PrReviewQueue>{
       paused:profileId=>workflowsPaused(profileId)})
     await reviewQueue.load()
   }
-  if(!reviewQueueTimer){reviewQueueTimer=setInterval(()=>{if(shuttingDown())return;void reviewQueue?.tick().then(()=>broadcastState()).catch(()=>{})},120_000);reviewQueueTimer.unref()}
+  if(!reviewQueueTimer){reviewQueueTimer=setInterval(()=>{if(shuttingDown())return;void reviewQueue?.tick().then(()=>broadcastState()).catch(()=>{})},30_000);reviewQueueTimer.unref()}
   return reviewQueue
 }
 async function setReviewQueueFromChat(tab:DesktopSessionTab,on:boolean):Promise<MeetingResponse>{

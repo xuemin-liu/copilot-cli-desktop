@@ -59,7 +59,7 @@ In a Copilot tab, ask in your own words, as you would start a meeting:
 - **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab.
 - **"review new PRs in this repo"**: each new pull request of yours in this project gets a review loop as it opens, like
   `/review-pr`'s wait for the next PR. Any "review PR …" turns this on as well; **"stop reviewing new PRs"** turns it
-  off. Desktop checks with `gh` every two minutes, which uses no model and no tokens; a model runs only when a review
+  off. Desktop checks with `gh` every thirty seconds, which uses no model and no tokens; a model runs only when a review
   starts. One review at a time, at most three a day and ten in all; PRs already open when it is turned on are not
   reviewed; a fork, someone else's PR or one already in review is skipped.
 - **"watch PR 286 and fix the review feedback"** (or "fix PR 286", "address the comments on PR 286"): this
@@ -90,6 +90,8 @@ permissions, which govern its edits, commits and pushes, and, unlike a follow-up
   starting `Approved at <full head sha>`) shows **Confirm approval**. GitHub does not record which base an outside
   review saw, so the loop ends only when you confirm, the PR still points at that head, and nothing of the loop is
   queued, in flight or unsettled. A changes-requested review after it, a dismissal or a push clears it.
+- Both PR loops read their PR every twenty seconds, so a review comment reaches the author, and a push reaches the
+  reviewer, within about twenty seconds. Reading uses no model; a model runs only when there is something to act on.
 - Limits: three continuations per PR head and thirty in all; **Allow ten more** extends it up to a hundred. A spent
   loop still notices approvals and merges. Each turn may run for thirty minutes. CI is read only when you ask for it.
 

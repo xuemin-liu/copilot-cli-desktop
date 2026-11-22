@@ -46,6 +46,12 @@ export interface EnrollOptions {
   includeExisting?: boolean
   marker?: string
 }
+/**
+ * How often a grant reads its PR. A PR loop is the desktop's /review-pr and /fix-pr, which react to a review or a push
+ * within seconds, so it reads every twenty seconds (about five GitHub calls, no model); a follow-up keeps two minutes.
+ */
+export const PR_LOOP_POLL_MS=20_000
+export const FOLLOWUP_POLL_MS=120_000
 const roleOf=(grant:Pick<FollowupGrant,'role'>):PrLoopRole=>grant.role??'follow-up'
 /** The evidence the person is shown: the same source, kind, head and base. */
 const sameApproval=(a:ApprovalEvidence,b:ApprovalEvidence):boolean=>a.ref===b.ref&&a.kind===b.kind&&a.head===b.head&&a.base===b.base
@@ -354,7 +360,7 @@ export class WorkflowFollowups {
     // A spent PR loop still reads the PR, so an approval or a merge is not missed; it only takes no new feedback.
     if(grant.total>=limitOf(grant)&&!grant.completeOnMerge&&!loop){this.health(grant,'limit');return}
     if(Math.max(this.nextPoll.get(grant.id)??0,this.retryAt.get(grant.id)??0)>this.now())return
-    this.nextPoll.set(grant.id,this.now()+120_000)
+    this.nextPoll.set(grant.id,this.now()+(loop?PR_LOOP_POLL_MS:FOLLOWUP_POLL_MS))
     let snapshot:GithubSnapshot
     try{snapshot=await this.read(grant)}catch{this.health(grant,'source-unavailable');return}
     if(this.stopped)return

@@ -6,7 +6,8 @@ import type { ReviewCandidate } from './types.js'
  * New PRs, the desktop's Stage C of /review-pr: a project the person asked for ("review new PRs in this repo", or any
  * "review PR N") gets a review loop for each new pull request that qualifies (the same rules as a review started by hand). Turning it on takes no backlog: the PRs open then are recorded as seen.
  * A stored set of pending numbers, not a highest number, so PRs that open out of order or qualify later are not missed.
- * Starts are limited like automation rules: three a day and ten in all per opt-in, one at a time.
+ * Starts are limited like automation rules: three a day and ten in all per opt-in, one at a time. The desktop checks
+ * every thirty seconds with gh; no model runs until a review starts.
  */
 
 export interface QueueState {
