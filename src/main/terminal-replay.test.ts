@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { TerminalReplay } from '../renderer/terminal-replay.js'
+import { TerminalReplay, historyLineEndings } from '../renderer/terminal-replay.js'
 
 test('snapshot and output racing across a window move render each byte once', () => {
   const history: string[] = []
@@ -53,4 +53,9 @@ test('a snapshot that arrives joins as before', async () => {
   await replay.join(Promise.resolve({ data: 'saved', sequence: 2 }))
   replay.push({ data: 'new', sequence: 3 })
   assert.deepEqual(output, ['history:saved', 'new'])
+})
+
+test('history replay starts each rebuilt line at the first column', () => {
+  assert.equal(historyLineEndings('first\nsecond\r\nthird'), 'first\r\nsecond\r\nthird')
+  assert.equal(historyLineEndings('no line end'), 'no line end')
 })
