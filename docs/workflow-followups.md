@@ -52,6 +52,19 @@ This supplies Phase 4 of the [plan](task-workflows-plan.md). The subsequent
 [meeting migration](workflow-meeting-recovery.md) retains meeting files for round state and uses the same journal
 for local prompt identities and submission recovery.
 
+## Starting a PR loop: just ask
+
+In a Copilot tab, ask in your own words, as you would start a meeting:
+
+- **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab.
+- **"watch PR 286 and fix the review feedback"** (or "fix PR 286", "address the comments on PR 286"): this
+  conversation becomes the PR's fix loop, with your own account as the reviewer whose feedback counts, and the
+  feedback already on the PR first.
+
+The session runs the helper's `pr-start`, and Desktop decides only from the message you typed, as it does for "join
+meeting K7QF": a PR comment, a file or the code under review cannot start a loop. A PR number means the PR in this
+project's GitHub repository. The Tasks entries below do the same with more choices.
+
 ## Fix loop (PR author)
 
 In a task's **GitHub follow-ups**, choose **Fix review feedback (fix loop)** to run the desktop's version of `/fix-pr`

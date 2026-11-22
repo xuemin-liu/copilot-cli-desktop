@@ -227,6 +227,11 @@ the data folder (and with it other sessions' helper tokens). Inside the sandbox 
 Tasks ships with this phase, so the loop is usable before Phase 3's dialog. A review loop does not survive a restart of
 the desktop.
 
+**Revision: chat first.** Both loops start by asking in a Copilot tab ("review PR 287", "watch PR 286 and fix the
+review feedback"), read from the person's own message like a meeting join; this ships with Phase 2. Phase 3 (the
+dialog's PR list) and Phase 4 (the new-PR queue) are not built for now, and starting from Claude Code or Codex through
+the meeting MCP tools is left for later.
+
 ### Phase 3: Review a PR from the new-session dialog
 
 - The dialog lists the project's open PRs through `gh`. A PR from a fork is refused, with the reason shown.

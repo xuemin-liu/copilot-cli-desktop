@@ -4,10 +4,11 @@ import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReportin
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
+import { prLoopRequest } from './pr-loop-request.js'
 import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
-import { githubCliApi,githubCliWrite,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
+import { githubCliApi,githubCliWrite,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
@@ -884,7 +885,7 @@ function reviewerAreaBase():string{return join(dirname(app.getPath('userData')),
  * a project whose origin is that repository, the desktop's own clone at the PR head, a sandboxed session there with the
  * first review as its first prompt, and then the review loop.
  */
-async function startPrReview(url:string):Promise<void>{
+async function startPrReview(url:string,profileId?:string):Promise<void>{
   const controller=await openFollowups(),runner=await meetingGitRunner()
   if(!runner)throw new Error('Git is not available')
   if(!prPosts)throw new Error('PR loops are unavailable')
@@ -895,7 +896,9 @@ async function startPrReview(url:string):Promise<void>{
   const me=await api('user') as {id?:unknown}
   if(!me||snapshot.author!==me.id)throw new Error('Only your own pull requests can be reviewed here for now')
   let profile:WorkspaceProfile|null=null,origin=''
-  for(const candidate of desktopConfig.profiles){try{origin=await projectOrigin(runner,candidate.path,pull.repository);profile=candidate;break}catch{/* not this project */}}
+  // The project the person asked from comes first; any other project whose origin is the PR's repository will do.
+  const choices=[...desktopConfig.profiles].sort((a,b)=>Number(b.id===profileId)-Number(a.id===profileId))
+  for(const candidate of choices){try{origin=await projectOrigin(runner,candidate.path,pull.repository);profile=candidate;break}catch{/* not this project */}}
   if(!profile)throw new Error('Add a project whose origin is this repository first')
   const area=await createReviewerArea(reviewerAreaBase())
   let tabId:string|null=null
@@ -940,6 +943,39 @@ async function startPrReview(url:string):Promise<void>{
   }
 }
 
+/**
+ * "review PR 287" / "watch PR 286 and fix the review feedback", typed by the person in a Copilot tab. A review starts in
+ * the background (cloning and launching outlast the helper's request) and reports back in that tab's task notice; a fix
+ * loop starts here, for this conversation's task, with the person's own account as the reviewer whose feedback counts.
+ */
+async function startPrLoopFromChat(tab:DesktopSessionTab,sessionId:string,asked:import('./pr-loop-request.js').PrLoopRequest):Promise<MeetingResponse>{
+  const profile=desktopConfig.profiles.find(candidate=>candidate.id===tab.workspaceProfileId),runner=await meetingGitRunner()
+  let repository=asked.repository
+  if(!repository){
+    if(!profile||profile.general||!runner)return {ok:false,message:'Name the PR by its URL: this conversation is not in a project with a GitHub origin.'}
+    const origin=await runner.run({cwd:profile.path,args:['remote','get-url','origin'],kind:'read',timeoutMs:30_000,maxStdoutBytes:64_000}).catch(()=>null)
+    repository=origin&&origin.exitCode===0?githubRemoteRepository(origin.stdout.toString('utf8').trim()):null
+    if(!repository)return {ok:false,message:'Name the PR by its URL: this project\'s origin is not a github.com repository.'}
+  }
+  const url=`https://github.com/${repository}/pull/${asked.number}`
+  if(asked.kind==='review'){
+    void startPrReview(url,profile?.id).then(()=>{workflowNotice=`Review loop started for PR #${asked.number}.`;broadcastState()},
+      (error:unknown)=>{workflowNotice=`The review of PR #${asked.number} did not start: ${error instanceof Error?error.message:'unknown error'}`;broadcastState()})
+    return {ok:true,message:`Starting a sandboxed review of ${url} in a new tab. It posts its review on the PR and reviews again when the author pushes or replies; you confirm any approval. If it cannot start, the Tasks section says why.`}
+  }
+  try{
+    const controller=await openFollowups(),store=workflows()
+    const task=store?.active(sessionId)
+    if(!task)return {ok:false,message:'This conversation has no tracked task, so there is nothing for a fix loop to continue. Ask again in a new message.'}
+    const me=await (await githubCliApi(app.getPath('userData')))('user') as {login?:unknown}
+    if(!me||typeof me.login!=='string')return {ok:false,message:'GitHub CLI is not signed in.'}
+    const existing=controller.list().find(g=>g.enabled&&g.taskId===task.id)
+    if(existing)return {ok:false,message:`This conversation already has a ${existing.role==='author'?'fix loop':'follow-up'} for ${existing.repository} #${existing.number}. Stop it in Tasks first.`}
+    const grant=await controller.enroll(task.id,url,[me.login],false,false,{role:'author',includeExisting:true})
+    workflows()?.link(grant.sessionId,{pullUrl:url});broadcastState()
+    return {ok:true,message:`The fix loop is on for ${url}. Desktop continues this conversation whenever new review feedback from ${me.login} arrives (feedback already on the PR comes first); reply on threads with pr-reply, starting each reply with the marker. It ends when you confirm an approval of the PR's current head, or when the PR is merged or closed.`}
+  }catch(error){return {ok:false,message:`The fix loop did not start: ${error instanceof Error?error.message:'unknown error'}`}}
+}
 /** Only what the Tasks view shows: receipts that still need settling, without bodies. */
 function prPostViews():import('./types.js').PrPostView[]{
   try{return (prPosts?.list()??[]).filter(r=>r.state==='intent'||r.state==='uncertain').map(r=>({id:r.id,grantId:r.grantId,state:r.state as 'intent'|'uncertain',kind:r.kind,target:r.target,createdAt:r.createdAt}))}
@@ -3335,6 +3371,16 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       if (!canRebind) session.commitSessionBinding()
     }
     switch (command) {
+      case 'pr-start': {
+        // Like a meeting join: only what the person typed in this conversation starts a loop.
+        const binding = callerSession?.bindingDiagnostic
+        if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
+          return { ok: false, message: 'Starting a PR loop requires one verified foreground CLI session.' }
+        const prompt = meetingReader(tabId).activePersonPrompt
+        const asked = prompt === null ? null : prLoopRequest(prompt)
+        if (!asked) return { ok: false, message: 'Ask in a new message of your own, for example "review PR 287" or "watch PR 286 and fix the review feedback".' }
+        return startPrLoopFromChat(currentTab, request.sessionId, asked)
+      }
       case 'pr-review':
       case 'pr-read': {
         const binding = callerSession?.bindingDiagnostic
