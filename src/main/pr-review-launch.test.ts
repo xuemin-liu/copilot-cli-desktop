@@ -250,6 +250,9 @@ test('a reviewer folder reached through a link (macOS /var, a Windows short name
     const alias = join(f.root, 'reviewers-alias')
     symlinkSync(join(f.root, 'real-reviewers'), alias, process.platform === 'win32' ? 'junction' : 'dir')
     // The desktop names the folder through the link; Git lists the worktree by its real path.
+    const incomplete = await createReviewerArea(alias)
+    incomplete.project = project
+    assert.equal(await removeReviewerArea(incomplete, f.runner), 'removed', 'a missing checkout is compared through its real parent')
     const dirty = await createReviewerArea(alias)
     await cloneForReview(f.runner, project, upstream, dirty, { head, base }, 7)
     writeFileSync(join(dirty.checkout, 'notes.txt'), 'the reviewer\'s changes')

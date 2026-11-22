@@ -148,6 +148,7 @@ test('a PR asked for before it exists starts when it appears, within the hour', 
   h.advance(60_000); h.open.push(h.pr(20))
   await h.queue.tick()
   assert.deepEqual(h.started, [url(20)])
+  await h.queue.disable('project')
   await h.queue.expect('project', 'owner/repo', 21)
   h.advance(EXPECTED_PR_WAIT_MS + 1); h.open.push(h.pr(21))
   await h.queue.tick()
@@ -272,3 +273,18 @@ test('a queue turned on before any review ran restarts from its own file, with n
     assert.deepEqual(started, [url(50), url(51)], 'the PR it waited for, then a new one')
   } finally { await rm(data, { recursive: true, force: true }) }
 })
+
+test('starting an expected PR enables discovery and leaves earlier open PRs alone', () => fixture(async h => {
+  await h.queue.expect('project', 'owner/repo', 20)
+  h.open.push(h.pr(18), h.pr(20)); await h.queue.tick()
+  h.advance(1000); h.open.push(h.pr(21)); await h.queue.tick()
+  assert.deepEqual(h.started, [url(20), url(21)])
+}))
+
+test('stopping discovery before an expected PR opens still reviews only that PR', () => fixture(async h => {
+  await h.queue.expect('project', 'owner/repo', 20)
+  await h.queue.disable('project')
+  h.open.push(h.pr(20)); await h.queue.tick()
+  h.advance(1000); h.open.push(h.pr(21)); await h.queue.tick()
+  assert.deepEqual(h.started, [url(20)])
+}))

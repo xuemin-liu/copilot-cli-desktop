@@ -26,7 +26,7 @@ export interface QueueState {
   /** New PRs that did not qualify yet (someone else's, a fork, already in review) and may later. */
   waiting: number[]
   /** "review PR N" asked before PR N existed: started when it appears, until `until`. */
-  expected: { number: number; until: number }[]
+  expected: { number: number; until: number; discover?: boolean }[]
   lastError: string | null
 }
 export interface QueueListing { repository: string; pulls: ReviewCandidate[] }
@@ -102,7 +102,7 @@ export class PrReviewQueue {
     await this.load()
     this.bump(profileId)
     const current = this.state[profileId]
-    if (current) { this.state[profileId] = { ...current, enabled: false, waiting: [] }; await this.save() }
+    if (current) { this.state[profileId] = { ...current, enabled: false, waiting: [], expected: current.expected.map(e => ({ ...e, discover: false })) }; await this.save() }
   }
   /** A "review PR N" for a PR GitHub does not list yet: it starts when it appears, within the hour. */
   async expect(profileId: string, repository: string, number: number): Promise<void> {
@@ -156,7 +156,7 @@ export class PrReviewQueue {
           else if (!pick) { pick = found; done.add(found.number) }
         }
         const fresh = latest.enabled
-          ? listing.pulls.filter((candidate) => !latest.seen.includes(candidate.number) && candidate.createdAt >= latest.activatedAt).sort((a, b) => a.number - b.number)
+          ? listing.pulls.filter((candidate) => !latest.seen.includes(candidate.number) && candidate.createdAt >= Math.floor(latest.activatedAt / 1000) * 1000).sort((a, b) => a.number - b.number)
           : []
         if (!pick) pick = fresh.find((candidate) => candidate.reason === null) ?? null
         const started = pick
@@ -176,7 +176,14 @@ export class PrReviewQueue {
             expected: wasExpected ? [...state.expected, wasExpected] : state.expected }))) await this.save()
           continue
         }
-        try { await this.host.start(started.url, profileId) } catch (error) {
+        try {
+          await this.host.start(started.url, profileId)
+          const expected = latest.expected.find(item => item.number === started.number)
+          if (!latest.enabled && expected && expected.discover !== false && this.apply(profileId, revision, state => {
+            if (state.repository !== listing.repository) return state
+            return { ...state, enabled: true, activatedAt: now, seen: listing.pulls.map(pull => pull.number).slice(-5000) }
+          })) await this.save()
+        } catch (error) {
           if (this.apply(profileId, revision, (state) => ({ ...state, lastError: `#${started.number}: ${message(error)}` }))) await this.save()
         }
       }
@@ -203,6 +210,6 @@ function normalize(value: unknown): QueueState | null {
   const v = value as Partial<QueueState> | null
   if (!v || typeof v !== 'object' || typeof v.enabled !== 'boolean' || typeof v.repository !== 'string' || !REPOSITORY.test(v.repository)
     || !Number.isFinite(v.activatedAt) || !numbers(v.seen) || !numbers(v.waiting) || (v.lastError !== null && typeof v.lastError !== 'string')) return null
-  const expected = Array.isArray(v.expected) ? v.expected.filter((e) => e && Number.isSafeInteger(e.number) && e.number > 0 && Number.isFinite(e.until)).slice(-20) : []
+  const expected = Array.isArray(v.expected) ? v.expected.filter((e) => e && Number.isSafeInteger(e.number) && e.number > 0 && Number.isFinite(e.until) && (e.discover === undefined || typeof e.discover === 'boolean')).slice(-20) : []
   return { enabled: v.enabled, repository: v.repository, activatedAt: v.activatedAt as number, seen: v.seen, waiting: v.waiting, expected, lastError: v.lastError ?? null }
 }

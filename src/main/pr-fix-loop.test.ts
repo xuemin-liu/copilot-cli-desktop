@@ -273,3 +273,28 @@ test('a PR loop reads its PR every twenty seconds; a follow-up keeps two minutes
   h.advance(20_001); await h.controller.tick()
   assert.equal(h.injected.length, 1, 'a review comment reaches the author within twenty seconds')
 }))
+
+test('confirmation keeps feedback arriving between the last poll and the click', () => fixture(async h => {
+  const grant = await enrollFix(h)
+  h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
+  const shown = h.controller.grant(grant.id)!.approval!
+  h.inline(20)
+  await assert.rejects(h.controller.confirmApproval(grant.id, shown), /feedback/i)
+  assert.equal(h.controller.grant(grant.id)!.enabled, true)
+  h.advance(); await h.controller.tick()
+  assert.equal(h.injected.length, 1)
+}))
+
+test('extending a head with three answered batches delivers its fourth batch', () => fixture(async h => {
+  const grant = await enrollFix(h)
+  for (let id = 1; id <= 4; id++) {
+    h.advance(); h.inline(id); await h.controller.tick()
+    for (const delivery of h.journal.list()) if (delivery.state === 'submitted') h.journal.answered(delivery.id)
+  }
+  assert.equal(h.injected.length, 3)
+  assert.equal(h.controller.grant(grant.id)!.health, 'limit')
+  h.controller.extendLimit(grant.id)
+  h.advance(); await h.controller.tick()
+  assert.equal(h.injected.length, 4)
+  assert.equal(h.controller.grant(grant.id)!.headCounts[first], 4)
+}))
