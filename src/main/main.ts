@@ -7,7 +7,7 @@ import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
-import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, settleHostDelivery } from './workflow-meeting-journal.js'
+import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, settleHostDelivery, settleSupersededHostDeliveries } from './workflow-meeting-journal.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -4101,6 +4101,20 @@ async function restoreMeetings(): Promise<void> {
         const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote)
         return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
       })
+      if (tabs && deliveryJournal && !deliveryError) {
+        const view = meetingHub.views().find((meeting) => meeting.id === entry.name)
+        const hostSessionId = view ? tabsState.tabs.find((candidate) => candidate.id === view.hostTabId)?.lastSessionId : null
+        if (view && hostSessionId) {
+          settleSupersededHostDeliveries(deliveryJournal, {
+            id: view.id,
+            hostSessionId,
+            round: view.round,
+            stage: view.stage,
+            pauseReason: view.pauseReason,
+            outstandingHostDeliveryId: meetingHub.outstandingHostDeliveryId(view.id),
+          })
+        }
+      }
       for (const tabId of tabs ?? []) if (!GUEST_ID_PATTERN.test(tabId)) observe(startDormantTab(tabId), 'Could not start a session of a restored meeting')
     }
   } finally {

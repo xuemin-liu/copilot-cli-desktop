@@ -61,7 +61,9 @@ outbox and pumps it at once; choosing Discard also pumps work waiting behind it.
 (`round` or `propose-close`, for instance after reading the reply file), Desktop waits for the new round's durable
 snapshot before clearing any superseded queued or uncertain digest/reminder for that host in the meeting — preserving
 recovery if the snapshot write fails or the app exits beforehand, and otherwise unblocking later rounds and the closing
-vote. Storage failure disables automatic meeting input while ordinary terminals remain usable.
+vote. If the app exits after that new-round snapshot lands on disk and before the journal clears the old digest, restore
+retires only the superseded host digest/reminder once the restored snapshot proves the round has advanced (leaving
+current-round digests, reviewer handoffs, and other meetings untouched). Storage failure disables automatic meeting input while ordinary terminals remain usable.
 An individual intake rejection is shown as a waiting handoff and leaves other destinations and recovery actions usable;
 it is distinct from an unavailable/corrupt journal.
 

@@ -532,6 +532,12 @@ export class MeetingHub {
     return null
   }
 
+  /** The delivery id currently outstanding for this meeting's host, if any. */
+  outstandingHostDeliveryId(meetingId: string): string | null {
+    const meeting = this.meetings.get(meetingId)
+    return meeting ? meeting.outstanding.get(meeting.host.tabId)?.id ?? null : null
+  }
+
   /**
    * What the session owes under a receipt of its own, saved as what is outstanding. The old receipt is about to be settled and a
    * restart drops a settled one, so this must be saved first: a restart in the wait then types the new one. It has never been

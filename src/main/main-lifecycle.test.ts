@@ -4080,3 +4080,121 @@ test('manual host post waits for durable snapshot before cancelling prior digest
     restoredJournal.close()
   }
 }))
+
+test('restoring a meeting whose new-round snapshot landed before journal settlement retires only the superseded host digest', async () => fixture(async (h, directory) => {
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  for (const [id, pid] of [[SOURCE, 7700], [FORK, 7701]] as const) {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }))
+    await writeFile(join(dirname(sessionPath(id)), `inuse.${pid}.lock`), '')
+  }
+
+  // Simulate process exit right after the round-2 propose-close snapshot landed on disk, before settleHostDelivery ran.
+  const meetingId = 'RZFW'
+  const meetingFolder = join(directory, 'meetings', meetingId)
+  await mkdir(join(meetingFolder, 'round-2'), { recursive: true })
+  await writeFile(join(meetingFolder, 'transcript.md'), `# Meeting ${meetingId}\n`)
+  await writeFile(join(meetingFolder, 'round-2', 'post.md'), 'Four agreed findings\n')
+  const voteDeliveryId = '33333333-3333-4333-8333-333333333333'
+  const staleDigestId = '44444444-4444-4444-8444-444444444444'
+  await writeFile(join(meetingFolder, 'meeting.json'), JSON.stringify({
+    version: 1,
+    id: meetingId,
+    topic: 'Test proposal',
+    host: { sessionId: SOURCE, title: 'Host', folder: directory, role: null, counted: { nanoAiu: 0, premiumRequests: 0 } },
+    participants: [{
+      sessionId: FORK, title: 'Reviewer', folder: directory, role: null, counted: { nanoAiu: 0, premiumRequests: 0 },
+      joinedRound: 1, reply: null, awaited: true, missed: 0,
+    }],
+    stage: 'reviewing',
+    round: 2,
+    maxRounds: 6,
+    vote: true,
+    post: 'Four agreed findings',
+    hasChanges: false,
+    late: [],
+    discussing: false,
+    reviewed: null,
+    held: null,
+    pauseReason: null,
+    remindedHost: false,
+    outcome: null,
+    cost: { nanoAiu: 0, premiumRequests: 0 },
+    outstanding: [{
+      sessionId: FORK,
+      delivery: {
+        meetingId,
+        round: 2,
+        kind: 'vote',
+        text: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nFour agreed findings`,
+        id: voteDeliveryId,
+      },
+    }],
+  }))
+
+  const { WorkflowDeliveries } = await import('./workflow-deliveries.js')
+  const { journalMeetingDelivery } = await import('./workflow-meeting-journal.js')
+  const preCrashJournal = new WorkflowDeliveries(join(directory, 'workflow-deliveries.sqlite'))
+  let staleRowId: string
+  let otherMeetingRowId: string
+  try {
+    const staleRow = journalMeetingDelivery(preCrashJournal, SOURCE, { meetingId, round: 1, kind: 'digest', text: 'R1 replies', id: staleDigestId })!
+    preCrashJournal.begin(staleRow.id, () => true)
+    preCrashJournal.submitted(staleRow.id)
+    preCrashJournal.uncertain(staleRow.id)
+    staleRowId = staleRow.id
+
+    // An unrelated non-meeting uncertain handoff for the reviewer session must not be touched by RZFW's restore.
+    const otherRow = preCrashJournal.enqueue({ sessionId: FORK, source: 'github/1', revision: 'v1', scope: 'grant-1', text: 'Unrelated handoff' })
+    preCrashJournal.begin(otherRow.id, () => true)
+    preCrashJournal.uncertain(otherRow.id)
+    otherMeetingRowId = otherRow.id
+  } finally {
+    preCrashJournal.close()
+  }
+
+  // Configure and restore the new app instance over the pre-crash SQLite journal and round-2 snapshot.
+  const { profile } = configure(h, directory)
+  profile.tabs = [
+    { title: 'Host', lastSessionId: SOURCE, active: true },
+    { title: 'Reviewer', lastSessionId: FORK },
+  ]
+  await h.restoreSaved()
+  const state = await h.request('desktop:get-state')
+  assert.equal(state.workflowDeliveries?.find(d => d.id === staleRowId)?.state, 'cancelled', 'superseded round-1 host digest is retired on restore')
+  assert.equal(state.workflowDeliveries?.find(d => d.id === otherMeetingRowId)?.state, 'uncertain', 'unrelated uncertain handoff stays untouched')
+
+  const hostTab = state.tabs.find(tab => tab.lastSessionId === SOURCE)!
+  const reviewerTab = state.tabs.find(tab => tab.lastSessionId === FORK)!
+  // Wait for both restored tabs' PTY spawns to start.
+  await waitFor(async () => h.spawns.length, n => n === 2, 'both restored tabs started')
+  const hostSpawn = h.spawns[0]!
+  const reviewerSpawn = h.spawns[1]!
+  h.configureBinding(hostTab.id, 7700, [7700])
+  h.configureBinding(reviewerTab.id, 7701, [7701])
+  await h.refreshRecords(hostTab.id)
+  await h.refreshRecords(reviewerTab.id)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  // Pump /add-dir for the unblocked host tab, then unblock FORK's unrelated handoff so FORK receives /add-dir and its round-2 vote.
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.request('desktop:delivery-action', otherMeetingRowId, 'discard')
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Four agreed findings')), 'reviewer received restored round-2 vote')
+
+  const beforeClose = hostSpawn.written.length
+  await appendFile(sessionPath(FORK),
+    line('user.message', { content: `[meeting ${meetingId} · round 2 · vote · from the desktop]\nFour agreed findings`, interactionId: 'rev-r2' }) +
+    line('assistant.turn_start', { turnId: 'rev-r2' }) +
+    line('assistant.message', { interactionId: 'rev-r2', phase: 'final_answer', content: 'AGREE' }) +
+    line('assistant.turn_end', { turnId: 'rev-r2' }))
+  await h.refreshRecords(reviewerTab.id)
+  await h.pumpMeetingDelivery()
+  assert.ok(hostSpawn.written.slice(beforeClose).some(chunk => chunk.includes('All 1 reviewers agreed.')), 'closing agreed message reaches host automatically without being blocked by superseded round-1 digest')
+}))
