@@ -58,7 +58,7 @@ In a Copilot tab, ask in your own words, as you would start a meeting:
 
 - **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab. A PR that does not
   exist yet (you are creating it in another tab) is checked for every thirty seconds for an hour and reviewed when it
-  opens.
+  opens. Once that review starts, Desktop also reviews your new PRs in this project. Say **"stop reviewing new PRs"** to turn off discovery.
 - **"review my PR"**: your one open PR here is reviewed; with several, Desktop lists them and you say which; with none,
   it waits for your next new PR as below.
 - **"review new PRs in this repo"**: each new pull request of yours in this project gets a review loop as it opens, like

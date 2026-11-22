@@ -1065,7 +1065,7 @@ async function startPrLoopFromChat(tab:DesktopSessionTab,sessionId:string,asked:
         return {ok:false,message:`PR #${number} does not exist in ${repository} yet, and this project is not that repository; ask again from its project once the PR is open.`}
       try{await (await openReviewQueue()).expect(profile.id,repository,number);broadcastState()}
       catch(error){return {ok:false,message:`PR #${number} does not exist yet, and could not be waited for: ${error instanceof Error?error.message:'unknown error'}`}}
-      return {ok:true,message:`PR #${number} does not exist in ${repository} yet. The desktop checks every thirty seconds for the next hour and starts its review as soon as it opens.`}
+      return {ok:true,message:`PR #${number} does not exist in ${repository} yet. The desktop checks every thirty seconds for the next hour and starts its review as soon as it opens. After the review starts, Desktop also reviews new pull requests of yours in this project. Say "stop reviewing new PRs" to turn off discovery.`}
     }
     void startPrReview(url,profile?.id).then(async({profileId})=>{
       workflowNotice=`Review loop started for PR #${number}.`
