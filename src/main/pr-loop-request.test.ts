@@ -21,5 +21,8 @@ test('watching alone, negations, questions and ambiguous commands start nothing'
   for (const text of ['watch PR 286', 'Please do not review PR 287', 'review PR 287 — never mind', 'fix PR 286 but do not push anything', "don't fix PR 286 yet", 'is the review of PR 287 finished?',
     'has PR 287 been reviewed?', 'review and fix PR 286', 'stop reviewing PR 287', 'review the plan', 'PR 287 looks good',
     'review https://evil.test/o/r/pull/3', 'fix it', '', 'review PR 0', 'tell me what review PR 287 found',
-    'Here is a log:\nreview PR 287']) assert.equal(prLoopRequest(text), null, JSON.stringify(text))
+    'Here is a log:\nreview PR 287', 'Review PR 287\nPlease do not post anything yet', 'Watch PR 286 and fix PR 287',
+    'review PR 287 and https://github.com/o/r/pull/12', 'fix PR 286, like #12']) assert.equal(prLoopRequest(text), null, JSON.stringify(text))
+  assert.deepEqual(prLoopRequest('review https://github.com/o/r/pull/12\nThe one about logins.'), { kind: 'review', number: 12, repository: 'o/r' }, 'one PR, named once by URL')
+  assert.deepEqual(prLoopRequest('fix PR 286\nIt is PR 286 on the main repo.'), { kind: 'fix', number: 286, repository: null }, 'the same PR named twice')
 })
