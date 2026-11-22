@@ -184,3 +184,15 @@ test('a review is refused when the base moved after the desktop presented the di
   const receipt = await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: `Approved at ${first}`, comments: [], approve: true }, () => {})
   assert.equal(receipt.base, base2)
 }))
+
+test('a review GitHub refused (4xx) leaves nothing in doubt and can be corrected', () => fixture(async (h) => {
+  const { GithubWriteRefused } = await import('./workflow-github.js')
+  const grant = await enrollReview(h)
+  const host = h.posts['host' as never] as { write: (...args: unknown[]) => Promise<unknown> }
+  const write = host.write
+  host.write = async () => { throw new GithubWriteRefused(422, 'pull_request_review_thread.line must be part of the diff (HTTP 422)') }
+  await assert.rejects(h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'One finding.', comments: [{ path: 'a.ts', line: 900, body: 'Nit: x' }], approve: false }, () => {}), /refused the review \(HTTP 422\)/)
+  assert.equal(h.posts.settled(grant.id), true)
+  host.write = write
+  assert.equal((await h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'One finding.', comments: [{ path: 'a.ts', line: 3, body: 'Nit: x' }], approve: false }, () => {})).state, 'posted')
+}))

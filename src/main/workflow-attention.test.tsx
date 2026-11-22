@@ -47,3 +47,14 @@ test('attention titles mask credentials and controls before presentation', () =>
   assert.equal(renderToStaticMarkup(<NeedsYou items={[]} compact={false} onExpand={() => {}} onActivate={() => {}} />), '')
   assert.match(renderToStaticMarkup(<NeedsYou items={items} compact onExpand={() => {}} onActivate={() => {}} />), /aria-label="Needs you: 1"/)
 })
+test('an unsettled PR-loop post needs the person; an approved loop does not', () => {
+  const grant = { id: 'g1', taskId: 't', sessionId: 's1', projectId: 'p', scopeRevision: 1, permissionKey: 'a'.repeat(64), repository: 'o/r', number: 1, reviewers: [], failedChecks: false,
+    enabled: true, activatedAt: 0, seen: {}, head: 'a'.repeat(40), headCounts: {}, total: 0, health: 'watching' as const, checks: 'absent' as const, role: 'author' as const }
+  const session = { ...tab, lastSessionId: 's1' }
+  const post = (state: 'intent' | 'uncertain', createdAt: number) => ({ id: 'p1', grantId: 'g1', state, kind: 'reply' as const, target: 1, createdAt })
+  const reasons = (posts: ReturnType<typeof post>[], g = grant) => workflowAttention([session], [], [], [g], [], posts, 10 * 60_000).flatMap((item) => item.reasons)
+  assert.ok(reasons([post('uncertain', 9 * 60_000)]).includes('PR post needs checking'))
+  assert.ok(reasons([post('intent', 0)]).includes('PR post needs checking'), 'an intent stuck for five minutes')
+  assert.ok(!reasons([post('intent', 9 * 60_000)]).includes('PR post needs checking'), 'a write still in flight')
+  assert.deepEqual(reasons([], { ...grant, enabled: false, health: 'approved' as never }), [], 'a confirmed approval leaves nothing to do')
+})

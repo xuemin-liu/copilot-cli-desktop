@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { authorPostProblem, DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
-import type { GithubApi, GithubWrite } from './workflow-github.js'
+import { GithubWriteRefused, type GithubApi, type GithubWrite } from './workflow-github.js'
 import type { FollowupGrant } from './workflow-followups.js'
 
 /**
@@ -109,7 +109,12 @@ export class PrLoopPosts {
         answer = target === null
           ? await this.host.write('POST', `repos/${grant.repository}/issues/${grant.number}/comments`, { body: posted })
           : await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/comments/${target}/replies`, { body: posted })
-      } catch {
+      } catch (error) {
+        if (error instanceof GithubWriteRefused) {
+          // GitHub said no, so nothing exists to reconcile: the reply can be corrected and sent once.
+          this.save({ ...receipt, state: 'dismissed' })
+          throw new PrPostRejected(`GitHub refused the reply (HTTP ${error.status}): ${error.detail || 'no reason given'}. Nothing was posted; correct it and send it once.`)
+        }
         // It may still have landed: the receipt stays an intent, and reconciliation looks for its tag.
         throw new PrPostRejected('GitHub did not confirm the reply. The desktop will check whether it landed; do not post it again.')
       }
@@ -209,7 +214,12 @@ export class PrLoopPosts {
       try {
         answer = await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/reviews`,
           { commit_id: head, event: 'COMMENT', body: posted, comments: comments.map((comment) => ({ path: comment.path, line: comment.line, side: 'RIGHT', body: comment.body })) })
-      } catch {
+      } catch (error) {
+        if (error instanceof GithubWriteRefused) {
+          // A 4xx (an inline line outside the diff, say) created nothing: correct the review and send it once.
+          this.save({ ...receipt, state: 'dismissed' })
+          throw new PrPostRejected(`GitHub refused the review (HTTP ${error.status}): ${error.detail || 'no reason given'}. Nothing was posted; correct it and send it once.`)
+        }
         throw new PrPostRejected('GitHub did not confirm the review. The desktop will check whether it landed; do not post it again.')
       }
       const result = answer as { id?: unknown; html_url?: unknown } | null

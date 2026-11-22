@@ -140,6 +140,19 @@ export async function readGithubPull(api: GithubApi, repository: string, number:
   return result
 }
 
+/** GitHub answered the write with a client error (4xx): it created nothing. `detail` is GitHub's own short reason. */
+export class GithubWriteRefused extends Error { constructor(readonly status: number, readonly detail: string) { super(`GitHub refused the write (HTTP ${status})`) } }
+
+/**
+ * Why a gh write failed. gh prints "HTTP <status>" for an answer it got. Only a 4xx says for sure that nothing was
+ * created; a timeout, a network error or a 5xx may still have landed, and goes to reconciliation.
+ */
+export function writeFailure(stderr: string): Error {
+  const status = Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1])
+  if (status >= 400 && status < 500) return new GithubWriteRefused(status, stderr.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 300))
+  return new Error('GitHub did not confirm the write')
+}
+
 /** One write. The body goes in on stdin as JSON, so no text a model wrote ever becomes a command-line argument. */
 export type GithubWrite = (method: 'POST' | 'PATCH', path: string, body: Record<string, unknown>) => Promise<unknown>
 
@@ -150,14 +163,14 @@ export async function githubCliWrite(cwd: string): Promise<GithubWrite> {
   return (method,path,body) => new Promise((resolve,reject) => {
     if (!/^repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:pulls|issues)\/[0-9a-z/_-]+$/.test(path)) { reject(new Error('Invalid GitHub write route')); return }
     const child=spawn(executable,['api','--hostname','github.com','-X',method,path,'--input','-'],{cwd,env:{...process.env,GH_PROMPT_DISABLED:'1'},windowsHide:true,stdio:['pipe','pipe','pipe']})
-    let stdout='',size=0
+    let stdout='',stderr='',size=0
     const timer=setTimeout(()=>{child.kill();reject(new Error('GitHub did not answer the write in time'))},60_000)
     child.stdout.setEncoding('utf8').on('data',chunk=>{size+=chunk.length;if(size<=2*1024*1024)stdout+=chunk})
-    child.stderr.resume()
+    child.stderr.setEncoding('utf8').on('data',chunk=>{if(stderr.length<8000)stderr+=chunk})
     child.on('error',()=>{clearTimeout(timer);reject(new Error('GitHub CLI could not start'))})
     child.on('close',code=>{
       clearTimeout(timer)
-      if(code!==0){reject(new Error('GitHub refused the write; check authentication, permissions or rate limits'));return}
+      if(code!==0){reject(writeFailure(stderr));return}
       try{resolve(JSON.parse(stdout))}catch{reject(new Error('GitHub returned an invalid response'))}
     })
     child.stdin.end(JSON.stringify(body))
