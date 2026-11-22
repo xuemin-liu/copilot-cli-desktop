@@ -113,6 +113,9 @@
   "build": {
     "appId": "dev.copilot-cli-desktop.app",
     "productName": "Copilot CLI Desktop",
+    "extraResources": [
+      { "from": "resources/pr-workflows", "to": "pr-workflows" }
+    ],
     "asar": true,
     "npmRebuild": false,
     "electronFuses": {
