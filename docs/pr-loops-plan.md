@@ -53,7 +53,10 @@ PR, on the same GitHub account. Waiting costs no model turn and no tokens in eit
      authentication and the per-command bypass, and denies the person's credential and browser folders, their own
      Copilot home, the desktop's data and the reviewer home itself. The launch adds `--sandbox`,
      `--disable-builtin-mcps` and a deny rule for edits to the reviewer home, and drops every GitHub token variable. The
-     desktop does the fetches, and the session reads the PR through the helper. Phase 0 measured this containment
+     desktop does the fetches, and the session reads the PR through the helper. The launch also points `GH_CONFIG_DIR`
+     at an empty folder of the reviewer's own, denies whichever gh folder the person's `GH_CONFIG_DIR` or
+     `XDG_CONFIG_HOME` selects, and turns off the built-in computer-use server by name, which could otherwise drive a
+     signed-in browser. Phase 0 measured this containment
      (below): the agent, and a test script from the PR, reach no GitHub credential, no Credential Manager secret and no
      GitHub tool. The desktop checks the reviewer home's policy before every launch. If the sandbox is unavailable on
      a computer, the reviewer loop posts nothing by itself: each review waits in Needs you with its exact text and a
@@ -137,7 +140,9 @@ Each phase is one PR, delivered in order. Each one updates [the follow-ups doc](
   and tests need approval before they run (decision 1), and the later phases are built that way.
 
 **Results (Copilot CLI 1.0.114, gh 2.98.0, Windows 11 build 26300).** `npm run pr-loop-containment:check` reproduces
-the proof below with four short real prompts and passes.
+the proof below with four short real prompts and passes. It judges only from Copilot's own session log (each tool
+call, whether it ran sandboxed, and its real output) and from `copilot mcp list`, never from what the model says, and
+reports INCONCLUSIVE when that evidence is missing.
 
 | Measured | Result |
 | --- | --- |

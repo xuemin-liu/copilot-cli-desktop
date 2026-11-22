@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 
 /**
@@ -31,6 +31,23 @@ export interface ReviewerPathRoots {
   reviewerHome: string; userHome: string; personCopilotHome: string; desktopData: string
   /** %APPDATA% and %LOCALAPPDATA% on Windows; null elsewhere. */
   appData: string | null; localAppData: string | null
+  /**
+   * The person's environment: gh keeps its login in GH_CONFIG_DIR, or under XDG_CONFIG_HOME, when they are set, so the
+   * folder actually in use is denied as well as the default ones.
+   */
+  environment?: NodeJS.ProcessEnv
+}
+
+/** The gh configuration folders this environment may use: the one gh would pick, and the defaults. */
+export function githubCliConfigDirectories(roots: Pick<ReviewerPathRoots, 'userHome' | 'appData' | 'environment'>): string[] {
+  const env = roots.environment ?? {}
+  const found: string[] = []
+  const add = (path: string | undefined): void => { if (path && isAbsolute(path)) found.push(resolve(path)) }
+  add(env.GH_CONFIG_DIR)
+  if (env.XDG_CONFIG_HOME) add(join(env.XDG_CONFIG_HOME, 'gh'))
+  if (roots.appData) add(join(roots.appData, 'GitHub CLI'))
+  add(join(roots.userHome, '.config', 'gh'))
+  return [...new Set(found)]
 }
 
 /**
@@ -43,13 +60,14 @@ export interface ReviewerPathRoots {
 export function reviewerDeniedPaths(roots: ReviewerPathRoots, exists: (path: string) => boolean = existsSync): string[] {
   const named = [roots.reviewerHome, roots.userHome, roots.personCopilotHome, roots.desktopData, roots.appData, roots.localAppData]
   for (const path of named) if (path !== null && !isAbsolute(path)) throw new Error('Reviewer sandbox paths must be absolute')
+  if (resolve(roots.reviewerHome) === resolve(roots.userHome)) throw new Error('The reviewer home must be its own folder')
   const home = roots.userHome
   const candidates = [roots.reviewerHome, roots.personCopilotHome, roots.desktopData,
-    join(home, '.ssh'), join(home, '.git-credentials'), join(home, '.config', 'gh'), join(home, '.netrc'), join(home, '_netrc'),
+    ...githubCliConfigDirectories(roots), join(home, '.ssh'), join(home, '.git-credentials'), join(home, '.netrc'), join(home, '_netrc'),
     join(home, '.mozilla'), join(home, '.config', 'google-chrome'), join(home, '.config', 'chromium'), join(home, '.config', 'microsoft-edge'),
     join(home, 'Library', 'Application Support', 'Google', 'Chrome'), join(home, 'Library', 'Application Support', 'Firefox'),
     join(home, 'Library', 'Application Support', 'Microsoft Edge')]
-  if (roots.appData) candidates.push(join(roots.appData, 'GitHub CLI'), join(roots.appData, 'Mozilla'), join(roots.appData, 'Opera Software'))
+  if (roots.appData) candidates.push(join(roots.appData, 'Mozilla'), join(roots.appData, 'Opera Software'))
   if (roots.localAppData) for (const browser of [['Google', 'Chrome'], ['Microsoft', 'Edge'], ['BraveSoftware'], ['Chromium'], ['Vivaldi']]) {
     candidates.push(join(roots.localAppData, ...browser))
   }
@@ -94,14 +112,28 @@ export async function verifyReviewerHome(reviewerHome: string, deniedPaths: read
   }
 }
 
-/** The arguments every reviewer launch adds. The deny rule covers the built-in edit tools, which are not OS-sandboxed. */
+/**
+ * The arguments every reviewer launch adds. The deny rule covers the built-in edit tools, which are not OS-sandboxed.
+ * `--disable-builtin-mcps` names only the GitHub servers in its help, so computer use, which could drive a signed-in
+ * browser, is turned off by name as well.
+ */
 export function reviewerLaunchArguments(reviewerHome: string): string[] {
-  return ['--sandbox', '--disable-builtin-mcps', '--deny-tool', `write(${join(resolve(reviewerHome), '**')})`]
+  return ['--sandbox', '--disable-builtin-mcps', '--disable-mcp-server', 'computer-use', '--deny-tool', `write(${join(resolve(reviewerHome), '**')})`]
 }
 
-/** The launch environment: the reviewer home, and no GitHub token, which a sandbox would otherwise pass through. */
-export function reviewerEnvironment(env: NodeJS.ProcessEnv, reviewerHome: string): NodeJS.ProcessEnv {
+/**
+ * The launch environment: the reviewer home, no GitHub token (a sandbox would pass one through), and `GH_CONFIG_DIR`
+ * pointing at `githubCliConfig`, an empty folder of the reviewer's own, so gh never looks for the person's login.
+ */
+export function reviewerEnvironment(env: NodeJS.ProcessEnv, reviewerHome: string, githubCliConfig: string): NodeJS.ProcessEnv {
+  if (!isAbsolute(githubCliConfig) || isInside(githubCliConfig, reviewerHome)) throw new Error('The reviewer gh folder must be absolute and outside the reviewer home')
   const next: NodeJS.ProcessEnv = { ...env, COPILOT_HOME: resolve(reviewerHome) }
-  for (const key of Object.keys(next)) if ((GITHUB_TOKEN_VARIABLES as readonly string[]).includes(key.toUpperCase())) delete next[key]
+  for (const key of Object.keys(next)) if ((GITHUB_TOKEN_VARIABLES as readonly string[]).includes(key.toUpperCase()) || key.toUpperCase() === 'GH_CONFIG_DIR') delete next[key]
+  next.GH_CONFIG_DIR = resolve(githubCliConfig)
   return next
+}
+
+function isInside(path: string, folder: string): boolean {
+  const inside = relative(resolve(folder), resolve(path))
+  return inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))
 }
