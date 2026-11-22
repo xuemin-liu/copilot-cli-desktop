@@ -83,6 +83,8 @@ interface Harness {
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
+  holdMeetingWrite(predicate:(path:string)=>boolean,work:()=>Promise<void>,started?:()=>void):void
+  flushMeetingWrites(meetingId:string):Promise<void>
   queueLegacyMeeting(tabId:string):void
   queueRejectedMeeting(tabId:string):void
   deferTaskEnter():void
@@ -266,6 +268,21 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           return result;
         }
       `,
+      './meeting-session.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'meeting-session.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'meeting-session.js'))};
+        let gate = null;
+        export function holdMeetingWrite(predicate, work, started) { gate = { predicate, work, started }; }
+        export async function writeMeetingFile(root, meetingId, path, text) {
+          if (gate && gate.predicate(path)) {
+            const current = gate;
+            gate = null;
+            current.started?.();
+            await current.work();
+          }
+          return real.writeMeetingFile(root, meetingId, path, text);
+        }
+      `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
@@ -294,6 +311,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { maintenanceCalls, holdCopilotCommand } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
+        import { holdMeetingWrite } from './meeting-session.js';
         import { browserStorageClears } from 'electron';
         import { SessionBindingReader as BindingReaderForTest } from './session-binding.js';
         const diagnosticWrites = [];
@@ -367,6 +385,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             interruptAutomatic(grant);endAutomatic(tabId,false);
           },
           meetingWrite: async(id,path,text)=>{meetingHub.effects.write(id,path,text);await meetingWrites.get(id);return meetingWriteFailures.has(id)},
+          holdMeetingWrite,
+          flushMeetingWrites: async id => { await meetingWrites.get(id) },
           composedPaste: tabId=>sendSessionTask(tabId,'Person-composed task'),
           composedCommand: tabId=>sendSessionCommand(tabId,'/add-dir example'),
           makeBindingUnreadable: tabId=>{managedTabs.get(tabId).session.bindingReader.read=async()=>{throw new Error('Temporary inventory failure')}},
@@ -434,7 +454,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
       banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
@@ -3897,4 +3917,166 @@ test('a live conversation turn clears uncertain command state so dialog-like ass
   h.queueMeetingDelivery(tab, 'post', 'Reviewer reply digest')
   await h.pumpMeetingDelivery()
   assert.ok(spawn.written.some(chunk => chunk.includes('Reviewer reply digest')), 'meeting delivery is not blocked by a false-positive dialog check')
+}))
+
+test('manual host post waits for durable snapshot before cancelling prior digest and preserves recovery across restart if snapshot write fails', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const writeSession = async (id: string, events = ''): Promise<void> => {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }) + events)
+  }
+
+  const host = await h.createMain()
+  const hostId = host.activeTabId!
+  const hostSessionId = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  const hostSpawn = h.spawns[0]!
+  await writeSession(hostSessionId, line('user.message', { content: 'Start a review meeting', interactionId: 'host-start' }))
+  await writeFile(join(dirname(sessionPath(hostSessionId)), 'inuse.7700.lock'), '')
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  assert.equal((await h.meetingCommand(hostId, 'start', hostSessionId, 'Initial plan')).ok, true)
+  const meetingId = (await h.request('desktop:get-state')).meetings![0]!.id
+  await appendFile(sessionPath(hostSessionId),
+    line('assistant.turn_start', { turnId: 'host-1' }) +
+    line('assistant.message', { interactionId: 'host-start', phase: 'final_answer', content: `Meeting ${meetingId} is open.` }) +
+    line('assistant.turn_end', { turnId: 'host-1' }))
+  await h.refreshRecords(hostId)
+  hostSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+
+  const reviewer = await h.request('desktop:create-tab', 'new', profile.id)
+  const reviewerId = reviewer.activeTabId!
+  const reviewerSessionId = reviewer.tabs.find(tab => tab.id === reviewerId)!.lastSessionId!
+  const reviewerSpawn = h.spawns[1]!
+  await writeSession(reviewerSessionId, line('user.message', { content: `join meeting ${meetingId}`, interactionId: 'rev-join' }))
+  await writeFile(join(dirname(sessionPath(reviewerSessionId)), 'inuse.7701.lock'), '')
+  h.configureBinding(reviewerId, 7701, [7701])
+  await h.refreshRecords(reviewerId)
+  assert.equal((await h.meetingCommand(reviewerId, 'join', reviewerSessionId)).ok, true)
+  await appendFile(sessionPath(reviewerSessionId),
+    line('assistant.turn_start', { turnId: 'rev-join-1' }) +
+    line('assistant.message', { interactionId: 'rev-join', phase: 'final_answer', content: 'Joined.' }) +
+    line('assistant.turn_end', { turnId: 'rev-join-1' }))
+  await h.refreshRecords(reviewerId)
+  reviewerSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await h.pumpMeetingDelivery()
+  await pause(2300)
+  await h.pumpMeetingDelivery()
+  await pause(350)
+  assert.ok(reviewerSpawn.written.some(chunk => chunk.includes('Initial plan')), 'reviewer received round 1 post')
+
+  // Round-1 digest fails to reach host and becomes uncertain; ensure the round-1 snapshot is on disk.
+  h.deferTaskEnter()
+  await appendFile(sessionPath(reviewerSessionId),
+    line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\nReview`, interactionId: 'rev-r1' }) +
+    line('assistant.turn_start', { turnId: 'rev-r1' }) +
+    line('assistant.message', { interactionId: 'rev-r1', phase: 'final_answer', content: 'Four agreed findings.' }) +
+    line('assistant.turn_end', { turnId: 'rev-r1' }))
+  await h.refreshRecords(reviewerId)
+  await h.pumpMeetingDelivery()
+  h.makeBindingUnreadable(hostId)
+  await h.refreshRecords(hostId)
+  h.flushTaskEnter()
+  await h.flushMeetingWrites(meetingId)
+  const stale = (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.scope === `meeting/${meetingId}` && d.sessionId === hostSessionId)
+  assert.equal(stale?.state, 'uncertain')
+
+  // Defer the round-2 meeting.json write, verify the prior digest is not cancelled while the write is pending,
+  // then fail the snapshot write and verify the prior digest stays uncertain for restart recovery.
+  h.configureBinding(hostId, 7700, [7700])
+  await h.refreshRecords(hostId)
+  let snapshotStarted!: () => void
+  const started = new Promise<void>(resolve => { snapshotStarted = resolve })
+  let rejectSnapshot!: (error: Error) => void
+  const deferredSnapshot = new Promise<void>((_resolve, reject) => { rejectSnapshot = reject })
+  h.holdMeetingWrite(path => path.endsWith('meeting.json'), () => deferredSnapshot, snapshotStarted)
+
+  const post = h.meetingCommand(hostId, 'propose-close', hostSessionId, 'Four agreed findings')
+  await started
+  assert.equal(
+    (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state,
+    'uncertain',
+    'prior host digest stays uncancelled until the new round snapshot lands on disk',
+  )
+  rejectSnapshot(new Error('ENOSPC: snapshot write failed'))
+  assert.equal((await post).ok, true)
+  assert.equal(
+    (await h.request('desktop:get-state')).workflowDeliveries?.find(d => d.id === stale!.id)?.state,
+    'uncertain',
+    'failed snapshot write preserves uncertain host handoff for restart recovery',
+  )
+
+  // Verify the restart boundary: shut down the first instance and restore from the on-disk snapshot + SQLite journal.
+  const meetingFolder = join(directory, 'meetings', meetingId)
+  const saved = JSON.parse(await readFile(join(meetingFolder, 'meeting.json'), 'utf8'))
+  assert.equal(saved.stage, 'host', 'on-disk snapshot remains on the old host round')
+  assert.equal(saved.round, 1)
+  const transcript = await readFile(join(meetingFolder, 'transcript.md'), 'utf8')
+  await h.cleanup()
+
+  const { WorkflowDeliveries } = await import('./workflow-deliveries.js')
+  const { journalMeetingDelivery } = await import('./workflow-meeting-journal.js')
+  const { MeetingHub } = await import('./meeting.js')
+  const { MeetingOutbox } = await import('./meeting-delivery.js')
+  const restoredJournal = new WorkflowDeliveries(join(directory, 'workflow-deliveries.sqlite'))
+  try {
+    let clock = 0
+    const typed: Array<{ tabId: string; text: string }> = []
+    const sessionsByTab: Record<string, string> = { host: hostSessionId, reviewer: reviewerSessionId }
+    const outbox = new MeetingOutbox({
+      settled: (tabId, delivery) => {
+        if (hub.superseded(tabId, delivery)) return true
+        if (delivery.kind === 'add-dir') return false
+        const item = journalMeetingDelivery(restoredJournal, sessionsByTab[tabId]!, delivery)
+        return item !== null && ['answered', 'cancelled'].includes(item.state)
+      },
+      sendTask: (tabId, text, delivery) => {
+        const item = journalMeetingDelivery(restoredJournal, sessionsByTab[tabId]!, delivery)
+        if (!item || item.state !== 'queued') return { result: 'busy', message: 'waiting for reconciliation' }
+        restoredJournal.begin(item.id, () => true)
+        typed.push({ tabId, text })
+        return { result: 'sent' }
+      },
+      sendCommand: () => true,
+      sent: () => {},
+      refused: () => {},
+      now: () => clock,
+    })
+    const hub = new MeetingHub(() => join(directory, 'meetings'), {
+      deliver: (tabId, delivery) => outbox.enqueue(tabId, delivery),
+      cancel: (id, tabId) => outbox.cancel(id, tabId),
+      write: () => {},
+      changed: () => {},
+      notify: () => {},
+      sessionIdOf: tabId => sessionsByTab[tabId] ?? null,
+    }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }))
+
+    hub.restore(saved, transcript, sessionId => sessionId === hostSessionId
+      ? { tabId: 'host', title: 'Host', folder: directory }
+      : sessionId === reviewerSessionId ? { tabId: 'reviewer', title: 'Reviewer', folder: directory } : null)
+    assert.equal(hub.views()[0]?.stage, 'host')
+    assert.equal(hub.views()[0]?.round, 1)
+
+    // Let /add-dir settle, then pump the restored digest: it must stay queued for recovery, not be dropped as cancelled.
+    outbox.pump()
+    clock += 2_000
+    outbox.pump()
+    assert.equal(restoredJournal.get(stale!.id)?.state, 'uncertain')
+    assert.equal(typed.length, 0)
+    assert.equal(outbox.next('host')?.kind, 'digest', 'restored digest stays available in the outbox instead of being dropped')
+
+    // Retrying from Handoffs after restart delivers the round-1 digest cleanly.
+    restoredJournal.retry(stale!.id)
+    outbox.pump()
+    assert.equal(typed.length, 1)
+    assert.ok(typed[0]!.text.includes('Four agreed findings.'), 'retried host digest is delivered after restart')
+  } finally {
+    restoredJournal.close()
+  }
 }))

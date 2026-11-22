@@ -256,5 +256,11 @@ test('settleHostDelivery clears queued and uncertain host digests without distur
     journal.begin(active.id,()=>true);journal.submitted(active.id)
     settleHostDelivery(journal,'meeting/RZFW',host)
     assert.equal(journal.get(active.id)?.state,'submitted','an in-turn submitted digest still completes normally on idle')
+
+    const older=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:2,kind:'reminder',text:'Older',id:randomUUID()})!
+    const newer=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:3,kind:'digest',text:'Newer',id:randomUUID()})!
+    settleHostDelivery(journal,'meeting/RZFW',host,new Set([older.id]))
+    assert.equal(journal.get(older.id)?.state,'cancelled','scoped settlement discards only captured prior ids')
+    assert.equal(journal.get(newer.id)?.state,'queued','later queued deliveries remain intact')
   }finally{journal.close();await rm(dir,{recursive:true,force:true})}
 })

@@ -15,9 +15,16 @@ export function settleClosedMeeting(journal:WorkflowDeliveries,scope:string):voi
  * The host answered its round (for instance after reading replies directly), so any queued or uncertain digest/reminder for
  * that host in this meeting is resolved and must not block later rounds or the closing vote.
  */
-export function settleHostDelivery(journal: WorkflowDeliveries, scope: string, sessionId: string): void {
+export function settleHostDelivery(
+  journal: WorkflowDeliveries,
+  scope: string,
+  sessionId: string,
+  ids?: ReadonlySet<string>,
+): void {
   for (const delivery of journal.list()) {
-    if (delivery.scope === scope && delivery.sessionId === sessionId && (delivery.state === 'queued' || delivery.state === 'uncertain')) {
+    if (delivery.scope === scope && delivery.sessionId === sessionId
+      && (ids === undefined || ids.has(delivery.id))
+      && (delivery.state === 'queued' || delivery.state === 'uncertain')) {
       journal.discard(delivery.id)
     }
   }

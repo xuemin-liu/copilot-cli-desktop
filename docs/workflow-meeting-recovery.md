@@ -58,8 +58,10 @@ uncertain is discarded then: a closed meeting takes no more replies, so it can n
 that session from every later meeting. In an open meeting uncertain evidence is retained, and the meeting bar and a
 notification say so. Choosing Send again in Handoffs re-queues a still-owed meeting delivery that has already left the
 outbox and pumps it at once; choosing Discard also pumps work waiting behind it. If a host answers its round directly
-(`round` or `propose-close`, for instance after reading the reply file), any superseded queued or uncertain digest/reminder
-for that host in the meeting is cleared so it neither replays stale replies nor blocks the closing vote. Storage failure disables automatic meeting input while ordinary terminals remain usable.
+(`round` or `propose-close`, for instance after reading the reply file), Desktop waits for the new round's durable
+snapshot before clearing any superseded queued or uncertain digest/reminder for that host in the meeting — preserving
+recovery if the snapshot write fails or the app exits beforehand, and otherwise unblocking later rounds and the closing
+vote. Storage failure disables automatic meeting input while ordinary terminals remain usable.
 An individual intake rejection is shown as a waiting handoff and leaves other destinations and recovery actions usable;
 it is distinct from an unavailable/corrupt journal.
 

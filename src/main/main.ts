@@ -2797,7 +2797,10 @@ async function pumpMeetingOutbox(): Promise<void> {
         for(const scope of new Set(deliveryViews().filter(d=>d.scope.startsWith('meeting/')).map(d=>d.scope))){
           const id=scope.slice('meeting/'.length)
           // Not before meetings are restored, when an open meeting only looks closed.
-          if(guestsReady&&deliveryJournal&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))settleClosedMeeting(deliveryJournal,scope)
+          if(guestsReady&&deliveryJournal&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id)){
+            await meetingWrites.get(id)
+            if(!meetingWriteFailures.has(id)&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))settleClosedMeeting(deliveryJournal,scope)
+          }
         }
       } finally {
         meetingDeliveryChecks.clear()
@@ -3212,10 +3215,21 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       case 'round':
       case 'propose-close': {
         const current = meetingHub.meetingOf(tabId)
+        const hostSessionId = currentTab.lastSessionId
+        const scope = current ? `meeting/${current.id}` : null
+        const priorIds = scope && hostSessionId && deliveryJournal && !deliveryError
+          ? new Set(deliveryViews().filter(d => d.scope === scope && d.sessionId === hostSessionId && (d.state === 'queued' || d.state === 'uncertain')).map(d => d.id))
+          : null
         const message = meetingHub.post(tabId, command, request.text, request.changes)
-        if (current && deliveryJournal && !deliveryError && currentTab.lastSessionId) {
-          settleHostDelivery(deliveryJournal, `meeting/${current.id}`, currentTab.lastSessionId)
-          broadcastState()
+        const pendingWrite = current ? meetingWrites.get(current.id) : undefined
+        if (current && scope && hostSessionId && priorIds && priorIds.size > 0) {
+          // Wait for the new round's durable snapshot before cancelling the prior digest, so a write failure or abrupt exit
+          // cannot leave a restored meeting in the old host round with an already-cancelled handoff.
+          await pendingWrite
+          if (deliveryJournal && !deliveryError && !meetingWriteFailures.has(current.id)) {
+            settleHostDelivery(deliveryJournal, scope, hostSessionId, priorIds)
+            broadcastState()
+          }
         }
         scheduleMeetingPump(0)
         return { ok: true, message }
