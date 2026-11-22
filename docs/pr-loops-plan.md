@@ -213,6 +213,25 @@ schema: the loop fields are optional and checked together, so no table changed, 
   worktree, a head that moves between the queue and Enter, merge after approval, and merge at an unapproved head. A
   real two-session check runs on a test PR (see Validation).
 
+**Revision after Phase 2.** Decision 3 is narrowed: a helper receipt of a reviewer's approval does **not** end a fix
+loop by itself. The PR's code runs in the same sandbox as the reviewer and can read the session's helper token, so it
+could post that approval; every approval is **Confirm approval**. The reviewer works in the desktop's own clone of the
+project, not a linked worktree: the clone copies its objects (`--no-local`; a local clone hardlinks them), keeps its
+Git directory outside the checkout and read-only to the sandbox (`--separate-git-dir`), and the desktop's Git commands
+name that directory instead of following the checkout's `.git` pointer, which the sandbox could rewrite. Measured in
+the sandbox: `git status`, `log`, `diff` and `show` work with `GIT_OPTIONAL_LOCKS=0`; writing the Git directory's
+config is refused. A fresh clone keeps no remote and holds nothing of the person's, and its first checkout can be forced. Its helper folder
+sits in that reviewer folder, which lives beside the desktop's data rather than inside it, because the sandbox denies
+the data folder (and with it other sessions' helper tokens). Inside the sandbox the helper runs only as
+`powershell.exe -ExecutionPolicy Bypass -File`, and its folder is granted read-only. A minimal **Review a PR** form in
+Tasks ships with this phase, so the loop is usable before Phase 3's dialog. A review loop does not survive a restart of
+the desktop.
+
+**Revision: chat first.** Both loops start by asking in a Copilot tab ("review PR 287", "watch PR 286 and fix the
+review feedback"), read from the person's own message like a meeting join; this ships with Phase 2. Phase 3 (the
+dialog's PR list) and Phase 4 (the new-PR queue) are not built for now, and starting from Claude Code or Codex through
+the meeting MCP tools is left for later.
+
 ### Phase 3: Review a PR from the new-session dialog
 
 - The dialog lists the project's open PRs through `gh`. A PR from a fork is refused, with the reason shown.

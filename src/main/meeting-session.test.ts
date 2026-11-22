@@ -216,3 +216,46 @@ test('the helper sends a PR reply with its target, and refuses a bad target or a
     assert.equal(calls.length, 2, 'nothing else reached the desktop')
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
 })
+
+test('the helper sends a PR review file and a PR read, and pr-review needs its file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pr-review-helper-'))
+  const calls: Array<{ command: MeetingCommand; request: MeetingRequest }> = []
+  const server = new MeetingControlServer((_tabId, command, request) => { calls.push({ command, request }); return { ok: true, message: command === 'pr-read' ? '{"head":"a"}' : 'Posted the review' } })
+  try {
+    const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab-reviewer'), { ...process.env, COPILOT_AGENT_SESSION_ID: '11111111-1111-4111-8111-111111111111' })
+    assert.match(await readFile(join(directory, 'helper', '.github', 'instructions', 'meeting.instructions.md'), 'utf8'), /pr-review -File/)
+    await writeFile(join(directory, 'review.json'), '{"body":"Two findings.","comments":[],"approve":false}')
+    const run = (...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => new Promise((resolveRun) => {
+      const [shell, ...shellArgs] = process.platform === 'win32' ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File'] : ['sh']
+      execFile(shell!, [...shellArgs, env.COPILOT_DESKTOP_MEETING_HELPER!, ...args], { cwd: directory, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 },
+        (error, stdout, stderr) => resolveRun({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr }))
+    })
+    assert.equal((await run('pr-review', '-File', join(directory, 'review.json'))).code, 0)
+    assert.equal(calls[0]!.command, 'pr-review')
+    assert.match(calls[0]!.request.text, /Two findings/)
+    const read = await run('pr-read')
+    assert.equal(read.code, 0); assert.match(read.stdout, /"head"/)
+    assert.notEqual((await run('pr-review')).code, 0, 'a review needs its file')
+    assert.notEqual((await run('pr-read', '-File', join(directory, 'review.json'))).code, 0, 'a read takes no file')
+    assert.equal(calls.length, 2)
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('pr-start takes nothing but the person\'s message, and the instructions say when to use it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pr-start-helper-'))
+  const calls: MeetingCommand[] = []
+  const server = new MeetingControlServer((_tabId, command) => { calls.push(command); return { ok: true, message: 'Starting a sandboxed review' } })
+  try {
+    const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab'), { ...process.env, COPILOT_AGENT_SESSION_ID: '11111111-1111-4111-8111-111111111111' })
+    const instructions = await readFile(join(directory, 'helper', '.github', 'instructions', 'meeting.instructions.md'), 'utf8')
+    assert.match(instructions, /review PR 287/); assert.match(instructions, /pr-start/)
+    await writeFile(join(directory, 'x.md'), 'x')
+    const run = (...args: string[]): Promise<number> => new Promise((resolveRun) => {
+      const [shell, ...shellArgs] = process.platform === 'win32' ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File'] : ['sh']
+      execFile(shell!, [...shellArgs, env.COPILOT_DESKTOP_MEETING_HELPER!, ...args], { cwd: directory, env, windowsHide: true, timeout: 60_000 }, (error) => resolveRun(error ? 1 : 0))
+    })
+    assert.equal(await run('pr-start'), 0)
+    assert.notEqual(await run('pr-start', '-File', join(directory, 'x.md')), 0, 'it takes no file: the desktop reads the person\'s own message')
+    assert.deepEqual(calls, ['pr-start'])
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
+})

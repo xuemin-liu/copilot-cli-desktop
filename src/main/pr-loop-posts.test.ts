@@ -29,6 +29,7 @@ async function setup() {
       if (path === 'repos/owner/repo/pulls/comments/200') return { pull_request_url: 'https://api.github.com/repos/owner/repo/pulls/6' }
       if (path === 'repos/owner/repo/pulls/5/comments?per_page=100') return [github.filter((c) => c.id < 5000)]
       if (path === 'repos/owner/repo/issues/5/comments?per_page=100') return [github.filter((c) => c.id >= 5000)]
+      if (path === 'repos/owner/repo/pulls/5/reviews?per_page=100') return [[]]
       throw new Error(`unexpected ${path}`)
     },
     write: async (method, path, body) => {

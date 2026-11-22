@@ -4,7 +4,11 @@ import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReportin
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
-import { githubCliApi,githubCliWrite,parseGithubPullUrl } from './workflow-github.js'
+import { prLoopRequest } from './pr-loop-request.js'
+import { cloneForReview, createReviewerArea, firstReviewPrompt, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
+import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
+import { githubCliApi,githubCliWrite,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
@@ -837,6 +841,141 @@ function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
 }
+/**
+ * What a sandboxed reviewer reads instead of calling gh: the PR's head and base, its reviews and its comments, cut to a
+ * bounded size. The text is untrusted GitHub content, passed on as data.
+ */
+async function prReadView(grant:FollowupGrant):Promise<string>{
+  const api=await githubCliApi(app.getPath('userData'))
+  const root=`repos/${grant.repository}`,path=`${root}/pulls/${grant.number}`
+  const pull=await api(path) as Record<string,any>
+  const pages=async(route:string):Promise<Record<string,any>[]>=>{const value=await api(route,true);return Array.isArray(value)?value.flat().filter((item:unknown)=>item&&typeof item==='object'):[]}
+  const [inline,conversation,reviews]=await Promise.all([pages(`${path}/comments?per_page=100`),pages(`${root}/issues/${grant.number}/comments?per_page=100`),pages(`${path}/reviews?per_page=100`)])
+  const cut=(value:unknown,limit=4000):string=>typeof value==='string'?value.slice(0,limit):''
+  const view={repository:grant.repository,number:grant.number,state:pull.state,title:cut(pull.title,300),author:pull.user?.login??null,
+    head:pull.head?.sha??null,base:pull.base?.sha??null,baseRef:pull.base?.ref??null,
+    reviews:reviews.map(r=>({id:r.id,user:r.user?.login??null,state:r.state,commit:r.commit_id??null,body:cut(r.body)})),
+    inline:inline.map(c=>({id:c.id,user:c.user?.login??null,path:c.path,line:c.line??c.original_line??null,inReplyTo:c.in_reply_to_id??null,commit:c.commit_id??null,body:cut(c.body)})),
+    conversation:conversation.map(c=>({id:c.id,user:c.user?.login??null,body:cut(c.body)}))}
+  return JSON.stringify(view).slice(0,200_000)
+}
+/** Review loops started in this run: their clone and policy. A restart leaves them for the person (needs-person). */
+const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
+/**
+ * A review loop that ended (merged, closed, stopped) and whose tab is gone leaves its clone, its Copilot home and a dead
+ * session's token behind: remove the folder. A restart forgets these loops; startup removes week-old folders instead.
+ */
+async function sweepReviewerAreas():Promise<void>{
+  for(const [taskId,review] of reviewerTasks){
+    const grant=followups?.list().find(g=>g.taskId===taskId&&g.role==='reviewer')
+    if(grant?.enabled)continue
+    const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&samePath(resolve(session.sessionCwd),resolve(review.area.checkout)))
+    if(open)continue
+    reviewerTasks.delete(taskId)
+    await removeReviewerArea(review.area).catch(()=>{})
+  }
+}
+/** Review loops being enrolled, by session: the session's first helper call waits for its loop. */
+const reviewEnrollments=new Map<string,Promise<unknown>>()
+/** Where reviewer folders live: beside the desktop's data, never inside it, because the sandbox denies that folder. */
+function reviewerAreaBase():string{return join(dirname(app.getPath('userData')),`${basename(app.getPath('userData'))}-pr-reviewers`)}
+
+/**
+ * Review a PR (docs/pr-loops-plan.md, Phases 2-3): the person's consent, a same-repository PR by the person's own account,
+ * a project whose origin is that repository, the desktop's own clone at the PR head, a sandboxed session there with the
+ * first review as its first prompt, and then the review loop.
+ */
+async function startPrReview(url:string,profileId?:string):Promise<void>{
+  const controller=await openFollowups(),runner=await meetingGitRunner()
+  if(!runner)throw new Error('Git is not available')
+  if(!prPosts)throw new Error('PR loops are unavailable')
+  const pull=parseGithubPullUrl(url),api=await githubCliApi(app.getPath('userData'))
+  const snapshot=await readGithubPull(api,pull.repository,pull.number,{checks:false})
+  if(!snapshot.open)throw new Error('The pull request is closed')
+  if(!snapshot.baseRepository||snapshot.headRepository.toLowerCase()!==snapshot.baseRepository.toLowerCase())throw new Error('A pull request from a fork cannot be reviewed here')
+  const me=await api('user') as {id?:unknown}
+  if(!me||snapshot.author!==me.id)throw new Error('Only your own pull requests can be reviewed here for now')
+  let profile:WorkspaceProfile|null=null,origin=''
+  // The project the person asked from comes first; any other project whose origin is the PR's repository will do.
+  const choices=[...desktopConfig.profiles].sort((a,b)=>Number(b.id===profileId)-Number(a.id===profileId))
+  for(const candidate of choices){try{origin=await projectOrigin(runner,candidate.path,pull.repository);profile=candidate;break}catch{/* not this project */}}
+  if(!profile)throw new Error('Add a project whose origin is this repository first')
+  const area=await createReviewerArea(reviewerAreaBase())
+  let tabId:string|null=null
+  try{
+    await cloneForReview(runner,profile.path,origin,area,snapshot,pull.number)
+    const userHome=app.getPath('home')
+    const policy=await writeReviewerPolicy(area,{userHome,personCopilotHome:process.env.COPILOT_HOME||join(userHome,'.copilot'),desktopData:app.getPath('userData'),
+      appData:process.env.APPDATA??null,localAppData:process.env.LOCALAPPDATA??null,environment:process.env})
+    await createSessionTab({...profile,launch:{...profile.launch,worktree:false}},'new',null,[],null,`Review #${pull.number}`,{reviewer:{area,policy}},null,null,id=>{tabId=id})
+    const createdTab=tabId as string|null
+    if(!createdTab)throw new Error('No review session was created')
+    const session=managedTabs.get(createdTab)?.session
+    if(!session)throw new Error('The review session is unavailable')
+    const text=firstReviewPrompt(pull.repository,pull.number,snapshot.head,DEFAULT_PR_MARKER)
+    const deadline=Date.now()+90_000
+    let taskId:string|null=null
+    while(Date.now()<deadline&&!shuttingDown()&&!taskId){
+      const tab=tabsState.tabs.find(t=>t.id===createdTab),sessionId=tab?.lastSessionId
+      if(!tab||managedTabs.get(createdTab)?.session!==session||tab.status==='crashed'||tab.status==='completed')throw new Error('The review session stopped')
+      if(sessionId&&meetingPromptSettled(createdTab)){
+        const store=workflows()
+        if(!store)throw new Error('Workflow storage is unavailable')
+        const result=sendSessionTask(createdTab,text,false,{
+          beforePaste:()=>{const task=store.submitted(sessionId,profile!.id,text,{...taskContext(tab),pullUrl:url});taskId=task.id;reviewerTasks.set(task.id,{area,policy,origin,number:pull.number});return true},
+          beforeEnter:()=>managedTabs.get(createdTab)?.session===session,
+          aborted:()=>{},
+        })
+        if(result.result!=='sent'){taskId=null}
+      }
+      if(!taskId)await new Promise(resolve=>setTimeout(resolve,250))
+    }
+    if(!taskId)throw new Error('The review session did not reach a prompt; inspect it')
+    const sessionId=tabsState.tabs.find(t=>t.id===createdTab)?.lastSessionId
+    const enrolling=controller.enroll(taskId,url,[],false,false,{role:'reviewer'})
+    if(sessionId)reviewEnrollments.set(sessionId,enrolling.catch(()=>{}))
+    try{await enrolling}finally{if(sessionId)reviewEnrollments.delete(sessionId)}
+    broadcastState()
+  }catch(error){
+    // A session that started keeps its folder, so the person can look at it; only an unused folder is removed.
+    if(!tabId)await removeReviewerArea(area).catch(()=>{})
+    throw error
+  }
+}
+
+/**
+ * "review PR 287" / "watch PR 286 and fix the review feedback", typed by the person in a Copilot tab. A review starts in
+ * the background (cloning and launching outlast the helper's request) and reports back in that tab's task notice; a fix
+ * loop starts here, for this conversation's task, with the person's own account as the reviewer whose feedback counts.
+ */
+async function startPrLoopFromChat(tab:DesktopSessionTab,sessionId:string,asked:import('./pr-loop-request.js').PrLoopRequest):Promise<MeetingResponse>{
+  const profile=desktopConfig.profiles.find(candidate=>candidate.id===tab.workspaceProfileId),runner=await meetingGitRunner()
+  let repository=asked.repository
+  if(!repository){
+    if(!profile||profile.general||!runner)return {ok:false,message:'Name the PR by its URL: this conversation is not in a project with a GitHub origin.'}
+    const origin=await runner.run({cwd:profile.path,args:['remote','get-url','origin'],kind:'read',timeoutMs:30_000,maxStdoutBytes:64_000}).catch(()=>null)
+    repository=origin&&origin.exitCode===0?githubRemoteRepository(origin.stdout.toString('utf8').trim()):null
+    if(!repository)return {ok:false,message:'Name the PR by its URL: this project\'s origin is not a github.com repository.'}
+  }
+  const url=`https://github.com/${repository}/pull/${asked.number}`
+  if(asked.kind==='review'){
+    void startPrReview(url,profile?.id).then(()=>{workflowNotice=`Review loop started for PR #${asked.number}.`;broadcastState()},
+      (error:unknown)=>{workflowNotice=`The review of PR #${asked.number} did not start: ${error instanceof Error?error.message:'unknown error'}`;broadcastState()})
+    return {ok:true,message:`Starting a sandboxed review of ${url} in a new tab. It posts its review on the PR and reviews again when the author pushes or replies; you confirm any approval. If it cannot start, the Tasks section says why.`}
+  }
+  try{
+    const controller=await openFollowups(),store=workflows()
+    const task=store?.active(sessionId)
+    if(!task)return {ok:false,message:'This conversation has no tracked task, so there is nothing for a fix loop to continue. Ask again in a new message.'}
+    const me=await (await githubCliApi(app.getPath('userData')))('user') as {login?:unknown}
+    if(!me||typeof me.login!=='string')return {ok:false,message:'GitHub CLI is not signed in.'}
+    const existing=controller.list().find(g=>g.enabled&&g.taskId===task.id)
+    if(existing)return {ok:false,message:`This conversation already has a ${existing.role==='author'?'fix loop':'follow-up'} for ${existing.repository} #${existing.number}. Stop it in Tasks first.`}
+    const grant=await controller.enroll(task.id,url,[me.login],false,false,{role:'author',includeExisting:true})
+    workflows()?.link(grant.sessionId,{pullUrl:url});broadcastState()
+    return {ok:true,message:`The fix loop is on for ${url}. Desktop continues this conversation whenever new review feedback from ${me.login} arrives (feedback already on the PR comes first); reply on threads with pr-reply, starting each reply with the marker. It ends when you confirm an approval of the PR's current head, or when the PR is merged or closed.`}
+  }catch(error){return {ok:false,message:`The fix loop did not start: ${error instanceof Error?error.message:'unknown error'}`}}
+}
 /** Only what the Tasks view shows: receipts that still need settling, without bodies. */
 function prPostViews():import('./types.js').PrPostView[]{
   try{return (prPosts?.list()??[]).filter(r=>r.state==='intent'||r.state==='uncertain').map(r=>({id:r.id,grantId:r.grantId,state:r.state as 'intent'|'uncertain',kind:r.kind,target:r.target,createdAt:r.createdAt}))}
@@ -857,7 +996,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
       try{prPosts=new PrLoopPosts(join(app.getPath('userData'),'pr-loop-posts.sqlite'),{api,write});prPostsError=null}
       catch{prPostsError='PR loops are unavailable: their reply records could not be opened. Task follow-ups still work; restart Desktop to try again.';void writeAppLog('PR loop receipts could not be opened').catch(()=>{})}
     }
-    if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{})},60_000);prPostTimer.unref()}
+    if(!prPostTimer){prPostTimer=setInterval(()=>{void prPosts?.reconcile().then(()=>broadcastState()).catch(()=>{});void sweepReviewerAreas().catch(()=>{})},60_000);prPostTimer.unref()}
     const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
       api,journal:deliveryJournal,projectAvailable:id=>desktopConfig.profiles.some(profile=>profile.id===id),
       postsSettled:id=>prPosts?.settled(id)??false,
@@ -866,9 +1005,19 @@ async function openFollowups():Promise<WorkflowFollowups> {
         if(!store||snapshot.open||snapshot.merged!==true||current?.id!==task.id||current.assignmentId!==task.assignmentId||current.scopeRevision!==task.scopeRevision)throw new Error('Task changed before verified merge completion')
         store.mergeCompleted(task.id,grant.repository,grant.number,snapshot.head,snapshot.base)
       },task:id=>workflowViews().find(task=>task.id===id)??null,permissionKey:followupPermission,
-      verifyRepository:async(task,pr)=>{
+      verifyRepository:async(task,pr,role)=>{
         const tab=followupTab(task),folder=tab?managedTabs.get(tab.id)?.session.sessionCwd:null,runner=await meetingGitRunner()
         if(!folder||!runner)throw new Error('Open the local task checkout first')
+        if(role==='reviewer'){
+          // The reviewer's clone has no branch: the desktop moves it to the PR's head while it is clean.
+          const review=reviewerTasks.get(task.id)
+          if(!review||!samePath(resolve(folder),resolve(review.area.checkout)))throw new Error('The review session is not in its own checkout')
+          await verifyReviewerPolicy(review.area,review.policy)
+          const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number,pr.base)
+          const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
+          if(grant)followups?.markCheckedOut(grant.id,head,pr.base)
+          return
+        }
         await verifyWorkflowCheckout(folder,pr,runner,gitTrustStore())
       },
       ready:followupReady,
@@ -1909,13 +2058,16 @@ async function startSessionTab(
   titleOverride: string | null = null,
   /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved).
    * `worktreePath`: the existing worktree chosen there, checked against the project's worktrees before anything starts. */
-  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli } = {},
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli
+    /** A review loop's session: sandboxed, in the desktop's own clone of the PR, with its own Copilot home (pr-review-launch.ts). */
+    reviewer?: { area: ReviewerArea; policy: ReviewerPolicy } } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
   /** Called with the new tab's id the moment it is registered, before anything else can create a tab. */
   onCreated: ((tabId: string) => void) | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
+  if (sideOptions.reviewer && (sideOptions.sideChat || sideOptions.cli || sideOptions.worktreePath || connectSessionId || attachmentPaths.length)) throw new Error('A review session takes no other session options')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
   // An existing worktree: chosen now, it must still be one of the project's, or nothing starts.
   const requestedWorktree = connectSessionId || sideOptions.sideChat ? undefined : sideOptions.worktreePath
@@ -1959,10 +2111,21 @@ async function startSessionTab(
     plan.nameSession = !autoTitle
     if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
-    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env, logBrowserError)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
-    desktopEnvironment = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
-    if (desktopEnvironment) plan.env = desktopEnvironment
+    const reviewer = sideOptions.reviewer
+    if (reviewer) {
+      // Nothing of the person's desktop reaches a reviewer: no browser or desktop-control helper, its own home, and a
+      // helper folder the sandbox may read; the policy is checked once more just before the session starts.
+      plan.cwd = reviewer.area.checkout
+      plan.env = reviewerEnvironment(plan.env, reviewer.area.home, reviewer.area.github)
+      plan.env = await prepareMeetingSessionEnvironment(reviewer.area.helper, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: false, remote: false, preset: sessionPermissionPreset })
+      await verifyReviewerPolicy(reviewer.area, reviewer.policy)
+      desktopEnvironment = null
+    } else {
+      plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env, logBrowserError)
+      plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
+      desktopEnvironment = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
+      if (desktopEnvironment) plan.env = desktopEnvironment
+    }
   }
   finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
@@ -1973,6 +2136,7 @@ async function startSessionTab(
   assertWorkspaceListed(profile)
   const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
+  if (sideOptions.reviewer) args.push(...reviewerLaunchArguments(sideOptions.reviewer.area.home))
 
   const session = new PtySession({
     file: plan.file,
@@ -3226,6 +3390,55 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       if (!canRebind) session.commitSessionBinding()
     }
     switch (command) {
+      case 'pr-start': {
+        // Like a meeting join: only what the person typed in this conversation starts a loop.
+        const binding = callerSession?.bindingDiagnostic
+        if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
+          return { ok: false, message: 'Starting a PR loop requires one verified foreground CLI session.' }
+        const prompt = meetingReader(tabId).activePersonPrompt
+        const asked = prompt === null ? null : prLoopRequest(prompt)
+        if (!asked) return { ok: false, message: 'Ask in a new message of your own, for example "review PR 287" or "watch PR 286 and fix the review feedback".' }
+        return startPrLoopFromChat(currentTab, request.sessionId, asked)
+      }
+      case 'pr-review':
+      case 'pr-read': {
+        const binding = callerSession?.bindingDiagnostic
+        if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
+          return { ok: false, message: 'PR reviews require one verified foreground CLI session.' }
+        if (!followups || !prPosts) return { ok: false, message: 'PR loops are not running in the desktop.' }
+        const findGrant = (): FollowupGrant | null => followups?.list().find((candidate) => candidate.enabled && candidate.role === 'reviewer' && candidate.sessionId === request.sessionId) ?? null
+        let grant = findGrant()
+        // The first review prompt is typed before the loop can be enrolled (the session is proven only by its first
+        // prompt), so a first-turn call waits for that enrollment instead of failing.
+        const enrolling = grant ? undefined : reviewEnrollments.get(request.sessionId)
+        if (enrolling) { await Promise.race([enrolling, new Promise((resolveWait) => setTimeout(resolveWait, 60_000))]); grant = findGrant() }
+        if (command === 'pr-read') {
+          if (!grant) return { ok: false, message: 'This session has no active review loop.' }
+          try { return { ok: true, message: await prReadView(grant) } } catch { return { ok: false, message: 'The desktop could not read the pull request.' } }
+        }
+        let parsed: unknown
+        try { parsed = JSON.parse(request.text) } catch { return { ok: false, message: 'The review file must be JSON: {"body": "...", "comments": [...], "approve": false}.' } }
+        const fields = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
+        if (!fields || Object.keys(fields).some((key) => !['body', 'comments', 'approve'].includes(key)) || (fields.approve !== undefined && typeof fields.approve !== 'boolean'))
+          return { ok: false, message: 'The review file takes only "body", "comments" and "approve".' }
+        // The checkout must still be clean and at the head the desktop presented when the review is posted.
+        const review = grant ? reviewerTasks.get(grant.taskId) : undefined, runner = await meetingGitRunner()
+        if (grant && review && runner) {
+          const checkout = await reviewCheckoutState(runner, review.area).catch(() => null)
+          if (!checkout || checkout.head !== grant.checkedOut || !checkout.clean) return { ok: false, message: 'Your checkout has local changes or is not at the head the desktop prepared. Remove the files you added and restore the ones you changed (git show HEAD:<path> > <path>), then review again.' }
+        } else if (grant) return { ok: false, message: 'This review loop\'s checkout is not known to the desktop; start a new review.' }
+        try {
+          const receipt = await prPosts.review(grant, request.sessionId, { body: typeof fields.body === 'string' ? fields.body : '',
+            comments: (Array.isArray(fields.comments) ? fields.comments : fields.comments === undefined ? [] : null) as never, approve: fields.approve === true },
+          (head, base) => { if (grant) followups?.markReviewed(grant.id, head, base) },
+          () => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'reviewer' && current.sessionId === request.sessionId && followups?.authorized(current)) })
+          broadcastState()
+          return { ok: true, message: `Posted the ${receipt.kind === 'approval' ? 'approval' : 'review'} of ${receipt.head}${receipt.url ? `: ${receipt.url}` : '.'}` }
+        } catch (error) {
+          broadcastState()
+          return { ok: false, message: error instanceof PrPostRejected ? error.message : 'The desktop could not post the review.' }
+        }
+      }
       case 'pr-reply': {
         const binding = callerSession?.bindingDiagnostic
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
@@ -5463,6 +5676,11 @@ ipcMain.handle('desktop:followup-default-remove',(event,projectId:unknown):void=
   if(typeof projectId!=='string'||!followups)throw new Error('Project defaults are unavailable')
   followups.removeDefault(projectId);broadcastState()
 })
+ipcMain.handle('desktop:pr-review-start',async(event,url:unknown,consent:unknown):Promise<void>=>{
+  assertTrustedIpcSender(event)
+  if(typeof url!=='string'||url.length>300||consent!==true)throw new Error('Confirm that the review session may run this PR\'s code in its sandbox')
+  await startPrReview(url)
+})
 ipcMain.handle('desktop:followup-confirm-approval',async(event,id:unknown,shown:unknown):Promise<void>=>{
   assertTrustedIpcSender(event)
   if(typeof id!=='string'||!isValidSessionId(id)||!followups)throw new Error('Unknown enrollment')
@@ -6457,6 +6675,7 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     if(existsSync(join(app.getPath('userData'),'workflow-automations.sqlite')))try{openAutomations()}catch{automationError='Automation history is unavailable; automatic work is disabled.'}
     setInterval(()=>{for(const run of automaticTurns.values())if(!run.authorized())interruptAutomatic(run.grant)},1000).unref()
+    void pruneReviewerAreas(reviewerAreaBase(),new Set(),Date.now()).catch(()=>{})
     if(existsSync(join(app.getPath('userData'),'workflow-followups.sqlite')))void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()

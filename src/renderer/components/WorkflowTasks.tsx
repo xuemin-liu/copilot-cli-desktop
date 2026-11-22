@@ -4,7 +4,7 @@ import type { WorkflowTask, TaskAction, TaskArtifact } from '../../main/workflow
 import type { DesktopSessionTab } from '../../main/types.js'
 import { isWorkflowCliVersion, supportsTaskReporting, WORKFLOW_CLI_VERSION, workflowCliVersionNotice } from '../../main/workflow-capabilities.js'
 import type { FollowupGrant,FollowupDefault } from '../../main/workflow-followups.js'
-import { TaskFollowups } from './WorkflowFollowups.js'
+import { ReviewPrForm, TaskFollowups } from './WorkflowFollowups.js'
 
 export function WorkflowTasks({ tasks, error,followups=[],prPosts=[],defaults=[],tabs=[],installedCliVersion=null,onRestart }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[];prPosts?:readonly import('../../main/types.js').PrPostView[];defaults?:readonly FollowupDefault[];tabs?:readonly DesktopSessionTab[];installedCliVersion?:string|null;onRestart?:(tabId:string)=>void }): JSX.Element | null {
   const [failure, setFailure] = useState<string | null>(null)
@@ -86,6 +86,7 @@ export function WorkflowTasks({ tasks, error,followups=[],prPosts=[],defaults=[]
       <p>Track an existing conversation, or end its current task and start another at a verified idle, empty prompt. This records an Unknown outcome; it sends no input and grants no tools.</p>
       <button disabled={pending||!title.trim()} type="submit">{tasks.some(task=>task.sessionId===selected?.lastSessionId&&!['completed','cancelled'].includes(task.outcome))?'End current task and track another':'Track this conversation'}</button>
     </form>}
+    <ReviewPrForm />
     {active.length > 0 && <><h3>Active · {active.length}</h3>{renderTasks(active)}</>}
     {history.length > 0 && <><h3>History · {history.length}</h3>{renderTasks(history.slice(0, historyLimit))}
       {history.length > historyLimit && <button type="button" onClick={() => setHistoryLimit(limit => limit + 50)}>Show more history</button>}
