@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {randomUUID} from 'node:crypto'
 import {WorkflowDeliveries} from './workflow-deliveries.js'
-import {journalMeetingDelivery,settleClosedMeeting} from './workflow-meeting-journal.js'
+import {journalMeetingDelivery,meetingDeliveryInfo,meetingDeliverySource,settleClosedMeeting,settleHostDelivery,settleSupersededHostDeliveries} from './workflow-meeting-journal.js'
 import {MEETING_TURN_RETRIES,MEETING_TURN_RETRY_MS,MeetingHub,type MeetingDelivery} from './meeting.js'
 import {MeetingOutbox} from './meeting-delivery.js'
 
@@ -127,10 +127,13 @@ test('a queued retry whose host moved the round on stays dropped after a restart
     before.hub.turnFailed('host',digest,'400')
     before.answered('host',digest)
     before.advance(MEETING_TURN_RETRY_MS)
+    const retry=before.saved().outstanding.find((entry:{sessionId:string})=>entry.sessionId===SESSION.host).delivery
+    assert.equal(retry.round,1);assert.equal(retry.again,true)
     before.hub.post('host','round','plan v2',null)
     const saved=before.saved()
-    const left=saved.outstanding.find((entry:{sessionId:string})=>entry.sessionId===SESSION.host).delivery
-    assert.equal(left.round,1);assert.equal(left.again,true)
+    assert.equal(saved.outstanding.some((entry:{sessionId:string})=>entry.sessionId===SESSION.host),false,'posting clears the stale host digest')
+    // Even if an older snapshot still carried that round-1 retry, restore must drop it instead of typing it.
+    saved.outstanding.push({sessionId:SESSION.host,delivery:retry})
 
     const after=appRun(journal,saved)
     after.pump()
@@ -231,5 +234,74 @@ test('legacy outstanding prompts require reconciliation and respect another sour
     assert.equal(changes,1,'unchanged queue polls do not send repeated UI updates')
     journal.retry(item.id)
     assert.equal(journalMeetingDelivery(journal,'session',legacy)?.state,'queued','an explicit person decision is preserved')
+  }finally{journal.close();await rm(dir,{recursive:true,force:true})}
+})
+
+test('settleHostDelivery clears queued and uncertain host digests without disturbing active turns or other sessions',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'meeting-host-settle-')),journal=new WorkflowDeliveries(join(dir,'journal.sqlite'))
+  try{
+    const host=randomUUID(),reviewer=randomUUID(),digestId=randomUUID()
+    const digest=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:1,kind:'digest',text:'Replies',id:digestId})!
+    assert.deepEqual(meetingDeliverySource(digest),{meetingId:'RZFW',deliveryId:digestId})
+    assert.equal(meetingDeliverySource({scope:'grant-1',source:'github/1'}),null)
+    journal.begin(digest.id,()=>true);journal.submitted(digest.id);journal.uncertain(digest.id)
+    const reviewerPost=journalMeetingDelivery(journal,reviewer,{meetingId:'RZFW',round:1,kind:'post',text:'Plan',id:randomUUID()})!
+    journal.begin(reviewerPost.id,()=>true);journal.submitted(reviewerPost.id);journal.uncertain(reviewerPost.id)
+
+    settleHostDelivery(journal,'meeting/RZFW',host)
+    assert.equal(journal.get(digest.id)?.state,'cancelled','uncertain host digest is cleared once host posts')
+    assert.equal(journal.get(reviewerPost.id)?.state,'uncertain','other participants keep their handoff state')
+
+    const active=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:2,kind:'digest',text:'Round 2',id:randomUUID()})!
+    journal.begin(active.id,()=>true);journal.submitted(active.id)
+    settleHostDelivery(journal,'meeting/RZFW',host)
+    assert.equal(journal.get(active.id)?.state,'submitted','an in-turn submitted digest still completes normally on idle')
+
+    const older=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:2,kind:'reminder',text:'Older',id:randomUUID()})!
+    const newer=journalMeetingDelivery(journal,host,{meetingId:'RZFW',round:3,kind:'digest',text:'Newer',id:randomUUID()})!
+    settleHostDelivery(journal,'meeting/RZFW',host,new Set([older.id]))
+    assert.equal(journal.get(older.id)?.state,'cancelled','scoped settlement discards only captured prior ids')
+    assert.equal(journal.get(newer.id)?.state,'queued','later queued deliveries remain intact')
+  }finally{journal.close();await rm(dir,{recursive:true,force:true})}
+})
+
+test('settleSupersededHostDeliveries retires only host digests proven superseded by the restored snapshot',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'meeting-restore-settle-')),journal=new WorkflowDeliveries(join(dir,'journal.sqlite'))
+  try{
+    const before=appRun(journal),digest=untilHostHasReplies(before)
+    const digestRow=journal.list().find(d=>d.sessionId===SESSION.host&&d.scope==='meeting/K7QF')!
+    journal.uncertain(digestRow.id)
+    assert.deepEqual(meetingDeliveryInfo(digestRow),{meetingId:'K7QF',deliveryId:digest.id!,round:1,kind:'digest'})
+
+    // Host advances to round 2 (closing vote) and snapshot persists, then process exits before journal settlement.
+    before.hub.post('host','propose-close','Four agreed findings',null)
+    const savedRound2=before.saved()
+    // An unrelated uncertain reviewer handoff, another meeting's queued host digest, and an agreed row also exist.
+    const reviewerRow=journalMeetingDelivery(journal,SESSION.reviewer!,{meetingId:'K7QF',round:2,kind:'vote',text:'Vote',id:randomUUID()})!
+    journal.begin(reviewerRow.id,()=>true);journal.uncertain(reviewerRow.id)
+    const otherMeeting=journalMeetingDelivery(journal,SESSION.host!,{meetingId:'OTHR',round:1,kind:'digest',text:'Other',id:randomUUID()})!
+    const agreedRow=journalMeetingDelivery(journal,SESSION.host!,{meetingId:'K7QF',round:1,kind:'agreed',text:'Agreed',id:randomUUID()})!
+
+    const after=appRun(journal,savedRound2)
+    const view=after.hub.views()[0]!
+    assert.equal(view.round,2);assert.equal(view.stage,'reviewing')
+    settleSupersededHostDeliveries(journal,{
+      id:view.id,hostSessionId:SESSION.host!,round:view.round,stage:view.stage,pauseReason:view.pauseReason,
+      outstandingHostDeliveryId:after.hub.outstandingHostDeliveryId(view.id),
+    })
+    assert.equal(journal.get(digestRow.id)?.state,'cancelled','round-1 host digest is retired once round-2 snapshot proves advancement')
+    assert.equal(journal.get(reviewerRow.id)?.state,'uncertain','reviewer handoff is untouched')
+    assert.equal(journal.get(otherMeeting.id)?.state,'queued','other meeting handoff is untouched')
+    assert.equal(journal.get(agreedRow.id)?.state,'queued','agreed closing message is never retired as a digest')
+
+    // Same-round host stage or host-silent pause must NOT retire the current round's digest; round-limit pause DOES.
+    const round2Digest=journalMeetingDelivery(journal,SESSION.host!,{meetingId:'K7QF',round:2,kind:'digest',text:'R2',id:randomUUID()})!
+    journal.begin(round2Digest.id,()=>true);journal.uncertain(round2Digest.id)
+    settleSupersededHostDeliveries(journal,{id:'K7QF',hostSessionId:SESSION.host!,round:2,stage:'host',pauseReason:null,outstandingHostDeliveryId:null})
+    assert.equal(journal.get(round2Digest.id)?.state,'uncertain','current-round host digest stays uncertain in host stage')
+    settleSupersededHostDeliveries(journal,{id:'K7QF',hostSessionId:SESSION.host!,round:2,stage:'paused',pauseReason:'host-silent',outstandingHostDeliveryId:null})
+    assert.equal(journal.get(round2Digest.id)?.state,'uncertain','host-silent pause does not retire that round digest')
+    settleSupersededHostDeliveries(journal,{id:'K7QF',hostSessionId:SESSION.host!,round:2,stage:'paused',pauseReason:'round-limit',outstandingHostDeliveryId:null})
+    assert.equal(journal.get(round2Digest.id)?.state,'cancelled','round-limit pause proves the host already answered round 2')
   }finally{journal.close();await rm(dir,{recursive:true,force:true})}
 })

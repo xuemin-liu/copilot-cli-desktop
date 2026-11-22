@@ -64,6 +64,11 @@ export class MeetingOutbox {
     return this.queues.get(tabId)?.inTurn ?? null
   }
   next(tabId:string):MeetingDelivery|null {return this.queues.get(tabId)?.items[0]??null}
+  /** Whether this delivery is already queued or running for the tab, so a manual retry never queues a second copy. */
+  hasDelivery(tabId: string, deliveryId: string): boolean {
+    const queue = this.queues.get(tabId)
+    return queue?.inTurn?.id === deliveryId || queue?.items.some((item) => item.id === deliveryId) === true
+  }
   hasMeetingWork(meetingId:string):boolean {
     return [...this.queues.values()].some(queue=>queue.inTurn?.meetingId===meetingId||queue.items.some(item=>item.meetingId===meetingId))
   }

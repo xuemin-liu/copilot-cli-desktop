@@ -7,7 +7,7 @@ import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
-import { journalMeetingDelivery,settleClosedMeeting } from './workflow-meeting-journal.js'
+import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, settleHostDelivery, settleSupersededHostDeliveries } from './workflow-meeting-journal.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -2563,7 +2563,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   // Copilot needs a moment to take a large paste before Enter submits it.
   scheduleHeldInput(held,() => {
     if (holding() && sameSessionRecipient(tabId,session,recipientId)) {
-      if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r')}
+      if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r'); promptDrafts.get(tabId)?.commandOpensNoDialog()}
       else {session.write('\x03');draft.note('\x03');hooks.aborted()}
     } else {if(holding())cancelHeldInput(tabId,true);hooks?.aborted()}
     release()
@@ -2608,7 +2608,8 @@ const meetingWrites = new Map<string, Promise<void>>()
 const meetingWriteFailures=new Map<string,Set<string>>()
 const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
-let meetingPumpRunning = false
+let meetingPumpPromise: Promise<void> | null = null
+let meetingPumpAgain = false
 const meetingDeliveryChecks = new Map<string, () => boolean>()
 const meetingJournalTurns=new Map<string,{id:string;session:PtySession;sessionId:string;meetingId:string;stopping:boolean;promptsBefore?:number}>()
 /** A meeting's message the session recorded, then the person typed in it during that turn: what it answers now is theirs. */
@@ -2785,32 +2786,42 @@ function reportBlockedDeliveries(): void {
 }
 
 async function pumpMeetingOutbox(): Promise<void> {
-  if (meetingPumpRunning) return
-  meetingPumpRunning = true
-  try {
-    await Promise.all(meetingOutbox.readyTabs().map(async tabId => {
-      clearRecalledPrompt(tabId)
-      const next=meetingOutbox.next(tabId)
-      if(next){await meetingWrites.get(next.meetingId);if(meetingWriteFailures.has(next.meetingId))return}
-      const session = managedTabs.get(tabId)?.session
-      const sessionId = tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId
-      if (!session || !sessionId || !meetingPromptSettled(tabId)) return
-      const ready = await session.prepareMeetingDelivery(sessionId)
-      meetingDeliveryChecks.set(tabId, () => managedTabs.get(tabId)?.session === session
-        && tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId === sessionId && ready())
-    }))
-    meetingOutbox.pump()
-    for(const scope of new Set(deliveryViews().filter(d=>d.scope.startsWith('meeting/')).map(d=>d.scope))){
-      const id=scope.slice('meeting/'.length)
-      // Not before meetings are restored, when an open meeting only looks closed.
-      if(guestsReady&&deliveryJournal&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))settleClosedMeeting(deliveryJournal,scope)
-    }
-  } finally {
-    meetingDeliveryChecks.clear()
-    meetingPumpRunning = false
-    reportBlockedDeliveries()
+  if (meetingPumpPromise) { meetingPumpAgain = true; return meetingPumpPromise }
+  const run = (async () => {
+    do {
+      meetingPumpAgain = false
+      try {
+        await Promise.all(meetingOutbox.readyTabs().map(async tabId => {
+          clearRecalledPrompt(tabId)
+          const next=meetingOutbox.next(tabId)
+          if(next){await meetingWrites.get(next.meetingId);if(meetingWriteFailures.has(next.meetingId))return}
+          const session = managedTabs.get(tabId)?.session
+          const sessionId = tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId
+          if (!session || !sessionId || !meetingPromptSettled(tabId)) return
+          const ready = await session.prepareMeetingDelivery(sessionId)
+          meetingDeliveryChecks.set(tabId, () => managedTabs.get(tabId)?.session === session
+            && tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId === sessionId && ready())
+        }))
+        meetingOutbox.pump()
+        for(const scope of new Set(deliveryViews().filter(d=>d.scope.startsWith('meeting/')).map(d=>d.scope))){
+          const id=scope.slice('meeting/'.length)
+          // Not before meetings are restored, when an open meeting only looks closed.
+          if(guestsReady&&deliveryJournal&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id)){
+            await meetingWrites.get(id)
+            if(!meetingWriteFailures.has(id)&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))settleClosedMeeting(deliveryJournal,scope)
+          }
+        }
+      } finally {
+        meetingDeliveryChecks.clear()
+        reportBlockedDeliveries()
+      }
+    } while (meetingPumpAgain)
+  })().finally(() => {
+    meetingPumpPromise = null
     if (meetingOutbox.hasWork()) scheduleMeetingPump()
-  }
+  })
+  meetingPumpPromise = run
+  return run
 }
 
 const meetingOutbox = new MeetingOutbox({
@@ -2846,7 +2857,15 @@ const meetingOutbox = new MeetingOutbox({
           meetingJournalTurns.set(tabId,{id:item.id,session,sessionId,meetingId:delivery.meetingId,stopping:false});return true
         },
         beforeEnter:()=>session.sessionBindingReady&&!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingJournalTurns.get(tabId)?.stopping===false&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId,
-        aborted:()=>{if(meetingJournalTurns.get(tabId)?.id===item.id){endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt()}},
+        aborted:()=>{
+          if(meetingJournalTurns.get(tabId)?.id!==item.id)return
+          clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
+          endMeetingJournal(tabId,false)
+          meetingOutbox.turnEnded(tabId)
+          meetingReader(tabId).cancelExpectedDesktopPrompt()
+          broadcastState()
+          scheduleMeetingPump(0)
+        },
       })
     }catch(error){endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();meetingDeliveryNotice(delivery,error);return {result:'busy',message:'This handoff is waiting; inspect Handoffs.'}}
   },
@@ -3243,10 +3262,30 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.${session.sessionBindingReady ? '' : ' Automatic meeting messages are paused: close the other retained CLI sessions in this tab to receive them safely.'}` }
       }
       case 'round':
-      case 'propose-close':
-        return { ok: true, message: meetingHub.post(tabId, command, request.text, request.changes) }
+      case 'propose-close': {
+        const current = meetingHub.meetingOf(tabId)
+        const hostSessionId = currentTab.lastSessionId
+        const scope = current ? `meeting/${current.id}` : null
+        const priorIds = scope && hostSessionId && deliveryJournal && !deliveryError
+          ? new Set(deliveryViews().filter(d => d.scope === scope && d.sessionId === hostSessionId && (d.state === 'queued' || d.state === 'uncertain')).map(d => d.id))
+          : null
+        const message = meetingHub.post(tabId, command, request.text, request.changes)
+        const pendingWrite = current ? meetingWrites.get(current.id) : undefined
+        if (current && scope && hostSessionId && priorIds && priorIds.size > 0) {
+          // Wait for the new round's durable snapshot before cancelling the prior digest, so a write failure or abrupt exit
+          // cannot leave a restored meeting in the old host round with an already-cancelled handoff.
+          await pendingWrite
+          if (deliveryJournal && !deliveryError && !meetingWriteFailures.has(current.id)) {
+            settleHostDelivery(deliveryJournal, scope, hostSessionId, priorIds)
+            broadcastState()
+          }
+        }
+        scheduleMeetingPump(0)
+        return { ok: true, message }
+      }
       case 'end':
         meetingHub.end(tabId)
+        scheduleMeetingPump(0)
         return { ok: true, message: 'The meeting is closed.' }
       case 'status':
         return { ok: true, message: meetingStatus(tabId) }
@@ -3280,6 +3319,8 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   const usage = reader.takeUsageChange()
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   if (usage) meetingHub.usage(tabId, usage)
+  // A live user.message proves the submitted prompt started a conversation turn rather than opening a slash-command dialog.
+  if (prompt) promptDrafts.get(tabId)?.commandOpensNoDialog()
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   endAutomatic(tabId,false)
   const journalRun=meetingJournalTurns.get(tabId)
@@ -4103,6 +4144,20 @@ async function restoreMeetings(): Promise<void> {
         const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote)
         return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
       })
+      if (tabs && deliveryJournal && !deliveryError) {
+        const view = meetingHub.views().find((meeting) => meeting.id === entry.name)
+        const hostSessionId = view ? tabsState.tabs.find((candidate) => candidate.id === view.hostTabId)?.lastSessionId : null
+        if (view && hostSessionId) {
+          settleSupersededHostDeliveries(deliveryJournal, {
+            id: view.id,
+            hostSessionId,
+            round: view.round,
+            stage: view.stage,
+            pauseReason: view.pauseReason,
+            outstandingHostDeliveryId: meetingHub.outstandingHostDeliveryId(view.id),
+          })
+        }
+      }
       for (const tabId of tabs ?? []) if (!GUEST_ID_PATTERN.test(tabId)) observe(startDormantTab(tabId), 'Could not start a session of a restored meeting')
     }
   } finally {
@@ -5295,8 +5350,22 @@ ipcMain.handle('desktop:delivery-action', (event, id: unknown, action: unknown):
   assertTrustedIpcSender(event)
   if (typeof id !== 'string' || !isValidSessionId(id) || (action !== 'retry' && action !== 'discard')) throw new Error('Invalid handoff action')
   if (!deliveryJournal || deliveryError) throw new Error('Handoff history is unavailable')
-  if (action === 'retry') deliveryJournal.retry(id)
-  else deliveryJournal.discard(id)
+  const target = deliveryJournal.get(id)
+  if (action === 'retry') {
+    deliveryJournal.retry(id)
+    const ref = target ? meetingDeliverySource(target) : null
+    const tabId = ref && target ? tabOfSession(target.sessionId) : null
+    if (ref && tabId && !meetingOutbox.hasDelivery(tabId, ref.deliveryId)) {
+      const outstanding = meetingHub.outstandingDelivery(tabId, ref.meetingId, ref.deliveryId)
+      if (outstanding) {
+        const { recovered: _recovered, ...fresh } = outstanding
+        meetingOutbox.enqueue(tabId, fresh)
+      }
+    }
+  } else {
+    deliveryJournal.discard(id)
+  }
+  scheduleMeetingPump(0)
   broadcastState()
 })
 ipcMain.handle('desktop:task-create', (event,tabId:unknown,title:unknown,replace:unknown):void=>{
