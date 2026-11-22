@@ -27,7 +27,7 @@ Read the full approving feedback and all other current valid issues. `approvedRe
 
 Stop on approval only when all of these hold:
 
-- It is a formal `APPROVED` review associated with the current head, or full comment/review text that clearly approves and explicitly names that exact SHA. Read the complete text; a quoted approval, word match, short prefix alone or “not approved yet” is insufficient. Request clarification if the covered revision is ambiguous.
+- It is a formal `APPROVED` review associated with the current head, or an inline PR comment that clearly approves and explicitly names that exact SHA. A review summary or conversation comment by itself does not satisfy the same-account approval gate. Read the complete text; a quoted approval, word match, short prefix alone or “not approved yet” is insufficient. Request clarification if the covered revision is ambiguous.
 - Nothing valid remains unfixed. If approving feedback also requests valid changes, fix, test, push and reply first. That push creates a new head: keep the supported loop active until a reviewer approves the new SHA.
 - Immediately before stopping, a fresh PR lookup confirms its head is still the approved SHA and no new material feedback invalidates the assessment. Do not infer approval of a newer head from a moved inline-comment anchor or `commitId` alone.
 
@@ -64,10 +64,10 @@ Use the CLI shell tool’s asynchronous mode so completion wakes this conversati
 Start exactly one background author-mode waiter, and do not poll the shell while it runs:
 
 ```powershell
-node $poll 170 $state --repo OWNER/REPO --wait 60 --max 3600
+node $poll 170 $state --repo OWNER/REPO --wait 60
 ```
 
-On JSON, handle, mark and rearm unless a stop condition is met. On `WAIT_TIMEOUT`, rearm; on `NO_CHANGE`, stay quiet. On
+On JSON, handle, mark and rearm unless a stop condition is met. Keep the quiet waiter running until a change or closure. On
 `ERROR`, report/reconcile the cause and restore only the authorized waiter. The script has child-call timeouts but does not
 independently recover a failed agent turn. Recovery needs a separate verified supervisor; never claim one without it. Check
 process identity and a recent successful scan after restarts or updates.

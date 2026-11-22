@@ -54,7 +54,7 @@ for local prompt identities and submission recovery.
 
 ## Starting from chat
 
-In the project’s Copilot sessions, type **fix-pr** in the author chat and **review-pr** in the reviewer chat. Both use the current branch’s pull request. You can also supply a PR number or URL. The reviewer uses an isolated checkout. Each session uses its usual tool permissions and the bundled workflow and watcher. Local sessions need Node.js 18+ and an authenticated GitHub CLI.
+In the project’s Copilot sessions, type **fix-pr** in the author chat and **review-pr** in the reviewer chat. Both use the current branch’s pull request. You can also supply a PR number or URL. For your own same-repository PR, the reviewer runs local checks in a detached checkout. For a fork or another author’s PR, it reviews the diff and asks in chat before executing PR code. Each session uses its usual tool permissions and the bundled workflow and watcher. Local sessions need Node.js 18+ and an authenticated GitHub CLI.
 
 The reviewer posts findings on GitHub. The author validates feedback, pushes fixes and replies on the thread. The reviewer checks the updated revision and posts inline approval for the exact commit. The author finishes when it verifies that approval and has addressed outstanding feedback.
 

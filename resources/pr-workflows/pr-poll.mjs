@@ -92,7 +92,11 @@ const list = (path, projection) => run('api', '--paginate', path, '--jq', `.[] |
   .split(/\r?\n/).filter(line => line.trim() !== '').map(line => JSON.parse(line))
 
 const repo = option('--repo') ?? run('repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner').trim()
-const meta = JSON.parse(run('pr', 'view', pr, '--repo', repo, '--json', 'state,headRefOid,baseRefName,baseRefOid'))
+const meta = JSON.parse(run('api', 'repos/' + repo + '/pulls/' + pr, '--jq',
+  '{state: (if .merged then "MERGED" else (.state | ascii_upcase) end), headRefOid: .head.sha, baseRefName: .base.ref, baseRefOid: .base.sha, authorId: .user.id, headRepoId: .head.repo.id, baseRepoId: .base.repo.id}'))
+// A detached checkout still runs code as the person. Check GitHub identities for this snapshot.
+const localChecksAllowed = flag('--snapshot') && Number.isSafeInteger(meta.baseRepoId) && meta.baseRepoId === meta.headRepoId
+  && Number.isSafeInteger(meta.authorId) && String(meta.authorId) === run('api', 'user', '--jq', '.id').trim()
 const reviews = list(`repos/${repo}/pulls/${pr}/reviews`, '{id, state, user: .user.login, body, commitId: .commit_id, url: .html_url}')
 // An inline comment's commit_id moves with the PR head; original_commit_id is the commit it was posted on.
 const inline = list(`repos/${repo}/pulls/${pr}/comments`, '{id, path, line, user: .user.login, body, commitId: .original_commit_id, inReplyTo: .in_reply_to_id, url: .html_url}')
@@ -161,6 +165,7 @@ const shape = item => (item.body ?? '').length > CLIP
   ? { ...item, body: `${item.body.slice(0, CLIP)}\n[cut at ${CLIP} characters: read the full text before deciding]`, truncated: true, length: item.body.length }
   : { ...item, body: item.body ?? '' }
 console.log(JSON.stringify({
+  ...(flag('--snapshot') ? { localChecksAllowed } : {}),
   prState: meta.state, headSha: meta.headRefOid, previousHead: state.headSha ?? null, headChanged, baseRef: meta.baseRefName, baseSha: meta.baseRefOid,
   approvedReview: newReviews.some(item => item.state === 'APPROVED'), approvalHint, approvalForHead,
   newReviews: newReviews.map(shape), newInline: newInline.map(shape), newIssue: newIssue.map(shape), highest: now,
