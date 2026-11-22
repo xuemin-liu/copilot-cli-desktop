@@ -27,12 +27,16 @@ export function prLoopRequest(text: string): PrLoopRequest | null {
   const line = first.trim().slice(0, 300)
   // The whole message is the person's consent, not just its first line: a "do not" anywhere withdraws it, and the
   // message must name exactly one pull request, so "watch PR 286 and fix PR 287" is not read as either.
-  const whole = text.slice(0, 2000)
-  if (!line || NEGATION.test(whole)) return null
-  const named = new Set<number>()
-  for (const match of whole.matchAll(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/(\d+)/gi)) named.add(Number(match[1]))
-  for (const match of whole.replace(/https:\/\/\S+/gi, ' ').matchAll(/\b(?:pr|pull\s+request)\s*#?\s*(\d{1,9})\b|#(\d{1,9})\b/gi)) named.add(Number(match[1] ?? match[2]))
-  if (named.size !== 1) return null
+  // A message too long to read whole is no request: a restriction past any cut could be missed.
+  if (text.length > 2000) return null
+  if (!line || NEGATION.test(text)) return null
+  // One PR only: URLs count by repository and number; bare numbers must agree with them, and with each other.
+  const urls = new Set<string>(), bare = new Set<number>()
+  for (const match of text.matchAll(/https:\/\/github\.com\/([^\s/]+\/[^\s/]+)\/pull\/(\d+)/gi)) urls.add(`${match[1]!.toLowerCase()}#${Number(match[2])}`)
+  for (const match of text.replace(/https:\/\/\S+/gi, ' ').matchAll(/\b(?:pr|pull\s+request)\s*#?\s*(\d{1,9})\b|#(\d{1,9})\b/gi)) bare.add(Number(match[1] ?? match[2]))
+  if (urls.size > 1) return null
+  const urlNumber = urls.size ? Number([...urls][0]!.split('#')[1]) : null
+  if (urlNumber !== null ? [...bare].some((n) => n !== urlNumber) : bare.size !== 1) return null
   const command = line.replace(OPENING, '')
   const verb = /^(review|fix|address|handle|resolve|watch)\b/i.exec(command)?.[1]?.toLowerCase()
   if (!verb) return null
