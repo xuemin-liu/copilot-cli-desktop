@@ -702,3 +702,29 @@ test('the store snapshot is complete before the spawn, even when the listing is 
     void writeFile
   } finally { await rm(home, { recursive: true, force: true }) }
 })
+
+test('stop runs a final discovery check so a fast restart still captures a newly stored session id', async () => {
+  const id = '99999999-9999-4999-8999-999999999999'
+  const pty = new FakePty()
+  let cancelled = false
+  let checked = 0
+  let releaseFind: (() => void) | null = null
+  const session = new PtySession({
+    file: 'agy', args: [], cwd: tmpdir(), spawnPty: fakeSpawnPty(pty),
+    sessionIdDiscovery: {
+      ready: async () => {},
+      find: () => new Promise<string | null>((resolve) => { releaseFind = () => resolve(null) }),
+      check: async () => { checked += 1; return id },
+      cancel: () => { cancelled = true; releaseFind?.() },
+    },
+  })
+  const announced: string[] = []
+  session.on('session-id', (discovered: string) => announced.push(discovered))
+  await session.start()
+  assert.equal(session.lastSessionId, null)
+  await session.stop()
+  assert.equal(cancelled, true)
+  assert.equal(checked, 1)
+  assert.equal(session.lastSessionId, id)
+  assert.deepEqual(announced, [id])
+})

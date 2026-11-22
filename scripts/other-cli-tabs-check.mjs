@@ -9,7 +9,8 @@ import { execFileSync, spawn } from 'node:child_process'
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const artifacts = resolve('test-results/other-cli-tabs')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
@@ -227,7 +228,7 @@ if (!process.versions.electron) {
     await click(`[aria-label="New session in ${project.name}"]`)
     await until('!!document.querySelector(".input-dialog select[name=\\"cli\\"]")', 'dialog for Antigravity')
     await chooseCli('antigravity')
-    await until(`document.querySelector('.input-dialog .fork-hint code')?.innerText === '/resume'`, 'resume guidance for Antigravity')
+    await until(`/Antigravity CLI itself/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'hint for Antigravity')
     press('Return')
     let antigravity = await tabWhere(tab => tab.cli === 'antigravity' && tab.status === 'running' && tab.processId && tab.sessionCwd, 'the Antigravity tab runs')
     assert.equal(antigravity.cliVersion, installed.antigravity.version)
@@ -309,9 +310,51 @@ if (!process.versions.electron) {
     await ui(`window.copilotDesktop.restartTab(${JSON.stringify(antigravity.id)})`)
     antigravity = await tabWhere(tab => tab.id === antigravity.id && tab.status === 'running' && tab.processId && tab.processId !== agyPid, 'Antigravity is restarted')
     line = commandLine(antigravity.processId)
-    assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without selecting a conversation')
+    assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without selecting a conversation before one is stored')
     assert.equal(JSON.parse(await readFile(mcpConfig, 'utf8')).mcpServers['copilot-meeting'].serverUrl, installedMcp)
     results.antigravityRestarted = line
+
+    // Antigravity stores a conversation (staged: its summary + db appear for the project folder) and the tab takes its id.
+    const agyId = '0199bbbb-cccc-4ddd-8eee-ffffffffffff'
+    const agyRoot = join(process.env.ANTIGRAVITY_GEMINI_DIR, 'antigravity-cli')
+    await mkdir(join(agyRoot, 'conversations'), { recursive: true })
+    await writeFile(join(agyRoot, 'conversations', `${agyId}.db`), '')
+    const summaryDb = new DatabaseSync(join(agyRoot, 'conversation_summaries.db'))
+    try {
+      summaryDb.exec(`CREATE TABLE IF NOT EXISTS conversation_summaries (
+        conversation_id TEXT PRIMARY KEY,
+        workspace_uris TEXT NOT NULL,
+        parent_conversation_id TEXT NOT NULL DEFAULT '',
+        nesting_depth INTEGER NOT NULL DEFAULT 0
+      )`)
+      summaryDb.prepare('INSERT OR REPLACE INTO conversation_summaries (conversation_id, workspace_uris, parent_conversation_id, nesting_depth) VALUES (?, ?, ?, ?)')
+        .run(agyId, JSON.stringify([pathToFileURL(repo).href]), '', 0)
+    } finally { summaryDb.close() }
+    antigravity = await tabWhere(tab => tab.cli === 'antigravity' && tab.lastSessionId === agyId, 'the Antigravity tab takes the id of the conversation agy stored')
+    await untilSaved(list => list.some(tab => tab.cli === 'antigravity' && tab.lastSessionId === agyId), 'the Antigravity conversation id is saved')
+    results.antigravitySessionFound = agyId
+
+    // Restart, stored Antigravity conversation: it launches with --conversation <id>.
+    const agySecondPid = antigravity.processId
+    const restartedAgy = ui(`window.copilotDesktop.restartTab(${JSON.stringify(antigravity.id)}).then(() => true, () => false)`)
+    resumed = null
+    for (let attempt = 0; attempt < 50 && !resumed; attempt++) {
+      const current = (await tabs()).find(tab => tab.id === antigravity.id)
+      if (current?.processId && current.processId !== agySecondPid) resumed = commandLine(current.processId)
+      if (!resumed && current?.status === 'crashed') break
+      if (!resumed) await delay(50)
+    }
+    await restartedAgy
+    if (resumed) {
+      assert.ok(resumed.includes(`--conversation ${agyId}`), `Antigravity resumes its conversation by id: ${resumed}`)
+    } else {
+      // The node.exe fixture exits immediately on unknown --conversation; verify it rejected that exact flag.
+      const crashed = await tabWhere(tab => tab.id === antigravity.id && tab.status === 'crashed' && tab.lastSessionId === agyId, 'node fixture exits on --conversation')
+      assert.equal(crashed.lastSessionId, agyId)
+      const terminalOutput = await ui(`window.copilotDesktop.getTabBacklog(${JSON.stringify(antigravity.id)})`).catch(() => '')
+      assert.match(String(terminalOutput), /--conversation/, 'Antigravity restart passed --conversation to the CLI')
+    }
+    results.antigravityResumed = resumed ?? `--conversation ${agyId}`
 
     // The Copilot tab is untouched by all this: still the only one with a permission preset.
     const all = await tabs()

@@ -612,7 +612,6 @@ export function App(): JSX.Element {
               <p className="fork-hint">
                 The tab is {sessionCliLabel(newSessionCli)} itself, in this project’s folder, with its own sign-in, settings and approvals.
                 Permission presets, side chats and tasks are for Copilot sessions; it can still join a meeting as an outside agent.
-                {newSessionCli === 'antigravity' && <> Use <code>/resume</code> in the terminal to reopen an Antigravity conversation.</>}
                 {newSessionExisting !== null && <> It starts in the existing worktree <code>{newSessionExisting}</code>, on whatever it has checked out.</>}
               </p>
             )}
