@@ -98,7 +98,7 @@ permissions, which govern its edits, commits and pushes, and, unlike a follow-up
   queued, in flight or unsettled. A changes-requested review after it, a dismissal or a push clears it.
 - Both PR loops read their PR every twenty seconds, so a review comment reaches the author, and a push reaches the
   reviewer, within about twenty seconds. Reading uses no model; a model runs only when there is something to act on.
-- Limits: three continuations per PR head and thirty in all; **Allow ten more** extends it up to a hundred. A spent
+- Each loop starts with three continuations per PR head and thirty in total. **Allow ten more** increases the total allowance and, when the current head has reached its own allowance, increases that allowance too. The ceiling is one hundred. A spent
   loop still notices approvals and merges. Each turn may run for thirty minutes. CI is read only when you ask for it.
 
 ## Review loop (PR reviewer)
