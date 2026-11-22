@@ -6,7 +6,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue } from './pr-review-queue.js'
-import { cloneForReview, firstReviewPrompt, makeReviewerArea, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, makeReviewerArea, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -865,6 +865,8 @@ async function prReadView(grant:FollowupGrant):Promise<string>{
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
 /** Review loops seen running in this run: when one ends, the person is told how the PR left review. */
 const runningReviews=new Set<string>()
+/** Ended reviews whose outcome is being read now: one read at a time each. */
+const reportingReviews=new Set<string>()
 /**
  * A review loop ends when its PR is merged or closed; nothing is posted after that (the post path checks the PR is
  * open). The person is told if it merged at a head the loop had not approved, or with the last review's findings open.
@@ -873,18 +875,18 @@ async function reportEndedReviews():Promise<void>{
   for(const grant of followups?.list()??[]){
     if(grant.role!=='reviewer')continue
     if(grant.enabled){runningReviews.add(grant.id);continue}
-    if(!runningReviews.delete(grant.id)||grant.health!=='closed')continue
-    const pull=await (await githubCliApi(app.getPath('userData')))(`repos/${grant.repository}/pulls/${grant.number}`).catch(()=>null) as {merged?:unknown;head?:{sha?:unknown}}|null
-    const merged=pull?.merged===true,head=typeof pull?.head?.sha==='string'?pull.head.sha:null
-    const posts=(prPosts?.list()??[]).filter(r=>r.grantId===grant.id&&r.state==='posted'&&(r.kind==='review'||r.kind==='approval')).sort((a,b)=>a.createdAt-b.createdAt)
-    const last=posts.at(-1)
-    const short=(sha:string|null|undefined):string=>sha?sha.slice(0,12):'an unknown head'
-    let note:string
-    if(!merged)note=`PR #${grant.number} was closed without merging; its review loop ended.`
-    else if(last?.kind==='approval'&&last.head===head)note=`PR #${grant.number} was merged at the head its review loop approved (${short(head)}).`
-    else if(last?.kind==='review')note=`PR #${grant.number} was merged at ${short(head)} while the findings of its last review (on ${short(last.head)}) were still open.`
-    else note=`PR #${grant.number} was merged at ${short(head)}, which its review loop had not approved${last?.kind==='approval'?` (it approved ${short(last.head)})`:''}.`
-    workflowNotice=note;broadcastState()
+    if(!runningReviews.has(grant.id))continue
+    if(grant.health!=='closed'){runningReviews.delete(grant.id);continue}
+    if(reportingReviews.has(grant.id))continue
+    reportingReviews.add(grant.id)
+    try{
+      const pull=await (await githubCliApi(app.getPath('userData')))(`repos/${grant.repository}/pulls/${grant.number}`).catch(()=>null)
+      const note=endedReviewNote(grant.number,pull,(prPosts?.list()??[]).filter(r=>r.grantId===grant.id&&r.state==='posted'))
+      // A failed or unclear read is no answer: the next pass (within a minute) asks GitHub again.
+      if(!note)continue
+      runningReviews.delete(grant.id)
+      workflowNotice=note;broadcastState()
+    }finally{reportingReviews.delete(grant.id)}
   }
 }
 /** Review loops whose last post was an approval held for missing checks, and the head it named. */

@@ -188,3 +188,53 @@ test('a paused project starts nothing until it resumes', async () => {
     await fresh.tick(); assert.deepEqual(started, [url(12)])
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('requested PRs that appear together start one per pass, none dropped', () => fixture(async (h) => {
+  await h.queue.expect('project', 'owner/repo', 30)
+  await h.queue.expect('project', 'owner/repo', 31)
+  h.open.push(h.pr(30), h.pr(31))
+  await h.queue.tick()
+  assert.deepEqual(h.started, [url(30)])
+  await h.queue.tick()
+  assert.deepEqual(h.started, [url(30), url(31)], 'the second request was kept for the next pass')
+}))
+
+test('Stop or a pause while a start is being recorded holds that start', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pr-review-queue-start-'))
+  let now = T0, paused = false, holdNext = false
+  const hold: { gate: (() => void) | null } = { gate: null }
+  const started: string[] = [], pulls: ReviewCandidate[] = []
+  const queue = new PrReviewQueue(join(dir, 'q.json'), {
+    now: () => now, paused: () => paused,
+    candidates: async () => ({ repository: 'owner/repo', pulls: structuredClone(pulls) }),
+    start: async (target) => { started.push(target) },
+    write: async (path, text) => {
+      if (holdNext) { holdNext = false; await new Promise<void>((resolve) => { hold.gate = resolve }) }
+      const { writeFile } = await import('node:fs/promises'); await writeFile(path, text)
+    },
+  })
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20))
+  try {
+    await queue.enable('project')
+    now += 1000; pulls.push({ number: 40, title: '', author: 'me', url: url(40), reason: null, createdAt: now })
+    holdNext = true
+    const tick = queue.tick()
+    await settle()
+    assert.ok(hold.gate, 'the start is being recorded')
+    await queue.disable('project')
+    hold.gate!(); await tick
+    assert.deepEqual(started, [], 'Stop came while the start was recorded: it never runs')
+    // A pause at that moment holds the start for the next pass instead of losing it.
+    await queue.enable('project')
+    now += 1000; pulls.push({ number: 41, title: '', author: 'me', url: url(41), reason: null, createdAt: now })
+    holdNext = true; hold.gate = null
+    const paused1 = queue.tick()
+    await settle()
+    paused = true
+    hold.gate!(); await paused1
+    assert.deepEqual(started, [])
+    paused = false
+    await queue.tick()
+    assert.deepEqual(started, [url(41)])
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

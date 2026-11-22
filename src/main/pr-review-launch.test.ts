@@ -4,7 +4,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync
 import { basename, join, resolve } from 'node:path'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { cloneForReview, createReviewerArea, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
 
 /** "GitHub" (upstream, with refs/pull/<n>/head) and the person's project, a clone of it on its own branch. */
 function repos(f: GitFixture, number = 7): { upstream: string; project: string; base: string; head: string } {
@@ -222,4 +222,16 @@ test('a review is reserved before its folder exists; a second start of it is ref
     await reread.reserve({ ...record, launchId: basename(other.root), root: other.root, checkout: other.checkout, ref: other.ref })
     await assert.rejects(reread.reserve({ ...record, launchId: 'not-a-uuid' }), /Invalid/)
   } finally { f.cleanup() }
+})
+
+test('a merged or closed PR is reported only from a clear answer; a failed read is asked again', () => {
+  const a = 'a'.repeat(40), b = 'b'.repeat(40)
+  assert.equal(endedReviewNote(5, null, []), null, 'the read failed')
+  assert.equal(endedReviewNote(5, { state: 'open', merged: false }, []), null)
+  assert.equal(endedReviewNote(5, { state: 'closed' }, []), null, 'no merged flag')
+  assert.match(endedReviewNote(5, { state: 'closed', merged: false, head: { sha: a } }, []) ?? '', /closed without merging/)
+  assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'approval', head: a, createdAt: 2 }, { kind: 'review', head: b, createdAt: 1 }]) ?? '', /head its review loop approved/)
+  assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'approval', head: b, createdAt: 1 }, { kind: 'review', head: a, createdAt: 2 }]) ?? '', /findings of its last review/)
+  assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'approval', head: b, createdAt: 1 }]) ?? '', /had not approved \(it approved bbbbbbbbbbbb\)/)
+  assert.match(endedReviewNote(5, { state: 'closed', merged: true, head: { sha: a } }, [{ kind: 'reply', head: a, createdAt: 1 }]) ?? '', /had not approved\.$/)
 })

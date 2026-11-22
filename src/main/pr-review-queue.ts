@@ -37,6 +37,8 @@ export interface QueueHost {
   /** Automatic work paused for this project (or everywhere): the queue starts nothing, and catches up on resume. */
   paused?(profileId: string): boolean
   now?: () => number
+  /** Saves the queue file; tests hold it to reach the moment between recording a start and making it. */
+  write?: (path: string, text: string) => Promise<void>
 }
 
 /** How long a "review PR N" waits for PR N to exist. */
@@ -136,9 +138,10 @@ export class PrReviewQueue {
           if (expected.until <= now) { done.add(expected.number); note = `PR #${expected.number} did not appear within the hour.`; continue }
           const found = listing.pulls.find((candidate) => candidate.number === expected.number)
           if (!found) continue
-          done.add(expected.number)
+          // Only the one started now leaves the list: the others start on later passes, one at a time, and one that
+          // does not qualify yet (already in review, say) keeps waiting until its hour is up.
           if (found.reason !== null) note = `#${found.number}: ${found.reason}`
-          else pick ??= found
+          else if (!pick) { pick = found; done.add(found.number) }
         }
         const fresh = latest.enabled
           ? listing.pulls.filter((candidate) => !latest.seen.includes(candidate.number) && candidate.createdAt >= latest.activatedAt).sort((a, b) => a.number - b.number)
@@ -153,6 +156,14 @@ export class PrReviewQueue {
         if (!recorded) continue
         await this.save()
         if (!started) continue
+        // The save awaited: a Stop that came meanwhile wins, and a pause holds the start for the next pass.
+        if (this.revision(profileId) !== revision) continue
+        if (this.host.paused?.(profileId)) {
+          const wasExpected = latest.expected.find((e) => e.number === started.number)
+          if (this.apply(profileId, revision, (state) => ({ ...state, seen: state.seen.filter((n) => n !== started.number),
+            expected: wasExpected ? [...state.expected, wasExpected] : state.expected }))) await this.save()
+          continue
+        }
         try { await this.host.start(started.url, profileId) } catch (error) {
           if (this.apply(profileId, revision, (state) => ({ ...state, lastError: `#${started.number}: ${message(error)}` }))) await this.save()
         }
@@ -160,7 +171,7 @@ export class PrReviewQueue {
     } finally { this.busy = false }
   }
 
-  private async save(): Promise<void> { await writeFileAtomic(this.path, JSON.stringify(this.state)) }
+  private async save(): Promise<void> { await (this.host.write ?? writeFileAtomic)(this.path, JSON.stringify(this.state)) }
 }
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : 'failed').slice(0, 300)
