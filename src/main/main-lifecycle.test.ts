@@ -4198,3 +4198,58 @@ test('restoring a meeting whose new-round snapshot landed before journal settlem
   await h.pumpMeetingDelivery()
   assert.ok(hostSpawn.written.slice(beforeClose).some(chunk => chunk.includes('All 1 reviewers agreed.')), 'closing agreed message reaches host automatically without being blocked by superseded round-1 digest')
 }))
+
+test('an overlapping pumpMeetingOutbox call coalesces and delivers work queued while the first pass is awaiting prepareMeetingDelivery', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const firstState = await h.createMain()
+  const first = firstState.activeTabId!
+  const firstSessionId = firstState.tabs.find(tab => tab.id === first)!.lastSessionId!
+  const secondState = await h.request('desktop:create-tab', 'new', profile.id)
+  const second = secondState.activeTabId!
+  const secondSessionId = secondState.tabs.find(tab => tab.id === second)!.lastSessionId!
+  const firstSpawn = h.spawns[0]!
+  const secondSpawn = h.spawns[1]!
+
+  for (const [tabId, sessionId, pid, spawn] of [
+    [first, firstSessionId, 7710, firstSpawn],
+    [second, secondSessionId, 7711, secondSpawn],
+  ] as const) {
+    await mkdir(dirname(sessionPath(sessionId)), { recursive: true })
+    await writeFile(sessionPath(sessionId), line('session.start', { sessionId, startTime: new Date().toISOString() }))
+    await writeFile(join(dirname(sessionPath(sessionId)), `inuse.${pid}.lock`), '')
+    h.configureBinding(tabId, pid, [pid])
+    await h.refreshRecords(tabId)
+    spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  }
+  await pause(1600)
+
+  // Hold the first pump inside first's prepareMeetingDelivery() after pass 1 has already captured readyTabs().
+  const reader = h.bindingReader(first)
+  const originalRead = reader.read.bind(reader)
+  let readStarted!: () => void
+  const started = new Promise<void>(resolve => { readStarted = resolve })
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  reader.read = async (...args) => {
+    readStarted()
+    await gate
+    reader.read = originalRead
+    return originalRead(...args)
+  }
+
+  h.queueMeetingDelivery(first, 'post', 'First tab delivery')
+  const firstPump = h.pumpMeetingDelivery()
+  await started
+
+  // Queue work for the second tab and start an overlapping pump while pass 1 is still suspended.
+  h.queueMeetingDelivery(second, 'post', 'Second tab delivery queued mid-pump')
+  const secondPump = h.pumpMeetingDelivery()
+  releaseRead()
+  await Promise.all([firstPump, secondPump])
+
+  assert.ok(firstSpawn.written.some(chunk => chunk.includes('First tab delivery')), 'first pass delivered to the first tab')
+  assert.ok(secondSpawn.written.some(chunk => chunk.includes('Second tab delivery queued mid-pump')), 'overlapping pump coalesced and delivered mid-pump work without a third pump')
+}))
