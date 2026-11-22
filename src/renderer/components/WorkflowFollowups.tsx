@@ -12,7 +12,7 @@ function FixLoopStatus({grant,posts,run,pending}:{grant:FollowupGrant;posts:read
     {grant.health==='approved'&&<p>Approved at {short(grant.head)}. The loop has ended; Desktop does not merge the PR.</p>}
     {approval&&grant.enabled&&<div className="workflow-approval">
       <p>{approval.kind==='review'?'A formal approval':'A comment'} approves head {short(approval.head)} (base {short(approval.base)}). GitHub does not record which base an outside review saw, so confirm it yourself before the loop ends.</p>
-      <button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.confirmFollowupApproval(grant.id))}>Confirm approval</button>
+      <button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.confirmFollowupApproval(grant.id,approval))}>Confirm approval</button>
     </div>}
     {grant.health==='limit'&&grant.enabled&&<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.extendFollowup(grant.id))}>Allow ten more</button>}
     {posts.map(post=>post.state==='uncertain'

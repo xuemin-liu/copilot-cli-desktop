@@ -5553,10 +5553,12 @@ ipcMain.handle('desktop:pr-review-start',async(event,url:unknown,consent:unknown
   if(typeof url!=='string'||url.length>300||consent!==true)throw new Error('Confirm that the review session may run this PR\'s code in its sandbox')
   await startPrReview(url)
 })
-ipcMain.handle('desktop:followup-confirm-approval',async(event,id:unknown):Promise<void>=>{
+ipcMain.handle('desktop:followup-confirm-approval',async(event,id:unknown,shown:unknown):Promise<void>=>{
   assertTrustedIpcSender(event)
   if(typeof id!=='string'||!isValidSessionId(id)||!followups)throw new Error('Unknown enrollment')
-  await followups.confirmApproval(id);broadcastState()
+  const value=shown&&typeof shown==='object'&&!Array.isArray(shown)?shown as Record<string,unknown>:null
+  if(!value||(value.kind!=='review'&&value.kind!=='text')||typeof value.head!=='string'||typeof value.base!=='string'||typeof value.ref!=='string'||typeof value.at!=='number')throw new Error('Show the approval again before confirming it')
+  await followups.confirmApproval(id,{kind:value.kind,head:value.head,base:value.base,ref:value.ref,at:value.at});broadcastState()
 })
 ipcMain.handle('desktop:followup-extend',(event,id:unknown):void=>{
   assertTrustedIpcSender(event)
