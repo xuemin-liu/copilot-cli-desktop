@@ -151,3 +151,24 @@ test('a receipted approval ends the fix loop without the person', () => fixture(
   h.close(); h.advance(); await h.controller.tick()
   assert.equal(h.controller.grant(review.id)?.health, 'closed')
 }))
+
+test('a review loop stopped while its review was being checked posts nothing', () => fixture(async (h) => {
+  const grant = await enrollReview(h)
+  let live = true
+  const host = h.posts['host' as never] as { api: (path: string) => Promise<unknown> }
+  const api = host.api
+  host.api = async (path: string) => { if (path === 'user') live = false; return api(path) }
+  await assert.rejects(h.posts.review(h.controller.grant(grant.id), 'reviewer-session', { body: 'Findings.', comments: [], approve: false }, () => {}, () => live), /stopped or changed/)
+  assert.equal(h.posts.list().filter((r) => r.state === 'posted').length, 0)
+  assert.equal(h.posts.settled(grant.id), true)
+}))
+
+test('a receipted approval of an older base does not end the fix loop', () => fixture(async (h) => {
+  const review = await enrollReview(h)
+  const fix = await h.controller.enroll(h.authorTask.id, URL, ['reviewer'], false, false, { role: 'author' })
+  await h.posts.review(h.controller.grant(review.id), 'reviewer-session', { body: `Approved at ${first}\nRan the suite.`, comments: [], approve: true }, () => {})
+  h.moveBase()
+  h.advance(); await h.controller.tick()
+  assert.equal(h.controller.grant(fix.id)?.enabled, true, 'the approval covered the old base only')
+  assert.equal(h.journal.list().filter((d) => d.scope === fix.id && d.state !== 'cancelled').length, 1, 'the approval text reaches the author as feedback instead')
+}))

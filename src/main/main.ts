@@ -3331,7 +3331,8 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         try {
           const receipt = await prPosts.review(grant, request.sessionId, { body: typeof fields.body === 'string' ? fields.body : '',
             comments: (Array.isArray(fields.comments) ? fields.comments : fields.comments === undefined ? [] : null) as never, approve: fields.approve === true },
-          (head, base) => { if (grant) followups?.markReviewed(grant.id, head, base) })
+          (head, base) => { if (grant) followups?.markReviewed(grant.id, head, base) },
+          () => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'reviewer' && current.sessionId === request.sessionId && followups?.authorized(current)) })
           broadcastState()
           return { ok: true, message: `Posted the ${receipt.kind === 'approval' ? 'approval' : 'review'} of ${receipt.head}${receipt.url ? `: ${receipt.url}` : '.'}` }
         } catch (error) {

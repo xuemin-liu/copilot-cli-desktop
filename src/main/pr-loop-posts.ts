@@ -158,7 +158,7 @@ export class PrLoopPosts {
    * A reviewer's review or approval of the head the desktop checked out for it. `onPosted` records the reviewed head
    * and base on the grant. An approval names that head in its first words and carries no findings.
    */
-  async review(grant: FollowupGrant | null, sessionId: string, request: ReviewRequest, onPosted: (head: string, base: string) => void): Promise<PostReceipt> {
+  async review(grant: FollowupGrant | null, sessionId: string, request: ReviewRequest, onPosted: (head: string, base: string) => void, authorized: () => boolean = () => true): Promise<PostReceipt> {
     if (!grant || !grant.enabled || grant.role !== 'reviewer') throw new PrPostRejected('This session has no active review loop.')
     if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the review loop for that PR.')
     if (this.busy.has(grant.id)) throw new PrPostRejected('Another review of this loop is being posted; try again in a moment.')
@@ -195,11 +195,14 @@ export class PrLoopPosts {
         if (!body.startsWith(`Approved at ${head}`)) throw new PrPostRejected(`An approval starts with "Approved at ${head}".`)
       } else if (approves || /Approved at [a-f0-9]{7,}/.test(body)) throw new PrPostRejected('A review with findings never approves. Approve separately with -Approve once nothing is left open.')
 
+      // As for replies: the loop may have been stopped, or the session lost its grant, during the lookups above.
+      if (!authorized()) throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.')
       const receipt: PostReceipt = { id: randomUUID(), grantId: grant.id, sessionId, repository: grant.repository, number: grant.number,
         kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base }
       const posted = `${body}\n\n${receiptTag(receipt.id)}`
       receipt.bodyHash = sha256(posted)
       this.save(receipt)
+      if (!authorized()) { this.save({ ...receipt, state: 'dismissed' }); throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.') }
       let answer: unknown
       try {
         answer = await this.host.write('POST', `repos/${grant.repository}/pulls/${grant.number}/reviews`,
