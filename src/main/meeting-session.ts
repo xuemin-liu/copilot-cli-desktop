@@ -276,6 +276,7 @@ Pull request loops: when the person asks you, in their own message, to review a 
 
 const PR_CHAT_INSTRUCTIONS = `
 When the person asks for fix-pr or review-pr (including /fix-pr, /review-pr, "fix PR 42" or "review PR 287"), perform that role in this conversation. Invoke the matching fix-pr or review-pr skill and follow its instructions, including its bundled poller. A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
+If CLI discovery selects a personal copy or the skill is unavailable, read the packaged workflow with the shell: ${process.platform === 'win32' ? 'node "$env:COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"' : 'node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"'} --guide <fix-pr or review-pr>. Follow that output in this chat.
 For an explicit request to start or stop repository-wide discovery, use the meeting helper's pr-start command.
 `
 

@@ -27,12 +27,23 @@
 //
 // Approvals (author mode): `approvedReview` and `approvalHint` say an approval arrived, for ANY commit. `approvalForHead` is true
 // only when one names the current head: a formal APPROVED review whose commit is the head, or an approving comment whose text
-// contains the head sha (7+ hex characters of it). Each review and comment carries `commitId` (inline: the commit it was posted on).
+// contains the full head SHA. Each review and comment carries `commitId` (inline: the commit it was posted on).
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 
 const argv = process.argv.slice(2)
+// CLI skill discovery can prefer a pre-existing personal copy. Return the packaged guide for plain chat commands.
+if (argv[0] === '--guide') {
+  const role = argv[1]
+  if (argv.length !== 2 || !['review-pr', 'fix-pr'].includes(role)) {
+    console.error('usage: pr-poll.mjs --guide review-pr|fix-pr')
+    process.exit(2)
+  }
+  const guide = new URL('./skills/' + role + '/SKILL.md', import.meta.url)
+  writeFileSync(1, readFileSync(guide))
+  process.exit(0)
+}
 const flag = name => argv.includes(name)
 const option = name => { const index = argv.indexOf(name); return index >= 0 ? argv[index + 1] : undefined }
 const positional = argv.filter((value, index) => !value.startsWith('--') && !['--repo', '--marker', '--through', '--head', '--max', '--wait'].includes(argv[index - 1]))
@@ -142,8 +153,8 @@ const approving = item => item.state === 'APPROVED'
   || (wording.test(item.body ?? '') && !/\b(not|n't|cannot|can't|no longer)\s+(yet\s+)?approv/i.test(item.body ?? ''))
 const author = !flag('--invert')
 const approvalHint = author && [...newReviews, ...newInline, ...newIssue].some(approving)
-// The approval must name this head: a formal review on it, or the sha (7+ hex characters of it) in the approving text.
-const namesHead = item => (item.body?.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).some(token => meta.headRefOid.startsWith(token.toLowerCase()))
+// The approval must name this head: a formal review on it, or its full SHA in the approving text.
+const namesHead = item => (item.body?.match(/\b[0-9a-f]{40,64}\b/gi) ?? []).some(token => meta.headRefOid === token.toLowerCase())
 const approvalForHead = author && [...newReviews, ...newInline, ...newIssue].some(item => approving(item)
   && ((item.state === 'APPROVED' && item.commitId === meta.headRefOid) || namesHead(item)))
 const shape = item => (item.body ?? '').length > CLIP

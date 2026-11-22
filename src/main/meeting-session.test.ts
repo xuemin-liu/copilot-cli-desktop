@@ -254,7 +254,9 @@ test('ordinary local chats discover both packaged PR skills and preserve existin
     assert.equal(env.COPILOT_SKILLS_DIRS, 'existing,' + join(tools, 'skills'))
     assert.equal(env.COPILOT_DESKTOP_PR_STATE, state)
     for (const name of ['fix-pr', 'review-pr']) {
-      assert.match(await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8'), new RegExp('name: ' + name))
+      const guide = await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8')
+      assert.match(guide, new RegExp('name: ' + name))
+      assert.equal(execFileSync(process.execPath, [join(tools, 'pr-poll.mjs'), '--guide', name], {encoding: 'utf8'}), guide)
     }
     assert.ok((await stat(join(tools, 'pr-poll.mjs'))).isFile())
     const remote = await prepareMeetingSessionEnvironment(directory, control, {}, {...capability, remote: true}, {tools, state})
