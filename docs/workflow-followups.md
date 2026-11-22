@@ -58,7 +58,7 @@ In a Copilot tab, ask in your own words, as you would start a meeting:
 
 - **"review PR 287"** (or a PR URL): Desktop starts a sandboxed review loop for it in a new tab. A PR that does not
   exist yet (you are creating it in another tab) is checked for every thirty seconds for an hour and reviewed when it
-  opens.
+  opens. Once that review starts, Desktop also reviews your new PRs in this project. Say **"stop reviewing new PRs"** to turn off discovery.
 - **"review my PR"**: your one open PR here is reviewed; with several, Desktop lists them and you say which; with none,
   it waits for your next new PR as below.
 - **"review new PRs in this repo"**: each new pull request of yours in this project gets a review loop as it opens, like
@@ -98,7 +98,7 @@ permissions, which govern its edits, commits and pushes, and, unlike a follow-up
   queued, in flight or unsettled. A changes-requested review after it, a dismissal or a push clears it.
 - Both PR loops read their PR every twenty seconds, so a review comment reaches the author, and a push reaches the
   reviewer, within about twenty seconds. Reading uses no model; a model runs only when there is something to act on.
-- Limits: three continuations per PR head and thirty in all; **Allow ten more** extends it up to a hundred. A spent
+- Each loop starts with three continuations per PR head and thirty in total. **Allow ten more** increases the total allowance and, when the current head has reached its own allowance, increases that allowance too. The ceiling is one hundred. A spent
   loop still notices approvals and merges. Each turn may run for thirty minutes. CI is read only when you ask for it.
 
 ## Review loop (PR reviewer)

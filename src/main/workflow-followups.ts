@@ -23,6 +23,7 @@ export interface FollowupGrant {
   /** The GitHub account the grant was enrolled with; every post checks it again. */
   accountId?: number
   /** Continuations this grant may use in all. Absent: ten, as before PR loops. */
+  headLimits?: Record<string, number>
   limit?: number
   /** An approval of the current head the person has not confirmed yet. Cleared when the head moves. */
   approval?: ApprovalEvidence|null
@@ -246,8 +247,10 @@ export class WorkflowFollowups {
     if(!grant||roleOf(grant)==='follow-up')throw new Error('Only a PR loop can be given more continuations')
     if(!grant.enabled)throw new Error('This loop has ended')
     const limit=Math.min(PR_LOOP_MAX_LIMIT,limitOf(grant)+PR_LOOP_EXTENSION)
-    if(limit===limitOf(grant))throw new Error('This loop has reached its ceiling')
-    const next={...grant,limit,health:grant.health==='limit'?'watching' as const:grant.health}
+    const headLimit=grant.headLimits?.[grant.head]??3
+    const extendHead=(grant.headCounts[grant.head]??0)>=headLimit && headLimit<PR_LOOP_MAX_LIMIT && grant.total<limit
+    if(limit===limitOf(grant)&&!extendHead)throw new Error('This loop has reached its ceiling')
+    const next={...grant,limit,...(extendHead?{headLimits:{...grant.headLimits,[grant.head]:Math.min(PR_LOOP_MAX_LIMIT,headLimit+PR_LOOP_EXTENSION)}}:{}),health:grant.health==='limit'?'watching' as const:grant.health}
     this.save(next);return next
   }
   /**
@@ -273,6 +276,11 @@ export class WorkflowFollowups {
     }
     if(this.host.journal.list().some(d=>d.scope===id&&['queued','submitting','submitted','uncertain'].includes(d.state)))throw new Error('Feedback for this loop is still queued or in progress')
     if(this.host.postsSettled?.(id)===false)throw new Error('A reply of this loop has not been confirmed on GitHub yet')
+    if(snapshot.feedback.some(event=>this.eligible(event,current,snapshot.head)
+      &&current.seen[event.source]!==event.version&&(event.source in current.seen||event.at>=Math.floor(current.activatedAt/1000)*1000))){
+      this.nextPoll.delete(id)
+      throw new Error('New or edited feedback needs assessment before confirming approval.')
+    }
     const next={...current,enabled:false,health:'approved' as const,head:snapshot.head}
     this.save(next);this.nextPoll.delete(id);return next
   }
@@ -398,13 +406,13 @@ export class WorkflowFollowups {
       const known=event.source in next.seen
       if(tracked>=1000&&!known){next.health='source-too-large';break}
       if(!known)tracked++
-      if((!known&&event.at<next.activatedAt)||!this.eligible(event,next,snapshot.head)||accepted.has(this.eventKey(event.source,event.version))){next.seen[event.source]=event.version;continue}
+      if((!known&&event.at<Math.floor(next.activatedAt/1000)*1000)||!this.eligible(event,next,snapshot.head)||accepted.has(this.eventKey(event.source,event.version))){next.seen[event.source]=event.version;continue}
       candidates.push(event)
     }
     const limit=limitOf(next)
     if(loop&&candidates.length&&next.total>=limit)next.health='limit'
     for(let offset=0;offset<candidates.length&&next.health!=='limit';offset+=10){
-      if(next.total>=limit||(next.headCounts[snapshot.head]??0)>=3){next.health='limit';break}
+      if(next.total>=limit||(next.headCounts[snapshot.head]??0)>=(next.headLimits?.[snapshot.head]??3)){next.health='limit';break}
       const events=candidates.slice(offset,offset+10)
       try{this.host.journal.enqueue(githubBatchInput(next.sessionId,next.id,task.request,snapshot.head,events,undefined,this.batchRole(next)))}catch(error){if(!(error instanceof WorkflowDeliveryRejected))throw error;next.health='source-too-large';break}
       for(const event of events)next.seen[event.source]=event.version
@@ -432,7 +440,7 @@ export class WorkflowFollowups {
     }
     const headCounts={...grant.headCounts},counts=new Map<string,number>()
     for(const head of reservations.values())counts.set(head,(counts.get(head)??0)+1)
-    for(const [head,count]of counts)headCounts[head]=Math.min(3,Math.max(headCounts[head]??0,count))
+    for(const [head,count]of counts)headCounts[head]=Math.min(grant.headLimits?.[head]??3,Math.max(headCounts[head]??0,count))
     const total=Math.min(limitOf(grant),Math.max(grant.total,reservations.size))
     if(total===grant.total&&JSON.stringify(headCounts)===JSON.stringify(grant.headCounts))return grant
     const recovered={...grant,total,headCounts};this.save(recovered);return recovered
@@ -595,7 +603,9 @@ export class WorkflowFollowups {
       ||typeof grant.head!=='string'||!/^[a-f0-9]{40,64}$/.test(grant.head)
       ||!Number.isInteger(grant.scopeRevision)||grant.scopeRevision<1||!grant.headCounts||typeof grant.headCounts!=='object'
       ||!Object.entries(grant.seen).every(([key,version])=>key.startsWith('github/')&&key.length<=256&&typeof version==='string'&&/^[a-f0-9]{64}$/.test(version))
-      ||!Object.entries(grant.headCounts).every(([key,count])=>/^[a-f0-9]{40,64}$/.test(key)&&Number.isInteger(count)&&count>=0&&count<=3)
+      ||(grant.headLimits!==undefined&&(!grant.headLimits||typeof grant.headLimits!=='object'||Array.isArray(grant.headLimits)
+        ||!['reviewer','author'].includes(grant.role??'')||!Object.entries(grant.headLimits).every(([head,limit])=>/^[a-f0-9]{40,64}$/.test(head)&&Number.isInteger(limit)&&limit>=3&&limit<=PR_LOOP_MAX_LIMIT)))
+      ||!Object.entries(grant.headCounts).every(([key,count])=>/^[a-f0-9]{40,64}$/.test(key)&&Number.isInteger(count)&&count>=0&&count<=(grant.headLimits?.[key]??3))
       ||!['watching','paused','closed','source-unavailable','needs-person','limit','scope-changed','source-too-large','approval-pending','approved'].includes(grant.health)
       ||!this.validLoopFields(grant)
       ||!['absent','pending','failed','complete'].includes(grant.checks))throw new Error('Invalid stored follow-up grant')
