@@ -42,11 +42,12 @@ export function ConsoleErrorsIcon(): JSX.Element {
   </Icon>
 }
 
-/** Window with an address bar: the debug browser. */
+/** Globe: open the debug browser. */
 export function BrowserIcon(): JSX.Element {
   return <Icon>
-    <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
-    <path d="M1.75 6h12.5M4 4.4h.01M6 4.4h.01" />
+    <circle cx="8" cy="8" r="6.25" />
+    <ellipse cx="8" cy="8" rx="2.75" ry="6.25" />
+    <path d="M1.75 8h12.5" />
   </Icon>
 }
 
