@@ -1,5 +1,13 @@
 export interface TerminalOutputChunk { data: string; sequence: number }
 
+/**
+ * The history snapshot is rebuilt from output split into lines, so every line ends in a bare LF. The terminal does not
+ * turn LF into CR LF (live ConPTY output relies on that), so a replayed line would start where the last one ended.
+ */
+export function historyLineEndings(data: string): string {
+  return data.replace(/\r?\n/g, '\r\n')
+}
+
 /** Join an asynchronous history snapshot to the ordered live output stream. */
 export class TerminalReplay {
   private sequence: number | null = null

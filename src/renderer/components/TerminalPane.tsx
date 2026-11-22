@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { OperationError } from './OperationError.js'
 import { errorMessage } from '../errors.js'
-import { TerminalReplay } from '../terminal-replay.js'
+import { TerminalReplay, historyLineEndings } from '../terminal-replay.js'
 import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
 import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
@@ -73,7 +73,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     if (!container) return
 
     const terminal = new Terminal({
-      convertEol: true,
+      // No convertEol: the PTY already ends lines with CR LF, and ConPTY sends a bare LF to mean "down one row, same
+      // column". Turning that into CR LF put text in the wrong column, so ConPTY's later redraws (for example after
+      // Claude Code's /clear) left stray characters behind.
       fontFamily: 'Cascadia Code, Consolas, "Courier New", monospace',
       fontSize: 13,
       cursorBlink: true,
@@ -380,7 +382,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
     // Historic OSC 52 commands must not overwrite today's clipboard.
-    const replay = new TerminalReplay(data => terminal.write(stripOsc52Commands(data)), writePtyOutput)
+    const replay = new TerminalReplay(data => terminal.write(historyLineEndings(stripOsc52Commands(data))), writePtyOutput)
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
       if (payload.tabId === tabId) replay.push(payload)
     })
