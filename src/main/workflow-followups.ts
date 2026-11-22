@@ -195,18 +195,21 @@ export class WorkflowFollowups {
    * The person confirms an approval the desktop could not verify by itself. It ends the loop only when the PR still
    * points at the approved head, and nothing of this loop is queued, in flight or uncertain.
    */
-  async confirmApproval(id:string):Promise<FollowupGrant>{
+  async confirmApproval(id:string,shown:ApprovalEvidence):Promise<FollowupGrant>{
     const grant=this.grant(id)
     if(!grant?.enabled||roleOf(grant)!=='author'||!grant.approval)throw new Error('There is no approval to confirm')
+    // `shown` is what the person clicked on. A poll may replace the stored approval at any time, even during the read
+    // below, so every comparison is against what was shown, not against whatever is stored by then.
+    if(!sameApproval(shown,grant.approval))throw new Error('The approval changed; look again')
     const snapshot=await this.read(grant)
     const current=this.grant(id)
-    if(!current?.enabled||!current.approval||current.approval.ref!==grant.approval.ref)throw new Error('The approval changed; look again')
+    if(!current?.enabled||!current.approval||!sameApproval(shown,current.approval))throw new Error('The approval changed; look again')
     if(!snapshot.open)throw new Error('The pull request is closed')
     if(snapshot.head!==current.approval.head){this.save({...current,approval:null,health:'watching'});throw new Error('The PR has a newer head than the approval')}
     // The approval must still stand now: a dismissal or a later change request since the last poll withdraws it.
     const evidence=approvalOfHead(snapshot,current.reviewers,current.marker??DEFAULT_PR_MARKER)
     // The person confirmed what they were shown: the same approval, head and base. Anything else is shown again.
-    if(!evidence||!sameApproval(evidence,current.approval)||snapshot.base!==current.approval.base){
+    if(!evidence||!sameApproval(evidence,shown)||snapshot.base!==shown.base){
       this.save({...current,approval:evidence,health:evidence?'approval-pending':'watching'});throw new Error('The approval or the PR\'s base changed on GitHub; look again')
     }
     if(this.host.journal.list().some(d=>d.scope===id&&['queued','submitting','submitted','uncertain'].includes(d.state)))throw new Error('Feedback for this loop is still queued or in progress')

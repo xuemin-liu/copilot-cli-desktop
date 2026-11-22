@@ -120,10 +120,10 @@ test('a formal approval waits for the person, who confirms it only for the curre
   assert.equal(pending.approval?.kind, 'review')
   assert.equal(pending.enabled, true, 'nothing ends by itself')
   h.push()
-  await assert.rejects(h.controller.confirmApproval(grant.id), /newer head/)
+  await assert.rejects(h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!), /newer head/)
   assert.equal(h.controller.grant(grant.id)?.approval, null)
   h.advance(); h.review(11, REVIEWER, 'APPROVED'); await h.controller.tick()
-  const confirmed = await h.controller.confirmApproval(grant.id)
+  const confirmed = await h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!)
   assert.equal(confirmed.enabled, false); assert.equal(confirmed.health, 'approved'); assert.equal(confirmed.head, second)
 }))
 
@@ -132,10 +132,10 @@ test('a base that moved after the approval was shown must be shown again before 
   h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
   assert.equal(h.controller.grant(grant.id)?.approval?.base, base)
   h.moveBase()
-  await assert.rejects(h.controller.confirmApproval(grant.id), /base changed/)
+  await assert.rejects(h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!), /base changed/)
   const shown = h.controller.grant(grant.id)!
   assert.equal(shown.enabled, true); assert.equal(shown.approval?.base, 'e'.repeat(40), 'the person now sees the new base')
-  const confirmed = await h.controller.confirmApproval(grant.id)
+  const confirmed = await h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!)
   assert.equal(confirmed.health, 'approved')
 }))
 
@@ -151,7 +151,7 @@ test('an approval withdrawn on GitHub since the last poll cannot be confirmed', 
   h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
   assert.equal(h.controller.grant(grant.id)?.health, 'approval-pending')
   h.review(11, REVIEWER, 'CHANGES_REQUESTED')
-  await assert.rejects(h.controller.confirmApproval(grant.id), /changed on GitHub/)
+  await assert.rejects(h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!), /changed on GitHub/)
   const after = h.controller.grant(grant.id)!
   assert.equal(after.enabled, true); assert.equal(after.approval, null); assert.equal(after.health, 'watching')
 }))
@@ -160,10 +160,10 @@ test('approval settlement waits for queued feedback and unsettled replies', () =
   const grant = await enrollFix(h)
   h.host.ready = () => false
   h.advance(); h.inline(1); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
-  await assert.rejects(h.controller.confirmApproval(grant.id), /still queued/)
+  await assert.rejects(h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!), /still queued/)
   h.journal.cancelScope(grant.id)
   h.unsettle()
-  await assert.rejects(h.controller.confirmApproval(grant.id), /not been confirmed/)
+  await assert.rejects(h.controller.confirmApproval(grant.id, h.controller.grant(grant.id)!.approval!), /not been confirmed/)
 }))
 
 test('changes requested after an approval, an author self-approval, and a text approval of a prefix show nothing', () => fixture(async (h) => {
@@ -244,4 +244,22 @@ test('stored fix loops are validated: their limit, total and approval', () => fi
   write({ ...legacy, total: 11 }); assert.throws(() => h.controller.grant(grant.id), /Invalid stored/, 'a legacy grant keeps its ten')
   write({ ...legacy, health: 'approved' }); assert.throws(() => h.controller.grant(grant.id), /Invalid stored/)
   write(valid); db.close()
+}))
+
+test('a poll that refreshes the approval during the confirmation cannot make the old click confirm the new evidence', () => fixture(async (h) => {
+  const grant = await enrollFix(h)
+  h.advance(); h.review(10, REVIEWER, 'APPROVED'); await h.controller.tick()
+  const shown = h.controller.grant(grant.id)!.approval!
+  h.moveBase()
+  // A poll runs while the confirmation is reading GitHub: it stores the same review on the new base.
+  const original = h.host.api
+  let polled = false
+  h.host.api = async (path, paged) => {
+    if (!polled && path === 'repos/owner/repo/pulls/1') { polled = true; h.host.api = original; h.advance(); await h.controller.tick() }
+    return original(path, paged)
+  }
+  await assert.rejects(h.controller.confirmApproval(grant.id, shown), /changed/)
+  const after = h.controller.grant(grant.id)!
+  assert.equal(after.enabled, true)
+  assert.equal(after.approval?.base, 'e'.repeat(40), 'the new base is shown for a new click')
 }))

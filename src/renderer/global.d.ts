@@ -130,7 +130,7 @@ export interface CopilotDesktopBridge {
   createTask(tabId:string,title:string,replace:boolean):Promise<void>
   taskAction(id: string, action: import('../main/workflow-types.js').TaskAction): Promise<void>
   enrollFollowup(taskId:string,url:string,reviewers:string[],failedChecks:boolean,completeOnMerge?:boolean,options?:{role?:'author'|'follow-up';includeExisting?:boolean}):Promise<void>
-  confirmFollowupApproval(id:string):Promise<void>
+  confirmFollowupApproval(id:string,shown:import('../main/pr-loop-rules.js').ApprovalEvidence):Promise<void>
   extendFollowup(id:string):Promise<void>
   dismissPrPost(id:string):Promise<void>
   saveFollowupDefault(projectId:string,url:string,reviewers:string[],checks:boolean,completeOnMerge:boolean):Promise<void>
