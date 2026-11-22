@@ -41,7 +41,7 @@ async function setup() {
     },
   }
   const posts = new PrLoopPosts(join(dir, 'posts.sqlite'), host)
-  return { dir, posts, writes, github, advance: (ms = 91_000) => { now += ms }, switchAccount: () => { account = 43 }, closePull: () => { state = 'closed' }, failWrites: () => { writeFails = true } }
+  return { dir, posts, writes, github, host, advance: (ms = 91_000) => { now += ms }, switchAccount: () => { account = 43 }, closePull: () => { state = 'closed' }, failWrites: () => { writeFails = true } }
 }
 
 test('a checked reply is posted once, tagged with its receipt, to the thread on this PR', () => fixture(async (h) => {
@@ -144,4 +144,17 @@ test('a reply GitHub refused (4xx) leaves nothing in doubt and can be corrected 
   assert.equal(h.posts.settled(grant().id), true)
   host.write = write
   assert.equal((await h.posts.reply(grant(), 'session', { to: '100', body: '🤖 Fixed.' })).state, 'posted')
+}))
+
+test('a reviewer can answer an existing thread only for its current revision', () => fixture(async h => {
+  const head = 'a'.repeat(40), base = 'b'.repeat(40)
+  const review = grant({role:'reviewer',checkedOut:head,checkedOutBase:base})
+  const api = h.host.api
+  h.host.api = async path => path.endsWith('/pulls/5') ? {state:'open',head:{sha:head},base:{sha:base}} : api(path)
+  await h.posts.reply(review, 'session', {to:'100',body:'Verified the fix.'})
+  assert.equal(h.writes[0]?.path, 'repos/owner/repo/pulls/5/comments/100/replies')
+  for (const body of ['🤖 Fixed', 'Approved at ' + head]) await assert.rejects(h.posts.reply(review,'session',{to:'100',body}))
+  await assert.rejects(h.posts.reply(review,'session',{to:'conversation',body:'Verified'}))
+  await assert.rejects(h.posts.reply({...review,checkedOutBase:'d'.repeat(40)},'session',{to:'100',body:'Verified'}))
+  assert.equal(h.writes.length,1)
 }))

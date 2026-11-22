@@ -112,8 +112,9 @@ own consent, because the review session runs the PR's code.
   branch are never touched. Nothing of the PR is installed, built or
   run outside the sandbox. Only your own same-repository PRs qualify for now; a PR from a fork never starts.
 - The review session runs in Copilot CLI's command sandbox with its own Copilot home and no GitHub login (see the
-  plan's Phase 0 results). It reads the PR with the helper's `pr-read` and posts only with `pr-review -File
-  review.json`. Desktop checks that the loop belongs to the session, the account, that the PR is open and that the
+  plan's Phase 0 results). It reads full comments with `pr-read` and `pr-read -Page <nextPage>` until `nextPage` is null.
+  It posts findings with `pr-review -File review.json` and answers the author's inline threads with `pr-reply`.
+  Desktop posts approvals as file-level inline comments on the reviewed commit. Desktop checks that the loop belongs to the session, the account, that the PR is open and that the
   review names the head Desktop checked out; a review with findings can never approve, and an approval names the head
   and carries no findings. Each post has a receipt that records the head and the base.
 - When the author pushes, or the base moves, Desktop brings the reviewer's checkout to the new head (only while it is

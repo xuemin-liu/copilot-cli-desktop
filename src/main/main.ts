@@ -1,3 +1,4 @@
+import { readPrFeedbackPage } from './pr-feedback-page.js'
 import { ProjectToolService } from './project-tools.js'
 import type { ToolFile, ToolsAction } from './tool-tabs.js'
 import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReporting } from './workflow-capabilities.js'
@@ -842,24 +843,6 @@ function followupReady(grant:FollowupGrant):boolean {
 function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
-}
-/**
- * What a sandboxed reviewer reads instead of calling gh: the PR's head and base, its reviews and its comments, cut to a
- * bounded size. The text is untrusted GitHub content, passed on as data.
- */
-async function prReadView(grant:FollowupGrant):Promise<string>{
-  const api=await githubCliApi(app.getPath('userData'))
-  const root=`repos/${grant.repository}`,path=`${root}/pulls/${grant.number}`
-  const pull=await api(path) as Record<string,any>
-  const pages=async(route:string):Promise<Record<string,any>[]>=>{const value=await api(route,true);return Array.isArray(value)?value.flat().filter((item:unknown)=>item&&typeof item==='object'):[]}
-  const [inline,conversation,reviews]=await Promise.all([pages(`${path}/comments?per_page=100`),pages(`${root}/issues/${grant.number}/comments?per_page=100`),pages(`${path}/reviews?per_page=100`)])
-  const cut=(value:unknown,limit=4000):string=>typeof value==='string'?value.slice(0,limit):''
-  const view={repository:grant.repository,number:grant.number,state:pull.state,title:cut(pull.title,300),author:pull.user?.login??null,
-    head:pull.head?.sha??null,base:pull.base?.sha??null,baseRef:pull.base?.ref??null,
-    reviews:reviews.map(r=>({id:r.id,user:r.user?.login??null,state:r.state,commit:r.commit_id??null,body:cut(r.body)})),
-    inline:inline.map(c=>({id:c.id,user:c.user?.login??null,path:c.path,line:c.line??c.original_line??null,inReplyTo:c.in_reply_to_id??null,commit:c.commit_id??null,body:cut(c.body)})),
-    conversation:conversation.map(c=>({id:c.id,user:c.user?.login??null,body:cut(c.body)}))}
-  return JSON.stringify(view).slice(0,200_000)
 }
 /** Review loops started in this run: their worktree and policy. A restart leaves them for the person (needs-person). */
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
@@ -3575,7 +3558,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (enrolling) { await Promise.race([enrolling, new Promise((resolveWait) => setTimeout(resolveWait, 60_000))]); grant = findGrant() }
         if (command === 'pr-read') {
           if (!grant) return { ok: false, message: 'This session has no active review loop.' }
-          try { return { ok: true, message: await prReadView(grant) } } catch { return { ok: false, message: 'The desktop could not read the pull request.' } }
+          try { return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), grant.repository, grant.number, request.page) } } catch { return { ok: false, message: 'The desktop could not read the pull request.' } }
         }
         let parsed: unknown
         try { parsed = JSON.parse(request.text) } catch { return { ok: false, message: 'The review file must be JSON: {"body": "...", "comments": [...], "approve": false}.' } }
@@ -3628,10 +3611,10 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
           return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
         if (!followups || !prPosts) return { ok: false, message: prPostsError ?? 'PR loops are not running in the desktop.' }
-        const grant = followups.list().find((candidate) => candidate.enabled && candidate.role === 'author' && candidate.sessionId === request.sessionId) ?? null
+        const grant = followups.list().find((candidate) => candidate.enabled && (candidate.role === 'author' || candidate.role === 'reviewer') && candidate.sessionId === request.sessionId) ?? null
         try {
           const sessionId = request.sessionId
-          const live = (): boolean => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === 'author' && current.sessionId === sessionId && followups?.authorized(current)) }
+          const live = (): boolean => { const current = grant ? followups?.grant(grant.id) : null; return Boolean(current?.enabled && current.role === grant?.role && current.sessionId === sessionId && followups?.authorized(current)) }
           const receipt = await prPosts.reply(grant, sessionId, { to: request.to ?? '', body: request.text }, live)
           broadcastState()
           return { ok: true, message: `Posted${receipt.url ? `: ${receipt.url}` : '.'}` }

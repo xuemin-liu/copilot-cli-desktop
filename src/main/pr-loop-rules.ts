@@ -44,6 +44,11 @@ export function decisiveStates(reviews: readonly GithubReview[]): Map<number, Gi
 }
 
 const APPROVED_AT = /^\s*Approved at ([a-f0-9]{40,64})\b/
+const LEGACY_APPROVAL = /^\s*Approved: reviewed ([a-f0-9]{40,64}); no actionable findings remain\.(?:\s|$)/
+
+export function approvalHead(body: string): string | undefined {
+  return APPROVED_AT.exec(body)?.[1] ?? LEGACY_APPROVAL.exec(body)?.[1]
+}
 
 /**
  * What an author's loop may show as an approval of the PR's current head. Nothing here ends a loop by itself: GitHub
@@ -72,12 +77,12 @@ export function approvalOfHead(snapshot: GithubSnapshot, reviewers: readonly { i
 
 function textApproves(event: GithubFeedback, allowed: ReadonlySet<number>, marker: string, head: string): boolean {
   if (event.kind !== 'review' || event.actorId === null || !allowed.has(event.actorId) || isMarked(event.body, marker)) return false
-  return APPROVED_AT.exec(event.body)?.[1] === head
+  return approvalHead(event.body) === head
 }
 
 /** A comment whose text approves exactly this head ("Approved at <head>"), whoever wrote it. */
 export function approvesHeadText(event: GithubFeedback, head: string): boolean {
-  return event.kind === 'review' && APPROVED_AT.exec(event.body)?.[1] === head
+  return event.kind === 'review' && approvalHead(event.body) === head
 }
 
 /** An author's post must start with the marker and must not read as an approval of anything. */
