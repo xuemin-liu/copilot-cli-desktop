@@ -16,7 +16,7 @@ import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
-import { OTHER_CLIS, sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
+import { OTHER_CLI_UPDATES, OTHER_CLIS, otherCliLaunchKey, sessionCliLabel, type OtherCli, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
 import { tabShortcutOwner } from './tab-shortcuts.js'
 
@@ -108,15 +108,39 @@ export function App(): JSX.Element {
   // Which CLIs are installed, looked up each time the dialog opens: one installed a moment ago is offered at once.
   const [sessionClis, setSessionClis] = useState<SessionCliChoice[] | null>(null)
   const newSessionOpen = inputDialog?.kind === 'new-session'
+  // The version each other CLI would launch with now, for the sidebar's "CLI changed" mark on tabs that run another.
+  const [installedOtherCliVersions, setInstalledOtherCliVersions] = useState<Partial<Record<OtherCli, string | null>>>({})
+  const takeInstalledVersions = useCallback((choices: readonly SessionCliChoice[]) => {
+    const versions: Partial<Record<OtherCli, string | null>> = {}
+    for (const choice of choices) if (choice.cli !== 'copilot') versions[choice.cli] = choice.error === null ? choice.version : null
+    setInstalledOtherCliVersions(versions)
+  }, [])
   useEffect(() => {
     if (!newSessionOpen) return
     let stale = false
     setSessionClis(null)
     window.copilotDesktop.listSessionClis()
-      .then((choices) => { if (!stale) setSessionClis(choices) })
+      .then((choices) => { if (!stale) { setSessionClis(choices); takeInstalledVersions(choices) } })
       .catch(() => { if (!stale) setSessionClis([]) })
     return () => { stale = true }
-  }, [newSessionOpen])
+  }, [newSessionOpen, takeInstalledVersions])
+  // Looked up again when the window comes back to the front, so an update made in a terminal shows. Main keeps each
+  // lookup for a minute, so this runs each CLI's `--version` at most that often, and only while a tab runs another CLI.
+  // Also whenever such a tab starts or restarts with a version: that launch looked fresh and replaced main's kept
+  // lookup, so reading it again shows what a restart would launch now instead of what was installed before.
+  const otherCliLaunches = otherCliLaunchKey(state.tabs)
+  useEffect(() => {
+    if (otherCliLaunches === '') return
+    let stale = false
+    const refresh = (): void => {
+      window.copilotDesktop.listSessionClis()
+        .then((choices) => { if (!stale) takeInstalledVersions(choices) })
+        .catch(() => {})
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => { stale = true; window.removeEventListener('focus', refresh) }
+  }, [otherCliLaunches, takeInstalledVersions])
   const newSessionCliMissing = sessionClis?.find((choice) => choice.cli === newSessionCli && choice.error !== null) ?? null
   const showLog = (tabId: string): void => {
     void window.copilotDesktop.showSessionLog(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))
@@ -404,6 +428,7 @@ export function App(): JSX.Element {
         workflowDeliveries={state.workflowDeliveries ?? []}
         workflowDeliveryError={state.workflowDeliveryError ?? null}
         installedCliVersion={state.resolution?.version ?? null}
+        installedOtherCliVersions={installedOtherCliVersions}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
         canOpenTab={canOpenTab}
@@ -613,6 +638,9 @@ export function App(): JSX.Element {
                 The tab is {sessionCliLabel(newSessionCli)} itself, in this project’s folder, with its own sign-in, settings and approvals.
                 Permission presets, side chats and tasks are for Copilot sessions; it can still join a meeting as an outside agent.
                 {newSessionExisting !== null && <> It starts in the existing worktree <code>{newSessionExisting}</code>, on whatever it has checked out.</>}
+                <> The desktop never updates it: <code>{OTHER_CLI_UPDATES[newSessionCli].command}</code> does, and an
+                  install made with a package manager updates through that manager (<button type="button" className="link-button"
+                  onClick={() => { void window.copilotDesktop.openExternalUrl(OTHER_CLI_UPDATES[newSessionCli].url).catch((error: unknown) => setOperationError(errorMessage(error))) }}>how to update</button>).</>
               </p>
             )}
             {inputDialog.kind === 'new-session' && newSessionCliMissing && (

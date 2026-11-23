@@ -5,8 +5,8 @@ import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from
 import type { MeetingView } from '../../main/meeting.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
 import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
-import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
-import { sessionCliLabel } from '../../main/session-cli.js'
+import { isCliVersionChanged, isCopilotVersionOutdated } from '../../main/copilot-version.js'
+import { sessionCliLabel, type OtherCli } from '../../main/session-cli.js'
 import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
 import { RemoveIcon } from './Icons.js'
 import { workflowAttention } from '../../main/workflow-attention.js'
@@ -16,6 +16,9 @@ import { WorkflowAutomations } from './WorkflowAutomations.js'
 import { DeliveryQueue } from './WorkflowDeliveries.js'
 import type { WorkflowDelivery } from '../../main/workflow-deliveries.js'
 import type { WorkflowTask } from '../../main/workflow-types.js'
+
+/** Statuses of a tab with a process, which keeps the version it started with until it is restarted. */
+const LIVE_STATUSES: ReadonlySet<SessionLifecycleStatus> = new Set(['starting', 'running', 'approval-needed', 'stopping'])
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   dormant: 'Not running',
@@ -102,6 +105,8 @@ export interface SidebarProps {
   /** Open meetings show a chip on each session taking part. */
   meetings?: readonly MeetingView[]
   installedCliVersion: string | null
+  /** The version each other CLI would launch with now, as last checked; a CLI not checked or not found is absent. */
+  installedOtherCliVersions?: Partial<Record<OtherCli, string | null>>
   activeProfileId: string | null
   activeTabId: string | null
   canOpenTab: boolean
@@ -136,6 +141,7 @@ export function Sidebar({
   tabs,
   meetings = [],
   installedCliVersion,
+  installedOtherCliVersions = {},
   activeProfileId,
   activeTabId,
   canOpenTab,
@@ -341,9 +347,13 @@ export function Sidebar({
     const elapsed = detail ? formatElapsed(detail.since, now) : null
     const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
     const outdatedCli = !tab.cli && isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
+    // Another CLI's tab that runs a different version than a launch would now: updated, or moved to another release
+    // channel, since it started. Only a tab with a process; one not running starts the installed version anyway.
+    const installedOther = tab.cli ? installedOtherCliVersions[tab.cli] ?? null : null
+    const changedCli = tab.cli !== undefined && LIVE_STATUSES.has(tab.status) && isCliVersionChanged(tab.cliVersion, installedOther)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
-      : null
+      : changedCli ? `${sessionCliLabel(tab.cli)} ${tab.cliVersion} runs here; restart this session to use ${installedOther}` : null
     const worktreeLabel = tab.worktree ? (tab.worktree.branch ?? tab.worktree.name) : null
     const fanOutLabel = tab.fanOutLabel ?? null
     // A Claude Code or Codex tab takes part as an outside agent, under a seat id; main names the tab that seat runs in.
@@ -370,8 +380,8 @@ export function Sidebar({
     >
       <span className={`sidebar-status-dot tab-status-${statusClass}`} aria-hidden="true" />
       <span className="sidebar-session-title">{compactIndex !== undefined ? compactIndex + 1 : tab.title}</span>
-      {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
-        {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
+      {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli || changedCli ? ' cli-version-outdated' : ''}`}>
+        {outdatedCli ? 'Old CLI' : changedCli ? 'CLI changed' : detail ? elapsed : statusLabel}
       </span>}
       {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel || meetingLabel || cliLabel) && <span className="sidebar-session-activity">
         {cliLabel && <span className="session-cli-chip" title={`This tab runs ${cliLabel}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{cliLabel}</span>}

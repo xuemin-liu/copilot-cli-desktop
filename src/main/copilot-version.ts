@@ -42,6 +42,13 @@ export function compareCopilotVersions(left: string, right: string): number | nu
   return 0
 }
 
+/** Whether a CLI the tab started differs from the one a launch would run now: both known, newer or older. */
+export function isCliVersionChanged(startedVersion: string | null, installedVersion: string | null): boolean {
+  if (!startedVersion || !installedVersion) return false
+  const comparison = compareCopilotVersions(startedVersion, installedVersion)
+  return comparison !== null && comparison !== 0
+}
+
 export function isCopilotVersionOutdated(sessionVersion: string | null, installedVersion: string | null): boolean {
   if (!sessionVersion || !installedVersion) return false
   return compareCopilotVersions(sessionVersion, installedVersion) === -1

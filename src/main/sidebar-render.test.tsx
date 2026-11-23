@@ -369,3 +369,53 @@ test('the sidebar header keeps Fan out in its More menu, and rows started togeth
   assert.match(markup, /aria-label="one 1\/2 \(worktree desktop-one-1-2-abc123\) \[fan-out · fix &lt;login&gt;\] — Idle"/)
   assert.match(markup, /aria-label="Plain — Idle"/)
 })
+
+function renderOtherCliTab(tab: Partial<DesktopSessionTab>, installed: string | null): string {
+  const profile: WorkspaceProfile = { id: 'workspace-1', name: 'one', path: 'D:\\one', permissionPreset: 'default', defaultResumeMode: 'new', launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [] }
+  const full: DesktopSessionTab = {
+    id: 'tab-1', title: 'Claude Code', workspaceProfileId: 'workspace-1', lastSessionId: null, status: 'running', processId: 42,
+    cli: 'claude', cliVersion: '2.1.0', sessionPermissionPreset: null, sessionPermissionMode: null, permissionWarning: null,
+    remote: false, lastActivityAt: 123, ...tab,
+  }
+  return renderToStaticMarkup(
+    <Sidebar
+      profiles={[profile]} tabs={[full]} installedCliVersion="1.0.82" installedOtherCliVersions={{ claude: installed }}
+      activeProfileId="workspace-1" activeTabId="tab-1" canOpenTab collapsed={false}
+      onToggleCollapsed={() => undefined} onSelectWorkspace={() => undefined} onActivateProfile={() => undefined}
+      onRemoveProfile={() => undefined} onActivateTab={() => undefined} onPopOutTab={() => undefined}
+      onRenameTab={() => undefined} onCloseTab={() => undefined} onRestartTab={() => undefined} onUnloadTab={() => undefined}
+      onOpenHistory={() => undefined} onCreateTab={() => undefined} onCreateTabWithAttachments={() => undefined}
+      onFanOut={() => undefined} onResumePicker={() => undefined} onConnectRemote={() => undefined} onOpenSettings={() => undefined}
+    />,
+  )
+}
+
+test('a running Claude Code tab shows the version it started with and the one a restart would launch', () => {
+  const markup = renderOtherCliTab({}, '2.1.5')
+  assert.match(markup, /CLI changed/)
+  assert.match(markup, /Claude Code 2\.1\.0 runs here; restart this session to use 2\.1\.5/)
+  assert.match(markup, /cli-version-outdated/)
+})
+
+test('a downgraded CLI is marked as changed, not as old', () => {
+  const markup = renderOtherCliTab({}, '2.0.9')
+  assert.match(markup, /CLI changed/)
+  assert.match(markup, /restart this session to use 2\.0\.9/)
+  assert.doesNotMatch(markup, /Old CLI/)
+})
+
+test('no mark without a process, a known version on both sides, or a difference', () => {
+  for (const [tab, installed] of [
+    [{ status: 'dormant' }, '2.1.5'],
+    [{ status: 'completed' }, '2.1.5'],
+    [{ status: 'crashed' }, '2.1.5'],
+    [{}, null],
+    [{ cliVersion: 'unknown' }, '2.1.5'],
+    [{ cliVersion: null }, '2.1.5'],
+    [{}, '2.1.0'],
+  ] as const) {
+    const markup = renderOtherCliTab(tab, installed)
+    assert.doesNotMatch(markup, /CLI changed/, JSON.stringify({ tab, installed }))
+    assert.doesNotMatch(markup, /cli-version-outdated/)
+  }
+})
