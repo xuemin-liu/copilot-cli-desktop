@@ -1,6 +1,6 @@
 {
   "name": "copilot-cli-desktop",
-  "version": "0.1.135",
+  "version": "0.1.136",
   "private": true,
   "author": "copilot-cli-desktop contributors",
   "description": "An unofficial Electron desktop shell for the GitHub Copilot CLI, for Windows, macOS and Linux",
@@ -114,7 +114,10 @@
     "appId": "dev.copilot-cli-desktop.app",
     "productName": "Copilot CLI Desktop",
     "extraResources": [
-      { "from": "resources/pr-workflows", "to": "pr-workflows" }
+      {
+        "from": "resources/pr-workflows",
+        "to": "pr-workflows"
+      }
     ],
     "asar": true,
     "npmRebuild": false,
