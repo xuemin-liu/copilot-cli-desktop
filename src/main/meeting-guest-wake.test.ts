@@ -486,3 +486,63 @@ test('the request to start the wake-up again says the old one ended', () => {
   assert.match(guestWakeRequest('curl http://x/'), /^Keep a wake-up running, once: start this with the Bash tool/)
   assert.match(guestWakeRequest('curl http://x/', true), /^Your wake-up command ended when it woke you, so start it again: keep one running\. Start this with the Bash tool/)
 })
+
+test('a wake-up started after the asks ran out, and used up before the next answer, gets the agent asked again', async () => {
+  const mailbox = new GuestMailbox(realMeetingTimers)
+  const sessions = new GuestMcpSessions()
+  sessions.wakeUrl = (key) => `http://127.0.0.1:1/meeting-wake/${key}`
+  const claude = await mcpClient(sessions, mailbox, 'claude-code')
+  assert.equal((await claude('meeting_join', { meeting: 'K7QF' })).length, 2)
+  const seat = mailbox.seatsOf('K7QF')[0]!
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 1, 'asked enough')
+
+  // It starts the command at last, and a wake-up ends it before any answer sees it running.
+  void mailbox.watch(seat.id)
+  mailbox.woke(seat.id)
+  const again = await claude('meeting_next', { wait_seconds: 1 })
+  assert.equal(again.length, 2, 'it did what was asked, so it is asked to start it again')
+  assert.match(again[1]!, /^Your wake-up command ended when it woke you, so start it again/)
+})
+
+test('over HTTP: a wake-up before the seats are restored is told to retry, with nothing printed, and waits once they are', async () => {
+  const mailbox = new GuestMailbox(clock().timers)
+  let ready = false
+  const server = new GuestMcpServer(mailbox, noDeps({ ready: () => ready }))
+  const port = (await server.listen(0))!
+  try {
+    const { seat } = mailbox.invite('K7QF', 'Claude Code', null)
+    const path = `/meeting-wake/${guestWakeKey(seat)}`
+    const early = await post(port, path)
+    assert.equal(early.status, 503, 'curl retries a 503; a 404 would end the command as if the seat were gone')
+    assert.equal(early.text, '', 'curl prints what each try answers, and the agent reads all of it')
+    assert.equal((await post(port, `/meeting-wake/${'0'.repeat(32)}`)).status, 503, 'an unknown key cannot be told apart yet')
+    assert.equal(mailbox.watching(seat.id), false)
+
+    ready = true
+    const waiting = post(port, path)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(mailbox.watching(seat.id), true)
+    mailbox.woke(seat.id)
+    assert.equal((await waiting).status, 200)
+    assert.equal((await post(port, `/meeting-wake/${'0'.repeat(32)}`)).status, 404, 'once restored, an unknown key is gone')
+  } finally { await server.close() }
+})
+
+test('a session that runs out of asks in one meeting is asked again for the next meeting it joins', async () => {
+  const mailbox = new GuestMailbox(realMeetingTimers)
+  const sessions = new GuestMcpSessions()
+  sessions.wakeUrl = (key) => `http://127.0.0.1:1/meeting-wake/${key}`
+  const claude = await mcpClient(sessions, mailbox, 'claude-code')
+  assert.equal((await claude('meeting_join', { meeting: 'K7QF' })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 1, 'asked enough in this meeting')
+  await claude('meeting_leave')
+
+  const joined = await claude('meeting_join', { meeting: 'M2QF' })
+  const seat = mailbox.seatsOf('M2QF')[0]!
+  assert.equal(joined.length, 2, 'the new seat has a command of its own to ask for')
+  assert.match(joined[1]!, new RegExp(`meeting-wake/${guestWakeKey(seat)}`))
+})

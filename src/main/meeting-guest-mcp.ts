@@ -127,7 +127,7 @@ const TOOL_COMMANDS: Record<string, GuestCommand> = {
  * `meeting_start` of this session is waiting (on the folder check or Git), so no other join or start may slip past the
  * one-meeting check meanwhile.
  */
-interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number; desktopTag: string | null }
+interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number; wakeSeat: string | null; watchesSeen: number; seatKey: string | null; desktopTag: string | null }
 
 /** The `tab` query of the address the desktop gives an agent it runs in one of its own tabs: which tab its seat shows on. */
 export const DESKTOP_TAB_TAG = /^[0-9a-f]{32}$/
@@ -155,7 +155,7 @@ export class GuestMcpSessions {
       this.sessions.delete(oldest)
     }
     const id = randomUUID()
-    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0, desktopTag })
+    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0, wakeSeat: null, watchesSeen: 0, seatKey: null, desktopTag })
     return id
   }
 
@@ -234,6 +234,10 @@ export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: Gues
 function withWakeRequest(sessions: GuestMcpSessions, session: Session, mailbox: GuestMailbox, seat: GuestSeat | null, tool: string, result: unknown): unknown {
   if (!seat || !sessions.wakeUrl || !isClaudeCodeClient(session.client) || !WAKE_ASKING_TOOLS.has(tool)) return result
   if (seat.closed !== null || seat.meetingId === '' || !isRecord(result) || result.isError || !Array.isArray(result.content)) return result
+  // A command it started since the last answer did what was asked, even one a wake-up already ended: the asks start over.
+  // So do they for another seat: a new meeting has its own command, which the agent has not been asked for yet.
+  const started = mailbox.watchesStarted(seat.id)
+  if (seat.id !== session.wakeSeat || started !== session.watchesSeen) { session.wakeSeat = seat.id; session.watchesSeen = started; session.wakeAsks = 0 }
   if (mailbox.watching(seat.id)) { session.wakeAsks = 0; return result }
   if (session.wakeAsks >= MAX_WAKE_ASKS) return result
   session.wakeAsks++
@@ -276,7 +280,8 @@ function joinById(sessions: GuestMcpSessions, session: Session, mailbox: GuestMa
   if (!MEETING_ID_PATTERN.test(meetingId)) return toolText('Pass the meeting id the person gave you, such as meeting: "K7QF", or the invitation they pasted.', true)
   if (!deps.ready()) return toolText('The desktop is starting. Call meeting_join again in a minute.', true)
   const current = session.seatId ? mailbox.seat(session.seatId) : null
-  if (current && current.closed === null && current.meetingId === meetingId) { mailbox.seen(current, 'mcp'); return toolText(joinedText(current)) }
+  // A retry whose first answer was lost: the seat key goes again, or the agent would have none to recover the seat with.
+  if (current && current.closed === null && current.meetingId === meetingId) { mailbox.seen(current, 'mcp'); return toolText(joinedText(current) + (session.seatKey ? seatKey(session.seatKey) : '')) }
   if (sessions.guessing()) return toolText('Too many wrong meeting ids in the last minute. Check the id with the person, then try again in a minute.', true)
   if (!deps.isOpen(meetingId)) { sessions.missed(); return toolText(`There is no open meeting ${meetingId}.`, true) }
   const occupied = busy(mailbox, deps, session)
@@ -293,6 +298,7 @@ function joinById(sessions: GuestMcpSessions, session: Session, mailbox: GuestMa
   if (failure) { mailbox.close(seat.id, failure); return toolText(failure, true) }
   mailbox.joined(seat)
   session.seatId = seat.id
+  session.seatKey = token
   return toolText(joinedText(seat) + seatKey(token))
 }
 
@@ -316,6 +322,7 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
   // The agent named this folder, not the person: its changes are attached only once the person allows it.
   const { seat, token } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder, granted: false })
   session.seatId = seat.id
+  session.seatKey = null
   const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
   if (!answer.ok) { mailbox.close(seat.id, answer.message); session.seatId = null; return toolText(answer.message, true) }
   return toolText(answer.message + seatKey(token))
@@ -332,11 +339,14 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
     if (session.starting) return toolText('Your meeting_start is still under way: wait for its answer.', true)
     const invitation = typeof args.invitation === 'string' ? args.invitation.trim() : ''
     if (!invitation) return name === 'meeting_join' ? joinById(sessions, session, mailbox, deps, args) : reserved(session, () => startOpen(session, mailbox, deps, args, signal))
+    // Seats are not restored yet, so a seat key would look unknown and the agent would take a second seat by id.
+    if (!deps.ready()) return toolText(`The desktop is starting. Call ${name} again in a minute.`, true)
     const seat = mailbox.seatOf(invitation)
     if (!seat) return toolText('This invitation is not known to the desktop. Ask the person for a new one.', true)
     if (name === 'meeting_join' && seat.kind === 'host' && seat.meetingId === '') return toolText('This is a host invitation: call meeting_start with it.', true)
     if (name === 'meeting_start' && seat.kind === 'reviewer') return toolText('This invitation is for reviewing: call meeting_join with it.', true)
     session.seatId = seat.id
+    session.seatKey = null
     mailbox.seen(seat, 'mcp')
     if (seat.closed !== null) return toolText(mailbox.closing(seat))
     // A host whose session started over (the desktop restarted) calls meeting_start (or meeting_join) again with its
@@ -448,6 +458,8 @@ export class GuestMcpServer {
       response.end(`${body}\n`)
     }
     if (request.method !== 'POST') { response.writeHead(405, { allow: 'POST' }); response.end(); return }
+    // Seats are not restored yet: every key would look unknown. curl retries a 503, and prints its body, so it gets none.
+    if (!this.deps.ready()) { response.writeHead(503, { 'cache-control': 'no-store', 'retry-after': '5' }); response.end(); return }
     const seat = this.mailbox.seatOfWakeKey(key)
     if (!seat) { text(404, 'This wake-up belongs to no meeting seat any more; there is nothing to wait for.'); return }
     const gone = new AbortController()
