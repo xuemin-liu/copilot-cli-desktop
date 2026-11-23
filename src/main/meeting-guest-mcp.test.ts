@@ -354,7 +354,7 @@ test('an agent joins by meeting id alone, named after its client, and a second o
   assert.match(joined.text, /^Joined meeting K7QF as security reviewer\. Call meeting_next for your first message\. .* Keep this seat key: /)
   assert.equal(mailbox.seatOf(keyOf(joined.text))?.name, 'Claude Code', 'the key is the seat\'s own token')
   assert.deepEqual(hub.views()[0]!.participants.map((party) => party.title), ['Claude Code (guest)'], 'joined at once: the meeting bar shows it')
-  assert.deepEqual(await tool(claude, 'meeting_join', { meeting: 'K7QF' }), { text: `Joined meeting K7QF as security reviewer. ${FIRST_MESSAGE}`, isError: false }, 'joining again changes nothing')
+  assert.deepEqual(await tool(claude, 'meeting_join', { meeting: 'K7QF' }), joined, 'joining again changes nothing, and the key comes again')
 
   const second = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
   assert.match((await tool(second, 'meeting_join', { meeting: 'K7QF' })).text, /^Joined meeting K7QF\./)
@@ -709,4 +709,37 @@ test('asking for changes a round does not have asks nobody and grants nothing', 
   assert.equal([...hub.views()[0]!.participants].length, 1)
   const seat = mailbox.seat(hub.views()[0]!.participants[0]!.tabId)
   assert.equal(seat?.granted, false)
+})
+
+test('a seat key before the seats are restored is told to wait, not that it is unknown, and works once they are', async () => {
+  const { hub, mailbox, deps, rpc, tool } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const first = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
+  const key = keyOf((await tool(first, 'meeting_join', { meeting: 'K7QF' })).text)
+
+  let ready = false
+  const desktop = restarted(mailbox, { ...deps, ready: () => ready })
+  const again = await desktop.open('claude-code')
+  assert.equal(await desktop.tool(again, 'meeting_join', { invitation: key }), 'The desktop is starting. Call meeting_join again in a minute.')
+  assert.equal(await desktop.tool(again, 'meeting_start', { invitation: key }), 'The desktop is starting. Call meeting_start again in a minute.')
+  ready = true
+  assert.equal(await desktop.tool(again, 'meeting_join', { invitation: key }), `Joined meeting K7QF. ${FIRST_MESSAGE}`)
+  assert.equal(mailbox.seatsOf('K7QF').length, 1, 'no second seat')
+})
+
+test('a join by id retried in the same session, its first answer lost, gets the same seat and its key again', async () => {
+  const { hub, mailbox, rpc, tool } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const session = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
+  const key = keyOf((await tool(session, 'meeting_join', { meeting: 'K7QF' })).text)
+  const retry = await tool(session, 'meeting_join', { meeting: 'K7QF' })
+  assert.equal(retry.isError, false)
+  assert.equal(keyOf(retry.text), key, 'the same key, for the same seat')
+  assert.equal(mailbox.seatsOf('K7QF').length, 1)
+
+  // A session bound by its invitation already has that key: nothing more is said.
+  const { token } = mailbox.invite('K7QF', 'Codex', null)
+  const invited = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(invited, 'meeting_join', { invitation: token })
+  assert.equal((await tool(invited, 'meeting_join', { meeting: 'K7QF' })).text, `Joined meeting K7QF. ${FIRST_MESSAGE}`)
 })

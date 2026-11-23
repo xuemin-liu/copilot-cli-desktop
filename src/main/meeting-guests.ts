@@ -133,6 +133,8 @@ export class GuestMailbox {
   private readonly woken = new Map<string, number>()
   /** Seats whose background command a wake-up ended: the agent has to start it again, however often it was asked before. */
   private readonly spent = new Set<string>()
+  /** How many background commands each seat has started: one registering is the agent doing what it was asked. */
+  private readonly watchStarts = new Map<string, number>()
 
   /**
    * `format` words a hub message for a seat as `next` hands it out, for the channel the seat uses then. Messages are kept as
@@ -241,6 +243,7 @@ export class GuestMailbox {
     if (signal?.aborted) return Promise.resolve(null)
     this.woken.delete(seatId)
     this.spent.delete(seatId)
+    this.watchStarts.set(seatId, (this.watchStarts.get(seatId) ?? 0) + 1)
     return new Promise((resolveWatch) => {
       const watchers = this.watchers.get(seatId) ?? new Set()
       this.watchers.set(seatId, watchers)
@@ -260,6 +263,11 @@ export class GuestMailbox {
   /** A background wake-up command of this seat is running. */
   watching(seatId: string): boolean {
     return this.watchers.has(seatId)
+  }
+
+  /** How many background commands this seat has started, ended ones included. */
+  watchesStarted(seatId: string): number {
+    return this.watchStarts.get(seatId) ?? 0
   }
 
   /** A wake-up ended this seat's background command, and it has not started one since. */
@@ -430,7 +438,7 @@ export class GuestMailbox {
       if (seat.closed === null && !seat.joined && now - seat.createdAt > GUEST_UNUSED_SEAT_MS) this.close(seat.id, 'The invitation expired. Ask the person for a new one.')
       if (seat.closedAt !== null && now - seat.closedAt > GUEST_CLOSED_SEAT_MS) removed.push(seat)
     }
-    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel(); this.woken.delete(seat.id); this.spent.delete(seat.id) }
+    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel(); this.woken.delete(seat.id); this.spent.delete(seat.id); this.watchStarts.delete(seat.id) }
     if (removed.length) this.changed()
     return removed
   }
