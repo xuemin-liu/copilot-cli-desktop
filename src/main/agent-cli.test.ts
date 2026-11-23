@@ -13,6 +13,7 @@ import {
   antigravitySessionStored,
   buildAgentCliArgs,
   claudeSessionStored,
+  codexAcceptsMcpOverride,
   resolveAgentCli,
 } from './agent-cli.js'
 import { newSessionOptions } from './session-name.js'
@@ -285,6 +286,17 @@ test('agentCliHelp reads the resolved executable help, including output from a n
   const failedWithOutput = await agentCliHelp(launch, { env: {}, execFile: async () => { throw Object.assign(new Error('exit 1'), { stdout: '', stderr: 'Usage: x --sandbox' }) } })
   assert.equal(failedWithOutput, 'Usage: x --sandbox')
   assert.equal(await agentCliHelp(launch, { env: {}, execFile: async () => { throw new Error('ENOENT') } }), null)
+})
+
+test('codexAcceptsMcpOverride asks Codex itself, in the tab folder, whether the override still loads', async () => {
+  const calls: Array<{ argv: string[]; cwd: string | undefined }> = []
+  const launch = { command: 'C:/codex/codex.exe', prefixArgs: [], pathAdditions: [] }
+  const override = ['-c', 'mcp_servers.copilot-meeting.url=http://127.0.0.1:1/mcp?tab=x']
+  const loads = await codexAcceptsMcpOverride(launch, override, 'copilot-meeting', 'D:/repo', { env: {}, execFile: async (file, args, options) => { calls.push({ argv: [file, ...args], cwd: options.cwd }); return { stdout: 'copilot-meeting', stderr: '' } } })
+  assert.equal(loads, true)
+  assert.deepEqual(calls, [{ argv: ['C:/codex/codex.exe', ...override, 'mcp', 'get', 'copilot-meeting'], cwd: 'D:/repo' }])
+  // A stdio entry of the person's own plus a url: "failed to load bootstrap configuration", so the tab keeps that entry.
+  assert.equal(await codexAcceptsMcpOverride(launch, override, 'copilot-meeting', 'D:/repo', { env: {}, execFile: async () => { throw Object.assign(new Error('exit 1'), { stderr: 'url is not supported for stdio' }) } }), false)
 })
 
 function writeAntigravitySummary(

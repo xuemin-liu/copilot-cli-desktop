@@ -2,7 +2,7 @@ import { readPrFeedbackPage } from './pr-feedback-page.js'
 import { ProjectToolService } from './project-tools.js'
 import type { ToolFile, ToolsAction } from './tool-tabs.js'
 import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReporting } from './workflow-capabilities.js'
-import { randomUUID, createHash } from 'node:crypto'
+import { randomBytes, randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
@@ -20,7 +20,7 @@ import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat } from 'node:fs/promises'
+import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
 import { existsSync, realpathSync } from 'node:fs'
@@ -137,7 +137,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { buildOtherCliLaunchArgs, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -156,7 +156,7 @@ import { guestContactKey, GuestStallNotices, meetingStalls, meetingWaitingOn, ty
 import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
-  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
+  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_MCP_SERVER_NAME, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
   guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
@@ -2420,6 +2420,54 @@ async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResoluti
   return resolution
 }
 
+/**
+ * The tag in the meeting-tools address of a tab that runs another CLI. An agent there joins a meeting as an outside agent,
+ * with a seat id of its own; the tag on its MCP session says which tab that seat belongs to, so the tab shows the meeting.
+ */
+const meetingTabTags = new Map<string, string>()
+
+function newMeetingTabTag(): string { return randomBytes(16).toString('hex') }
+
+function meetingTabTag(tabId: string): string {
+  for (const [tag, owner] of meetingTabTags) if (owner === tabId) return tag
+  const tag = newMeetingTabTag()
+  meetingTabTags.set(tag, tabId)
+  return tag
+}
+
+function meetingTabTagsFolder(): string { return join(guestRoot(), 'tabs') }
+
+/**
+ * Flags that point a Claude Code or Codex tab at the meeting tools by its tagged address. They name the server the setup
+ * guide names, so they take the place of the person's own entry for this process only. Antigravity reads one shared file.
+ */
+async function otherCliMeetingArgs(cli: OtherCli, tag: string, resolution: AgentCliResolution, cwd: string): Promise<string[]> {
+  const url = guestMcp.url()
+  if (url === null) return []
+  const tagged = `${url}?tab=${tag}`
+  if (cli === 'codex') {
+    // Codex reads a value that is not TOML as a string, so the address needs no quotes for Windows to mangle. The
+    // override merges into the person's own entry, which may be one Codex cannot take a `url` with (a stdio server):
+    // then the tab keeps that entry and starts as before, only without the meeting shown on it.
+    const override = ['-c', `mcp_servers.${GUEST_MCP_SERVER_NAME}.url=${tagged}`]
+    if (await codexAcceptsMcpOverride(resolution, override, GUEST_MCP_SERVER_NAME, cwd)) return override
+    await writeAppLog(`Codex's own ${GUEST_MCP_SERVER_NAME} entry cannot take the desktop's address; the tab keeps it.`).catch(() => {})
+    return []
+  }
+  if (cli !== 'claude') return []
+  try {
+    // A file, not inline JSON: a Windows command line can mangle the quotes on the way to a shim.
+    const folder = meetingTabTagsFolder()
+    await mkdir(folder, { recursive: true })
+    const file = join(folder, `${tag}.json`)
+    await writeFile(file, JSON.stringify({ mcpServers: { [GUEST_MCP_SERVER_NAME]: { type: 'http', url: tagged } } }), 'utf8')
+    return ['--mcp-config', file]
+  } catch (error) {
+    await writeAppLog(`Could not give a Claude Code tab its meeting tools address: ${String(error)}`).catch(() => {})
+    return []
+  }
+}
+
 /** Each resolved CLI's `--help`, read once per executable and version; a failed read is not kept, so the next launch tries again. */
 const otherCliHelps = new Map<string, Promise<string | null>>()
 
@@ -2514,10 +2562,13 @@ async function startOtherCliTab(
   pendingSessionCreations++
   let resolution: AgentCliResolution
   let configArgs: string[]
+  const meetingTag = newMeetingTabTag()
   try {
     resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
     configArgs = await otherCliLaunchArgs(cli, resolution, otherCliConfig)
+    // Before the checks below: they must hold after this wait too, or two launches could both pass the tab limit.
+    configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, meetingTag, resolution, worktreeRoot ?? profile.path)]
   } catch (error) {
     if (error instanceof OtherCliSettingsError) throw new Error(`${error.message} Change this workspace's ${label} settings in Settings, then try again.`)
     throw error
@@ -2530,6 +2581,7 @@ async function startOtherCliTab(
 
   const id = `tab-${nextTabSequence++}`
   const cwd = worktreeRoot ?? profile.path
+  meetingTabTags.set(meetingTag, id)
   // Claude Code takes the id of a new session. The other CLIs pick their own ids.
   const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false, configArgs)
   managedTabs.set(id, { session })
@@ -3415,6 +3467,8 @@ const guestMcp = new GuestMcpServer(guestMailbox, guestDeps, () => broadcastStat
 async function startGuestMcp(): Promise<void> {
   const configured = Number(process.env.COPILOT_DESKTOP_MEETING_MCP_PORT ?? DEFAULT_GUEST_MCP_PORT)
   const port = Number.isInteger(configured) && configured >= 0 && configured <= 65535 ? configured : DEFAULT_GUEST_MCP_PORT
+  // Claude Code tabs of an earlier run pointed at these; this run gives its tabs new tags.
+  await rm(meetingTabTagsFolder(), { recursive: true, force: true }).catch(() => {})
   if (await guestMcp.listen(port) === null) {
     await writeAppLog(`The meeting tools could not listen on port ${port}; outside agents can still use the helper.`).catch(() => {})
   }
@@ -3427,18 +3481,26 @@ function meetingViews(): MeetingView[] {
     const seat = guests.find((guest) => guest.id === partyId)
     return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding, wokenAt: seat.wokenAt ?? null } : null
   }
+  const tabOfSeat = (partyId: string): string | null => {
+    const tag = guests.find((guest) => guest.id === partyId)?.desktopTag
+    const tabId = tag ? meetingTabTags.get(tag) : undefined
+    return tabId && tabsState.tabs.some((tab) => tab.id === tabId) ? tabId : null
+  }
   const blocked = stalledMeetingDeliveries()
   return meetingHub.views().map((meeting) => {
     const hostGuest = contactOf(meeting.hostTabId)
+    const hostDesktopTabId = tabOfSeat(meeting.hostTabId)
     const failed = meetingHub.failedTurns(meeting.id).map(({ tabId, error, since }) => ({ tabId, meetingId: meeting.id, since, reason: `It got the message, but its model failed each time: ${error} Try /model, then ask it yourself.` }))
     const undelivered = [...blocked, ...failed].filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: meetingHub.owesReply(tabId) && (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
     return {
       ...meeting,
       ...(hostGuest ? { hostGuest } : {}),
+      ...(hostDesktopTabId ? { hostDesktopTabId } : {}),
       ...(undelivered.length ? { undelivered } : {}),
       participants: meeting.participants.map((participant) => {
         const guest = contactOf(participant.tabId)
-        return guest ? { ...participant, guest } : participant
+        const desktopTabId = tabOfSeat(participant.tabId)
+        return guest ? { ...participant, guest, ...(desktopTabId ? { desktopTabId } : {}) } : participant
       }),
       invited: guests.filter((guest) => guest.meetingId === meeting.id && !guest.joined).map(({ id, name, role }) => ({ id, name, role })),
     }
@@ -4090,6 +4152,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         throw error
       }
       setOtherCliBlocked(tabId, null)
+      configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, meetingTabTag(tabId), resolution, cwd)]
       stopRequested = true
       cancelHeldInput(tabId)
       if (managed) await managed.session.stop()

@@ -137,6 +137,27 @@ export async function agentCliHelp(
 }
 
 /**
+ * Whether Codex, started in `cwd` with these `-c` overrides, still loads its configuration and the MCP server `server`.
+ * An override only merges into an entry the person configured (a stdio entry plus a `url` fails to load), and Codex
+ * reads more than one config file, so asking it is the only sure check.
+ */
+export async function codexAcceptsMcpOverride(
+  resolution: Pick<AgentCliResolution, 'command' | 'prefixArgs' | 'pathAdditions'>,
+  overrides: string[],
+  server: string,
+  cwd: string,
+  deps: { env?: NodeJS.ProcessEnv; execFile?: ExecFileFn } = {},
+): Promise<boolean> {
+  const env = withCopilotPathAdditions(deps.env ?? process.env, resolution.pathAdditions)
+  try {
+    await (deps.execFile ?? defaultExecFile)(resolution.command, [...resolution.prefixArgs, ...overrides, 'mcp', 'get', server], { env, timeout: HELP_TIMEOUT_MS, windowsHide: true, cwd })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * The CLI's arguments for a tab. Claude Code takes the id of a new session and resumes by it; Codex and Antigravity
  * name their own sessions, so a new one gets no id (it is read from the CLI's session store later) and a stored one is
  * resumed by id.
