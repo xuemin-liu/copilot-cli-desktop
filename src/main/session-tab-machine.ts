@@ -4,7 +4,10 @@ import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
 import type { OtherCli } from './session-cli.js'
 import type { PerCliConfig } from './agent-cli-settings.js'
 
-export const MAX_SESSION_TABS = 20
+import { DEFAULT_MAX_SESSION_TABS } from './session-tab-limit.js'
+
+/** The default limit; the app passes the one set in Settings. */
+export const MAX_SESSION_TABS = DEFAULT_MAX_SESSION_TABS
 
 export interface TabsState {
   tabs: DesktopSessionTab[]
@@ -39,18 +42,18 @@ export interface NewTabInput {
   privateOverrides?: boolean
 }
 
-export function createTab(state: TabsState, input: NewTabInput): TabsState {
-  return { tabs: [...state.tabs, newTab(state, input, 'starting')], activeTabId: input.id }
+export function createTab(state: TabsState, input: NewTabInput, maxTabs = MAX_SESSION_TABS): TabsState {
+  return { tabs: [...state.tabs, newTab(state, input, 'starting', maxTabs)], activeTabId: input.id }
 }
 
 /** A saved tab listed without starting its process; it takes focus only when nothing else has it. */
-export function addDormantTab(state: TabsState, input: NewTabInput): TabsState {
-  return { tabs: [...state.tabs, newTab(state, input, 'dormant')], activeTabId: state.activeTabId ?? input.id }
+export function addDormantTab(state: TabsState, input: NewTabInput, maxTabs = MAX_SESSION_TABS): TabsState {
+  return { tabs: [...state.tabs, newTab(state, input, 'dormant', maxTabs)], activeTabId: state.activeTabId ?? input.id }
 }
 
-function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleStatus): DesktopSessionTab {
-  if (state.tabs.length >= MAX_SESSION_TABS) {
-    throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleStatus, maxTabs: number): DesktopSessionTab {
+  if (state.tabs.length >= maxTabs) {
+    throw new Error(`No more than ${maxTabs} session tabs can be open`)
   }
   if (state.tabs.some((tab) => tab.id === input.id)) {
     throw new Error(`A session tab with id ${input.id} already exists`)
@@ -210,8 +213,8 @@ export function activeWorkspaceFor(state: TabsState, current: string | null): st
   return state.tabs.find((tab) => tab.id === state.activeTabId)?.workspaceProfileId ?? current
 }
 
-export function canOpenAnotherTab(state: TabsState): boolean {
-  return state.tabs.length < MAX_SESSION_TABS
+export function canOpenAnotherTab(state: TabsState, maxTabs = MAX_SESSION_TABS): boolean {
+  return state.tabs.length < maxTabs
 }
 
 /** activeTabId is keyboard focus; a linked pair stays visible for either focus. */

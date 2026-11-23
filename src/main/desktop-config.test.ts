@@ -63,6 +63,15 @@ test('opening files outside the workspace is off by default and turns on only fo
   assert.equal(normalizeDesktopConfig(JSON.parse(JSON.stringify(normalizeDesktopConfig({ openFilesOutsideWorkspace: true })))).openFilesOutsideWorkspace, true, 'kept across a save and reload')
 })
 
+test('the session tab limit defaults to 20 and keeps only a whole number from 1 to 50', () => {
+  assert.equal(DEFAULT_DESKTOP_CONFIG.maxSessionTabs, 20)
+  assert.equal(normalizeDesktopConfig({}).maxSessionTabs, 20)
+  for (const value of [null, '30', 0, -1, 2.5, 51, NaN, Infinity]) {
+    assert.equal(normalizeDesktopConfig({ maxSessionTabs: value }).maxSessionTabs, 20, String(value))
+  }
+  for (const value of [1, 8, 50]) assert.equal(normalizeDesktopConfig({ maxSessionTabs: value }).maxSessionTabs, value)
+})
+
 test('worktree timeout defaults to ten minutes, validates saved values and persists changes', async () => {
   assert.equal(normalizeDesktopConfig({}).worktreeTimeoutMinutes, 10)
   for (const value of [null, '20', 0, -1, 1.5, 1441, NaN, Infinity]) {
@@ -409,6 +418,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     meetingMaxRounds: config.meetingMaxRounds,
     meetingRoundTimeoutMinutes: config.meetingRoundTimeoutMinutes,
     meetingDiscussion: config.meetingDiscussion,
+    maxSessionTabs: config.maxSessionTabs,
     desktopControl: config.desktopControl,
     openFilesOutsideWorkspace: config.openFilesOutsideWorkspace,
   })

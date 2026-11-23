@@ -16,6 +16,7 @@ import { MigrationSettings } from './MigrationSettings.js'
 import { isMac, isWindows, TRASH_LABEL } from '../platform.js'
 import { MAX_WORKTREE_TIMEOUT_MINUTES } from '../../main/worktree-timeout.js'
 import { MAX_MEETING_MAX_ROUNDS, MAX_MEETING_ROUND_TIMEOUT_MINUTES } from '../../main/meeting-settings.js'
+import { MAX_MAX_SESSION_TABS } from '../../main/session-tab-limit.js'
 import { errorMessage } from '../errors.js'
 import { matchesSearch, searchHits, searchTerms } from '../settings-search.js'
 
@@ -694,7 +695,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl' | 'openFilesOutsideWorkspace'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -795,6 +796,27 @@ export function SettingsApp(): JSX.Element | null {
           />
           Launch at sign-in{!snapshot.launchAtLoginAvailable ? ' (installed builds only)' : ''}
         </label>
+        <label className="settings-row settings-row-number">
+          Most session tabs open at once
+          <input
+            key={snapshot.maxSessionTabs}
+            type="number"
+            min={1}
+            max={MAX_MAX_SESSION_TABS}
+            step={1}
+            required
+            defaultValue={snapshot.maxSessionTabs}
+            onBlur={(event) => {
+              const input = event.currentTarget
+              if (!input.reportValidity()) return
+              const tabs = input.valueAsNumber
+              if (tabs !== snapshot.maxSessionTabs) updatePreference({ maxSessionTabs: tabs })
+            }}
+          />
+        </label>
+        <p className="settings-disclaimer">
+          Default 20. Saved and unloaded tabs count too. Lowering it closes nothing: tabs already open stay until you close them.
+        </p>
       </section>
 
       <section>

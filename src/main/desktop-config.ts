@@ -14,6 +14,7 @@ import type { RestoredTab, WorkspaceProfile } from './types.js'
 import { DEFAULT_WORKTREE_TIMEOUT_MINUTES, normalizeWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import { DEFAULT_WORKTREE_CLEANUP, isWorktreeCleanupMode, type WorktreeCleanupMode } from './session-worktree-cleanup.js'
 import { DEFAULT_MEETING_MAX_ROUNDS, DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES, normalizeMeetingMaxRounds, normalizeMeetingRoundTimeoutMinutes } from './meeting-settings.js'
+import { DEFAULT_MAX_SESSION_TABS, MAX_MAX_SESSION_TABS, normalizeMaxSessionTabs } from './session-tab-limit.js'
 
 export interface DesktopConfig {
   profiles: WorkspaceProfile[]
@@ -38,6 +39,8 @@ export interface DesktopConfig {
   meetingRoundTimeoutMinutes: number
   /** After a meeting round's reviews are in, each reviewer reads the others' and answers them before the host sees all of it. */
   meetingDiscussion: boolean
+  /** How many session tabs may be open at once; lowering it leaves tabs already open alone. */
+  maxSessionTabs: number
   /** Lets a session that starts while this is on use desktop control, which the person still turns on per session (Windows only). */
   desktopControl: boolean
   /** A clicked path outside the session's workspace opens in a File tab too. Off: such paths are refused, as before. */
@@ -47,7 +50,7 @@ export interface DesktopConfig {
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl' | 'openFilesOutsideWorkspace'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace'
 >
 
 /**
@@ -121,13 +124,15 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   meetingMaxRounds: DEFAULT_MEETING_MAX_ROUNDS,
   meetingRoundTimeoutMinutes: DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES,
   meetingDiscussion: false,
+  maxSessionTabs: DEFAULT_MAX_SESSION_TABS,
   desktopControl: false,
   openFilesOutsideWorkspace: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
 export const MAX_PROFILES = 20
-const MAX_RESTORED_TABS = 20
+// A workspace may hold every tab the highest session limit allows.
+const MAX_RESTORED_TABS = MAX_MAX_SESSION_TABS
 
 export function workspaceProfileId(path: string): string {
   return createHash('sha256').update(resolve(path).toLowerCase()).digest('hex').slice(0, 16)
@@ -372,6 +377,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     meetingMaxRounds: normalizeMeetingMaxRounds(value.meetingMaxRounds),
     meetingRoundTimeoutMinutes: normalizeMeetingRoundTimeoutMinutes(value.meetingRoundTimeoutMinutes),
     meetingDiscussion: value.meetingDiscussion === true,
+    maxSessionTabs: normalizeMaxSessionTabs(value.maxSessionTabs),
     desktopControl: value.desktopControl === true,
     openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),
