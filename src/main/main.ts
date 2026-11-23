@@ -4512,6 +4512,8 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   // Opened meanwhile, or one of those saved tabs: show that tab instead of a second one.
   const opened = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
   if (opened) return activateSessionTab(opened.id)
+  // Listing the project's saved tabs may have used up the room checked above; this tab is new, so the setting applies.
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`Close or unload a session tab first: no more than ${desktopConfig.maxSessionTabs} can be open`)
   const tabId = addDormantSessionTab(target.profile, {
     title: session.name ?? session.firstPrompt ?? target.profile.name,
     lastSessionId: sessionId,

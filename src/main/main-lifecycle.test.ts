@@ -2181,6 +2181,25 @@ test('opening a History session in a project startup has not listed yet keeps th
   assert.equal(after.tabs.filter((tab) => tab.lastSessionId === savedThere).length, 1, 'startup does not list it twice')
 }))
 
+test('opening a History session rechecks the session tab limit after its project\'s saved tabs are listed', async (t) => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const secondPath = `${directory}-second`; await mkdir(secondPath)
+  t.after(() => rm(secondPath, { recursive: true, force: true }))
+  const second = createWorkspaceProfile(secondPath)
+  const savedThere = '55555555-5555-4555-8555-555555555555'
+  profile.tabs = [{ title: 'Shown', lastSessionId: SOURCE, active: true }]
+  second.tabs = [{ title: 'Saved there', lastSessionId: savedThere }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), maxSessionTabs: 2, profiles: [profile, second], activeProfileId: profile.id }, capabilities)
+  await mkdir(join(directory, 'session-state', FORK), { recursive: true })
+  await writeFile(join(directory, 'session-state', FORK, 'workspace.yaml'), `cwd: ${secondPath}\nname: second\n`)
+  await writeFile(join(directory, 'session-state', FORK, 'events.jsonl'), `${JSON.stringify({ type: 'user.message', data: { content: 'from history' } })}\n`)
+  await harness.restore()
+  assert.equal((await harness.request('desktop:get-state')).tabs.length, 1)
+  await assert.rejects(async () => harness.request('desktop:open-session-history', FORK), /no more than 2 can be open/)
+  const after = await harness.request('desktop:get-state')
+  assert.deepEqual(after.tabs.map((tab) => tab.lastSessionId), [SOURCE, savedThere], 'the saved tab is listed; no third tab is added')
+}))
+
 test('unloading a CLI releases its browser and restores its tab on resume', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);profile.defaultResumeMode='new';harness.createTestWindow();
   const id=(await harness.createMain()).activeTabId!;
