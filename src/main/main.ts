@@ -137,7 +137,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { buildOtherCliLaunchArgs, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -2426,9 +2426,11 @@ async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResoluti
  */
 const meetingTabTags = new Map<string, string>()
 
+function newMeetingTabTag(): string { return randomBytes(16).toString('hex') }
+
 function meetingTabTag(tabId: string): string {
   for (const [tag, owner] of meetingTabTags) if (owner === tabId) return tag
-  const tag = randomBytes(16).toString('hex')
+  const tag = newMeetingTabTag()
   meetingTabTags.set(tag, tabId)
   return tag
 }
@@ -2439,18 +2441,25 @@ function meetingTabTagsFolder(): string { return join(guestRoot(), 'tabs') }
  * Flags that point a Claude Code or Codex tab at the meeting tools by its tagged address. They name the server the setup
  * guide names, so they take the place of the person's own entry for this process only. Antigravity reads one shared file.
  */
-async function otherCliMeetingArgs(cli: OtherCli, tabId: string): Promise<string[]> {
+async function otherCliMeetingArgs(cli: OtherCli, tag: string, resolution: AgentCliResolution, cwd: string): Promise<string[]> {
   const url = guestMcp.url()
   if (url === null) return []
-  const tagged = `${url}?tab=${meetingTabTag(tabId)}`
-  // Codex reads a value that is not TOML as a string, so the address needs no quotes for Windows to mangle.
-  if (cli === 'codex') return ['-c', `mcp_servers.${GUEST_MCP_SERVER_NAME}.url=${tagged}`]
+  const tagged = `${url}?tab=${tag}`
+  if (cli === 'codex') {
+    // Codex reads a value that is not TOML as a string, so the address needs no quotes for Windows to mangle. The
+    // override merges into the person's own entry, which may be one Codex cannot take a `url` with (a stdio server):
+    // then the tab keeps that entry and starts as before, only without the meeting shown on it.
+    const override = ['-c', `mcp_servers.${GUEST_MCP_SERVER_NAME}.url=${tagged}`]
+    if (await codexAcceptsMcpOverride(resolution, override, GUEST_MCP_SERVER_NAME, cwd)) return override
+    await writeAppLog(`Codex's own ${GUEST_MCP_SERVER_NAME} entry cannot take the desktop's address; the tab keeps it.`).catch(() => {})
+    return []
+  }
   if (cli !== 'claude') return []
   try {
     // A file, not inline JSON: a Windows command line can mangle the quotes on the way to a shim.
     const folder = meetingTabTagsFolder()
     await mkdir(folder, { recursive: true })
-    const file = join(folder, `${tagged.slice(-32)}.json`)
+    const file = join(folder, `${tag}.json`)
     await writeFile(file, JSON.stringify({ mcpServers: { [GUEST_MCP_SERVER_NAME]: { type: 'http', url: tagged } } }), 'utf8')
     return ['--mcp-config', file]
   } catch (error) {
@@ -2553,10 +2562,13 @@ async function startOtherCliTab(
   pendingSessionCreations++
   let resolution: AgentCliResolution
   let configArgs: string[]
+  const meetingTag = newMeetingTabTag()
   try {
     resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
     configArgs = await otherCliLaunchArgs(cli, resolution, otherCliConfig)
+    // Before the checks below: they must hold after this wait too, or two launches could both pass the tab limit.
+    configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, meetingTag, resolution, worktreeRoot ?? profile.path)]
   } catch (error) {
     if (error instanceof OtherCliSettingsError) throw new Error(`${error.message} Change this workspace's ${label} settings in Settings, then try again.`)
     throw error
@@ -2569,8 +2581,7 @@ async function startOtherCliTab(
 
   const id = `tab-${nextTabSequence++}`
   const cwd = worktreeRoot ?? profile.path
-  configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, id)]
-  if (shuttingDown()) throw new Error('The app is shutting down or updating')
+  meetingTabTags.set(meetingTag, id)
   // Claude Code takes the id of a new session. The other CLIs pick their own ids.
   const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false, configArgs)
   managedTabs.set(id, { session })
@@ -4141,7 +4152,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         throw error
       }
       setOtherCliBlocked(tabId, null)
-      configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, tabId)]
+      configArgs = [...configArgs, ...await otherCliMeetingArgs(cli, meetingTabTag(tabId), resolution, cwd)]
       stopRequested = true
       cancelHeldInput(tabId)
       if (managed) await managed.session.stop()
