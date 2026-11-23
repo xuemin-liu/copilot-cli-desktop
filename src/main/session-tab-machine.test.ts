@@ -22,6 +22,7 @@ import {
 function createTab(
   state: TabsState,
   input: Omit<NewTabInput, 'cliVersion' | 'sessionPermissionPreset' | 'permissionWarning' | 'remote'>,
+  maxTabs?: number,
 ): TabsState {
   return createTabState(state, {
     ...input,
@@ -30,7 +31,7 @@ function createTab(
     sessionPermissionMode: null,
     permissionWarning: null,
     remote: false,
-  })
+  }, maxTabs)
 }
 
 test('createTab adds a starting tab and makes it active', () => {
@@ -88,6 +89,16 @@ test('createTab enforces MAX_SESSION_TABS', () => {
   }
   assert.equal(canOpenAnotherTab(state), false)
   assert.throws(() => createTab(state, { id: 'tab-overflow', title: 'Copilot', workspaceProfileId: 'ws-1' }))
+})
+
+test('createTab and addDormantTab follow the limit they are given', () => {
+  let state: TabsState = EMPTY_TABS_STATE
+  for (let index = 0; index < 3; index += 1) state = createTab(state, { id: `tab-${index}`, title: 'Copilot', workspaceProfileId: 'ws-1' }, 3)
+  assert.equal(canOpenAnotherTab(state, 3), false)
+  assert.equal(canOpenAnotherTab(state, 4), true)
+  assert.throws(() => createTab(state, { id: 'tab-x', title: 'Copilot', workspaceProfileId: 'ws-1' }, 3), /No more than 3/)
+  assert.throws(() => addDormantTab(state, { id: 'tab-y', title: 'Saved', workspaceProfileId: 'ws-1', cliVersion: null, sessionPermissionPreset: 'default', permissionWarning: null, remote: false }, 3), /No more than 3/)
+  assert.ok(createTab(state, { id: 'tab-z', title: 'Copilot', workspaceProfileId: 'ws-1' }, 25))
 })
 
 test('closeTab activates the tab that slid into the closed position', () => {

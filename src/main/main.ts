@@ -152,6 +152,7 @@ import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, typ
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend, dialogOnScreen } from './session-task.js'
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
+import { DEFAULT_MAX_SESSION_TABS, MAX_MAX_SESSION_TABS, isMaxSessionTabs } from './session-tab-limit.js'
 import { MeetingOutbox } from './meeting-delivery.js'
 import { guestContactKey, GuestStallNotices, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
 import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
@@ -275,7 +276,6 @@ const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Al
 const DESKTOP_STOP_SHORTCUT = 'Control+Alt+Shift+X'
 const DESKTOP_STOP_SHORTCUT_LABEL = 'Ctrl+Alt+Shift+X'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
-const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
@@ -576,7 +576,7 @@ const state: DesktopState = {
   activeProfileId: null,
   tabs: [],
   activeTabId: null,
-  maxSessionTabs: MAX_SESSION_TABS,
+  maxSessionTabs: DEFAULT_MAX_SESSION_TABS,
   recentLogs: [],
   error: null,
 }
@@ -1273,6 +1273,7 @@ function snapshot(windowSessionId?: string): DesktopState {
 function syncWorkspaceState(): void {
   state.profiles = desktopConfig.profiles.map((profile) => ({ ...profile }))
   state.activeProfileId = desktopConfig.activeProfileId
+  state.maxSessionTabs = desktopConfig.maxSessionTabs
 }
 
 function syncTabState(): void {
@@ -1637,7 +1638,7 @@ function rebuildTrayMenu(): void {
     { type: 'separator' },
     {
       label: 'New Session Tab',
-      enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+      enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < desktopConfig.maxSessionTabs,
       click: () => requestNewSession(false),
     },
     {
@@ -1972,7 +1973,7 @@ let fanOutRunning = false
 async function fanOutSessions(profile: WorkspaceProfile, label: string, count: number): Promise<FanOutResult> {
   if (fanOutRunning) throw new Error('A fan-out is already starting sessions; wait for it to finish')
   if (!Number.isInteger(count) || count < 2 || count > FAN_OUT_MAX) throw new Error(`Fan out into 2 to ${FAN_OUT_MAX} sessions`)
-  if (MAX_SESSION_TABS - tabsState.tabs.length < count) throw new Error(`Only ${Math.max(0, MAX_SESSION_TABS - tabsState.tabs.length)} more session tabs can be open`)
+  if (desktopConfig.maxSessionTabs - tabsState.tabs.length < count) throw new Error(`Only ${Math.max(0, desktopConfig.maxSessionTabs - tabsState.tabs.length)} more session tabs can be open`)
   if (!copilotCapabilities.supportedOptions.includes('--worktree')) throw new Error('This Copilot CLI version does not support worktrees, which a fan-out needs; update it from Settings')
   fanOutRunning = true
   const tabIds: string[] = []
@@ -2222,7 +2223,7 @@ async function startSessionTab(
   const existingWorktree = requestedWorktree === undefined ? null : await resolveLinkedWorktree(profile.path, requestedWorktree)
   if (requestedWorktree !== undefined && !existingWorktree) throw new Error('That folder is no longer a worktree of this project\'s repository')
   if (existingWorktree) profile = withSessionChoices(profile, { worktree: false })!
-  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`No more than ${desktopConfig.maxSessionTabs} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
   if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
   if (sideOptions.cli) {
@@ -2280,7 +2281,7 @@ async function startSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
-  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`No more than ${desktopConfig.maxSessionTabs} session tabs can be open`)
   assertWorkspaceListed(profile)
   const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
@@ -2325,7 +2326,7 @@ async function startSessionTab(
     ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
     ...(existingWorktree ? { launchWorktreePath: existingWorktree.root } : {}),
     autoTitle,
-  })
+  }, desktopConfig.maxSessionTabs)
   desktopConfig.activeProfileId = profile.id
   syncWorkspaceState()
   syncTabState()
@@ -2568,7 +2569,7 @@ async function startOtherCliTab(
   // Recheck after the lookup: another creation or a shutdown may have completed during the await.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (options.authorizeAutomatic && !options.authorizeAutomatic()) throw new Error('Automatic work was paused')
-  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`No more than ${desktopConfig.maxSessionTabs} session tabs can be open`)
   assertWorkspaceListed(profile)
 
   const id = `tab-${nextTabSequence++}`
@@ -2598,7 +2599,7 @@ async function startOtherCliTab(
     launchWorktree: false,
     ...(worktreeRoot ? { launchWorktreePath: worktreeRoot } : {}),
     autoTitle: false,
-  })
+  }, desktopConfig.maxSessionTabs)
   desktopConfig.activeProfileId = profile.id
   syncWorkspaceState()
   syncTabState()
@@ -2656,7 +2657,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
     if (!tab || tab.remote || tab.sideChat || tab.cli) throw new Error('Select a local main Copilot session to fork into a side chat')
     const existing = tabsState.tabs.find((candidate) => candidate.sideParentTabId === tabId)
     if (existing) throw new Error('This session already has a side chat. Close it before creating another fork.')
-    if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error('Close a session tab before opening a side chat')
+    if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error('Close a session tab before opening a side chat')
     const sourceProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
     if (!sourceProfile || !state.resolution) throw new Error('This session workspace is no longer available')
     const profile = sideChatProfile(sourceProfile, copilotCapabilities)
@@ -4348,7 +4349,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   return restartPromise
 }
 
-/** Lists a saved tab without starting it, so a launch with many saved tabs starts one Copilot process instead of all of
+/** Lists a saved tab without starting it (bounded only by the hard tab limit: a caller opening a new tab checks the
+ * configured one first), so a launch with many saved tabs starts one Copilot process instead of all of
  * them. Showing it does not start it: only Resume does, apart from the starts that call `startDormantTab`. */
 function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
   assertWorkspaceListed(profile)
@@ -4376,7 +4378,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
       launchWorktree: false,
       ...(candidate.launchWorktreePath ? { launchWorktreePath: candidate.launchWorktreePath } : {}),
       autoTitle: false,
-    })
+    }, MAX_MAX_SESSION_TABS)
     profilesWithSessionTabs.add(profile.id)
     return id
   }
@@ -4400,7 +4402,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
-  })
+  }, MAX_MAX_SESSION_TABS)
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
     const reading = applyDormantSessionCwd(id, candidate.lastSessionId)
@@ -4492,7 +4494,7 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   const open = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
   if (open) return activateSessionTab(open.id)
   if (!isCopilotResolved()) throw new Error('Copilot CLI is not available yet')
-  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`Close or unload a session tab first: no more than ${MAX_SESSION_TABS} can be open`)
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`Close or unload a session tab first: no more than ${desktopConfig.maxSessionTabs} can be open`)
   const session = (await listStoredSessions(copilotSessionRoot(process.env), { cache: sessionCatalogCache, limit: Number.POSITIVE_INFINITY }))
     .find((candidate) => candidate.sessionId === sessionId)
   if (!session?.cwd) throw new Error('That session is no longer stored')
@@ -4510,6 +4512,8 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   // Opened meanwhile, or one of those saved tabs: show that tab instead of a second one.
   const opened = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
   if (opened) return activateSessionTab(opened.id)
+  // Listing the project's saved tabs may have used up the room checked above; this tab is new, so the setting applies.
+  if (tabsState.tabs.length >= desktopConfig.maxSessionTabs) throw new Error(`Close or unload a session tab first: no more than ${desktopConfig.maxSessionTabs} can be open`)
   const tabId = addDormantSessionTab(target.profile, {
     title: session.name ?? session.firstPrompt ?? target.profile.name,
     lastSessionId: sessionId,
@@ -4553,7 +4557,8 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     let last: string | null = null
     let shown: string | null = null
     for (const candidate of restored) {
-      if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
+      // Saved tabs come back even above a limit lowered since they were opened; only new tabs follow the setting.
+      if (shuttingDown() || tabsState.tabs.length >= MAX_MAX_SESSION_TABS) break
       try { last = addDormantSessionTab(profile, candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
       if (candidate.active) shown = last
@@ -5051,7 +5056,7 @@ function installApplicationMenu(): void {
         {
           label: 'New Session Tab',
           accelerator: 'CmdOrCtrl+T',
-          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < desktopConfig.maxSessionTabs,
           click: (_item: unknown, _window: unknown, event?: { triggeredByAccelerator?: boolean }) => { if (!forwardTabShortcut('t', event?.triggeredByAccelerator)) requestNewSession(false) },
         },
         {
@@ -5072,12 +5077,12 @@ function installApplicationMenu(): void {
         },
         {
           label: 'Resume Session…',
-          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < desktopConfig.maxSessionTabs,
           click: () => observe(createSessionTab(undefined, 'picker'), 'Could not open session picker'),
         },
         {
           label: 'New Session with Attachments…',
-          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < desktopConfig.maxSessionTabs,
           click: () => requestNewSession(true),
         },
         {
@@ -5348,6 +5353,7 @@ function settingsPreferences(): DesktopPreferences {
     meetingMaxRounds: desktopConfig.meetingMaxRounds,
     meetingRoundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes,
     meetingDiscussion: desktopConfig.meetingDiscussion,
+    maxSessionTabs: desktopConfig.maxSessionTabs,
     desktopControl: desktopConfig.desktopControl,
     openFilesOutsideWorkspace: desktopConfig.openFilesOutsideWorkspace,
   }
@@ -6461,6 +6467,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'meetingMaxRounds',
     'meetingRoundTimeoutMinutes',
     'meetingDiscussion',
+    'maxSessionTabs',
     'desktopControl',
     'openFilesOutsideWorkspace',
   ])
@@ -6481,6 +6488,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('meetingMaxRounds' in values && !isMeetingMaxRounds(values.meetingMaxRounds))
     || ('meetingRoundTimeoutMinutes' in values && !isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes))
     || ('meetingDiscussion' in values && typeof values.meetingDiscussion !== 'boolean')
+    || ('maxSessionTabs' in values && !isMaxSessionTabs(values.maxSessionTabs))
     || ('desktopControl' in values && typeof values.desktopControl !== 'boolean')
     || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
   ) {
@@ -6494,6 +6502,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let overridesChanged = false
   let desktopControlChanged = false
   let outsideFilesChanged = false
+  let maxTabsChanged = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
@@ -6523,6 +6532,9 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
     // Read when a round's reviews are all in, so it applies to open meetings from their next round.
     if (typeof values.meetingDiscussion === 'boolean') desktopConfig.meetingDiscussion = values.meetingDiscussion
+    // Tabs already open stay open when the limit is lowered; only opening more is refused.
+    maxTabsChanged = isMaxSessionTabs(values.maxSessionTabs) && values.maxSessionTabs !== desktopConfig.maxSessionTabs
+    if (isMaxSessionTabs(values.maxSessionTabs)) desktopConfig.maxSessionTabs = values.maxSessionTabs
     // Sessions started from now on get the helper; turning it off also turns control off everywhere at once.
     desktopControlChanged = typeof values.desktopControl === 'boolean' && desktopConfig.desktopControl !== values.desktopControl
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
@@ -6548,6 +6560,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   })
   broadcastSettingsPreferences()
   if (overridesChanged) broadcastState()
+  if (maxTabsChanged) { syncWorkspaceState(); broadcastState(); refreshMenus() }
   if (desktopControlChanged) {
     if (!desktopConfig.desktopControl) await desktopControl?.disableAll('Turned off: desktop control was turned off in Settings.')
     broadcastState()
