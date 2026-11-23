@@ -2005,6 +2005,23 @@ test('a restart starts only the tab that was on screen, and every other tab wait
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.lastSessionId, tab.active ?? false]), [[SOURCE, false], [FORK, true]])
 }))
 
+test('a lowered session tab limit restores every saved tab and refuses only new ones', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  profile.tabs = [{ title: 'First', lastSessionId: SOURCE }, { title: 'Second', lastSessionId: FORK, active: true }]
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, maxSessionTabs: 1, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restore()
+  const state = await harness.request('desktop:get-state')
+  assert.deepEqual(state.tabs.map(tab => tab.lastSessionId), [SOURCE, FORK], 'tabs open before the limit was lowered stay open')
+  assert.equal(state.activeTabId, state.tabs[1]!.id, 'the tab that was on screen is shown again')
+  assert.equal(state.maxSessionTabs, 1)
+  await assert.rejects(async () => harness.request('desktop:create-tab', 'new', profile.id), /No more than 1 session tabs/)
+  const raised = await harness.requestSettings('desktop-settings:update-preferences', { maxSessionTabs: 3 }) as { maxSessionTabs: number }
+  assert.equal(raised.maxSessionTabs, 3)
+  assert.equal((await harness.request('desktop:get-state')).maxSessionTabs, 3)
+  await harness.request('desktop:create-tab', 'new', profile.id)
+  assert.equal((await harness.request('desktop:get-state')).tabs.length, 3)
+}))
+
 test('dormant CLI tabs never create browsers when polled or resumed', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);profile.tabs=[{title:'Stopped',lastSessionId:SOURCE},{title:'Shown',lastSessionId:FORK,active:true}];
   await harness.restore();const stopped=(await harness.request('desktop:get-state')).tabs[0]!;harness.createTestWindow();

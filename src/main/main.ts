@@ -152,7 +152,7 @@ import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, typ
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend, dialogOnScreen } from './session-task.js'
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
-import { DEFAULT_MAX_SESSION_TABS, isMaxSessionTabs } from './session-tab-limit.js'
+import { DEFAULT_MAX_SESSION_TABS, MAX_MAX_SESSION_TABS, isMaxSessionTabs } from './session-tab-limit.js'
 import { MeetingOutbox } from './meeting-delivery.js'
 import { guestContactKey, GuestStallNotices, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
 import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
@@ -4349,7 +4349,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   return restartPromise
 }
 
-/** Lists a saved tab without starting it, so a launch with many saved tabs starts one Copilot process instead of all of
+/** Lists a saved tab without starting it (bounded only by the hard tab limit: a caller opening a new tab checks the
+ * configured one first), so a launch with many saved tabs starts one Copilot process instead of all of
  * them. Showing it does not start it: only Resume does, apart from the starts that call `startDormantTab`. */
 function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
   assertWorkspaceListed(profile)
@@ -4377,7 +4378,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
       launchWorktree: false,
       ...(candidate.launchWorktreePath ? { launchWorktreePath: candidate.launchWorktreePath } : {}),
       autoTitle: false,
-    }, desktopConfig.maxSessionTabs)
+    }, MAX_MAX_SESSION_TABS)
     profilesWithSessionTabs.add(profile.id)
     return id
   }
@@ -4401,7 +4402,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
-  }, desktopConfig.maxSessionTabs)
+  }, MAX_MAX_SESSION_TABS)
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
     const reading = applyDormantSessionCwd(id, candidate.lastSessionId)
@@ -4554,7 +4555,8 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     let last: string | null = null
     let shown: string | null = null
     for (const candidate of restored) {
-      if (shuttingDown() || tabsState.tabs.length >= desktopConfig.maxSessionTabs) break
+      // Saved tabs come back even above a limit lowered since they were opened; only new tabs follow the setting.
+      if (shuttingDown() || tabsState.tabs.length >= MAX_MAX_SESSION_TABS) break
       try { last = addDormantSessionTab(profile, candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
       if (candidate.active) shown = last
