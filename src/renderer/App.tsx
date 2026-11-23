@@ -16,7 +16,7 @@ import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
-import { OTHER_CLI_UPDATES, OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
+import { OTHER_CLI_UPDATES, OTHER_CLIS, otherCliLaunchKey, sessionCliLabel, type OtherCli, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
 import { tabShortcutOwner } from './tab-shortcuts.js'
 
@@ -126,9 +126,11 @@ export function App(): JSX.Element {
   }, [newSessionOpen, takeInstalledVersions])
   // Looked up again when the window comes back to the front, so an update made in a terminal shows. Main keeps each
   // lookup for a minute, so this runs each CLI's `--version` at most that often, and only while a tab runs another CLI.
-  const runsOtherCli = state.tabs.some((tab) => tab.cli !== undefined)
+  // Also whenever such a tab starts or restarts with a version: that launch looked fresh and replaced main's kept
+  // lookup, so reading it again shows what a restart would launch now instead of what was installed before.
+  const otherCliLaunches = otherCliLaunchKey(state.tabs)
   useEffect(() => {
-    if (!runsOtherCli) return
+    if (otherCliLaunches === '') return
     let stale = false
     const refresh = (): void => {
       window.copilotDesktop.listSessionClis()
@@ -138,7 +140,7 @@ export function App(): JSX.Element {
     refresh()
     window.addEventListener('focus', refresh)
     return () => { stale = true; window.removeEventListener('focus', refresh) }
-  }, [runsOtherCli, takeInstalledVersions])
+  }, [otherCliLaunches, takeInstalledVersions])
   const newSessionCliMissing = sessionClis?.find((choice) => choice.cli === newSessionCli && choice.error !== null) ?? null
   const showLog = (tabId: string): void => {
     void window.copilotDesktop.showSessionLog(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))

@@ -32,6 +32,14 @@ export const OTHER_CLI_UPDATES: Record<OtherCli, { command: string; url: string 
   antigravity: { command: 'agy update', url: 'https://antigravity.google/docs/cli/troubleshooting/' },
 }
 
+/**
+ * What the tabs running other CLIs started with, as one value that changes whenever such a tab starts, restarts with
+ * another version or closes. Empty when no tab runs another CLI.
+ */
+export function otherCliLaunchKey(tabs: readonly { cli?: OtherCli; cliVersion: string | null }[]): string {
+  return tabs.filter((tab) => tab.cli !== undefined).map((tab) => `${tab.cli}@${tab.cliVersion ?? ''}`).sort().join('\n')
+}
+
 /** What the new-session dialog shows for each CLI a tab can run: whether it was found, and how to get it when not. */
 export interface SessionCliChoice {
   cli: SessionCli
