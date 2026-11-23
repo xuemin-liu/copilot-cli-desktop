@@ -156,8 +156,12 @@ test('a scan that was cut short or failed is an error, not an empty review', { s
   assert.equal((await scanRepoConfig(fixture.runner, repo)).items.length, 20)
   const limited = (limit: number): GitRunner => ({ run: (options: GitRunOptions) => fixture.runner.run({ ...options, maxStdoutBytes: limit }) } as unknown as GitRunner)
   await assert.rejects(scanRepoConfig(limited(200), repo), /too large to review/)
-  const slow = { run: (options: GitRunOptions) => fixture.runner.run({ ...options, timeoutMs: 1 }) } as unknown as GitRunner
-  await assert.rejects(scanRepoConfig(slow, repo), /took too long|cancelled|Could not read/)
+  // Report the stop instead of racing a 1 ms timeout: a fast machine can finish Git inside it, and then nothing is cut short.
+  const stopped = (stop: 'timedOut' | 'cancelled'): GitRunner => ({
+    run: async (options: GitRunOptions) => ({ ...await fixture.runner.run(options), [stop]: true }),
+  } as unknown as GitRunner)
+  await assert.rejects(scanRepoConfig(stopped('timedOut'), repo), /took too long/)
+  await assert.rejects(scanRepoConfig(stopped('cancelled'), repo), /cancelled/)
   const aborted = new AbortController(); aborted.abort()
   await assert.rejects(scanRepoConfig(fixture.runner, repo, aborted.signal))
 })
