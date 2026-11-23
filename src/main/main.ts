@@ -138,6 +138,7 @@ import {
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { buildOtherCliLaunchArgs, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -2369,20 +2370,7 @@ async function startSessionTab(
   return snapshot()
 }
 
-/** Other CLIs found on this computer, kept for a minute: finding one runs its `--version`. A miss is never kept, so a
- * CLI installed a moment ago is found by the next look. */
-const otherCliResolutions = new Map<OtherCli, { at: number; resolution: Promise<AgentCliResolution> }>()
-
-function otherCliResolution(cli: OtherCli): Promise<AgentCliResolution> {
-  const known = otherCliResolutions.get(cli)
-  if (known && Date.now() - known.at < 60_000) return known.resolution
-  const resolution = resolveAgentCli(cli)
-  otherCliResolutions.set(cli, { at: Date.now(), resolution })
-  void resolution.then((found) => found.version === null, () => true).then((missed) => {
-    if (missed && otherCliResolutions.get(cli)?.resolution === resolution) otherCliResolutions.delete(cli)
-  })
-  return resolution
-}
+const otherCliResolution = createOtherCliCache((cli) => resolveAgentCli(cli))
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
 async function listSessionClis(): Promise<SessionCliChoice[]> {
@@ -2406,8 +2394,12 @@ function claimOtherCliSession(id: string): boolean {
 
 let antigravityMcpSetup: Promise<void> | undefined
 
+/**
+ * Found again for each launch, never from the minute-long cache: a CLI updated in place a moment ago would otherwise
+ * start as the new version while the tab records, and reads launch flags for, the old one. The fresh look is kept.
+ */
 async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResolution> {
-  const resolution = await otherCliResolution(cli)
+  const resolution = await otherCliResolution(cli, true)
   if (cli === 'antigravity' && resolution.version !== null) {
     const url = guestMcp.url()
     if (url !== null) {

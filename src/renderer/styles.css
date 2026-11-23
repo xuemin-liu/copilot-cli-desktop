@@ -1166,6 +1166,7 @@ button:disabled {
 .session-operation-error button { align-self: flex-start; flex-shrink: 0; }
 .session-operation-info { color: #c4d2e3; background: #1b293d; }
 .fork-hint { font-size: 12px; color: #aab4c4; line-height: 1.5; }
+.fork-hint .link-button { padding: 0; border: 0; background: none; color: #7cb7ff; font: inherit; text-decoration: underline; cursor: pointer; }
 
 .resource-output {
   max-height: 280px;
