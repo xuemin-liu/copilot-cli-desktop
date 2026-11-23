@@ -127,7 +127,7 @@ const TOOL_COMMANDS: Record<string, GuestCommand> = {
  * `meeting_start` of this session is waiting (on the folder check or Git), so no other join or start may slip past the
  * one-meeting check meanwhile.
  */
-interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number; watchesSeen: number; seatKey: string | null; desktopTag: string | null }
+interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number; wakeSeat: string | null; watchesSeen: number; seatKey: string | null; desktopTag: string | null }
 
 /** The `tab` query of the address the desktop gives an agent it runs in one of its own tabs: which tab its seat shows on. */
 export const DESKTOP_TAB_TAG = /^[0-9a-f]{32}$/
@@ -155,7 +155,7 @@ export class GuestMcpSessions {
       this.sessions.delete(oldest)
     }
     const id = randomUUID()
-    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0, watchesSeen: 0, seatKey: null, desktopTag })
+    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0, wakeSeat: null, watchesSeen: 0, seatKey: null, desktopTag })
     return id
   }
 
@@ -235,8 +235,9 @@ function withWakeRequest(sessions: GuestMcpSessions, session: Session, mailbox: 
   if (!seat || !sessions.wakeUrl || !isClaudeCodeClient(session.client) || !WAKE_ASKING_TOOLS.has(tool)) return result
   if (seat.closed !== null || seat.meetingId === '' || !isRecord(result) || result.isError || !Array.isArray(result.content)) return result
   // A command it started since the last answer did what was asked, even one a wake-up already ended: the asks start over.
+  // So do they for another seat: a new meeting has its own command, which the agent has not been asked for yet.
   const started = mailbox.watchesStarted(seat.id)
-  if (started !== session.watchesSeen) { session.watchesSeen = started; session.wakeAsks = 0 }
+  if (seat.id !== session.wakeSeat || started !== session.watchesSeen) { session.wakeSeat = seat.id; session.watchesSeen = started; session.wakeAsks = 0 }
   if (mailbox.watching(seat.id)) { session.wakeAsks = 0; return result }
   if (session.wakeAsks >= MAX_WAKE_ASKS) return result
   session.wakeAsks++

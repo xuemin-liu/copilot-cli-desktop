@@ -529,3 +529,20 @@ test('over HTTP: a wake-up before the seats are restored is told to retry, with 
     assert.equal((await post(port, `/meeting-wake/${'0'.repeat(32)}`)).status, 404, 'once restored, an unknown key is gone')
   } finally { await server.close() }
 })
+
+test('a session that runs out of asks in one meeting is asked again for the next meeting it joins', async () => {
+  const mailbox = new GuestMailbox(realMeetingTimers)
+  const sessions = new GuestMcpSessions()
+  sessions.wakeUrl = (key) => `http://127.0.0.1:1/meeting-wake/${key}`
+  const claude = await mcpClient(sessions, mailbox, 'claude-code')
+  assert.equal((await claude('meeting_join', { meeting: 'K7QF' })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 2)
+  assert.equal((await claude('meeting_next', { wait_seconds: 1 })).length, 1, 'asked enough in this meeting')
+  await claude('meeting_leave')
+
+  const joined = await claude('meeting_join', { meeting: 'M2QF' })
+  const seat = mailbox.seatsOf('M2QF')[0]!
+  assert.equal(joined.length, 2, 'the new seat has a command of its own to ask for')
+  assert.match(joined[1]!, new RegExp(`meeting-wake/${guestWakeKey(seat)}`))
+})
