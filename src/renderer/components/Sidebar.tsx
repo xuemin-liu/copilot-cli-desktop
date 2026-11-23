@@ -346,10 +346,14 @@ export function Sidebar({
       : null
     const worktreeLabel = tab.worktree ? (tab.worktree.branch ?? tab.worktree.name) : null
     const fanOutLabel = tab.fanOutLabel ?? null
-    const meeting = meetings.find((candidate) => candidate.stage !== 'closed'
-      && (candidate.hostTabId === tab.id || candidate.participants.some((participant) => participant.tabId === tab.id)))
+    // A Claude Code or Codex tab takes part as an outside agent, under a seat id; main names the tab that seat runs in.
+    const hosts = (candidate: MeetingView): boolean => candidate.hostTabId === tab.id || candidate.hostDesktopTabId === tab.id
+    const seatOf = (candidate: MeetingView) => candidate.participants.find((participant) => participant.tabId === tab.id || participant.desktopTabId === tab.id)
+    const meeting = meetings.find((candidate) => candidate.stage !== 'closed' && (hosts(candidate) || seatOf(candidate) !== undefined))
+    const hosting = meeting !== undefined && hosts(meeting)
+    const seat = meeting && !hosting ? seatOf(meeting) : undefined
     const meetingLabel = meeting
-      ? `Meeting ${meeting.id} · ${meeting.hostTabId === tab.id ? 'host' : meeting.waitingFor.includes(tab.id) ? 'reviewing' : 'reviewer'}${(() => { const role = meeting.participants.find((participant) => participant.tabId === tab.id)?.role; return role ? ` as ${role}` : '' })()} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
+      ? `Meeting ${meeting.id} · ${hosting ? 'host' : seat && meeting.waitingFor.includes(seat.tabId) ? 'reviewing' : 'reviewer'}${seat?.role ? ` as ${seat.role}` : ''} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
       : null
     const cliLabel = tab.cli ? sessionCliLabel(tab.cli) : null
     const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${cliLabel && cliLabel !== tab.title ? ` (${cliLabel})` : ''}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
@@ -371,7 +375,7 @@ export function Sidebar({
       </span>}
       {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel || meetingLabel || cliLabel) && <span className="sidebar-session-activity">
         {cliLabel && <span className="session-cli-chip" title={`This tab runs ${cliLabel}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{cliLabel}</span>}
-        {meetingLabel && <span className={`session-meeting-chip${meeting?.stage === 'paused' ? ' session-meeting-paused' : ''}`} title={meetingLabel}>⇄ {meeting!.id}{meeting!.hostTabId === tab.id ? ' host' : ''} · R{meeting!.round}</span>}
+        {meetingLabel && <span className={`session-meeting-chip${meeting?.stage === 'paused' ? ' session-meeting-paused' : ''}`} title={meetingLabel}>⇄ {meeting!.id}{hosting ? ' host' : ''} · R{meeting!.round}</span>}
         {fanOutLabel && <span className="session-fanout-chip" title={`Started together: ${fanOutLabel}`}>{fanOutLabel}</span>}
         {worktreeLabel && <span className="session-worktree-chip" title={`Worktree ${tab.worktree?.path ?? ''}`}>⎇ {worktreeLabel}</span>}
         {detail ? statusLabel : ''}

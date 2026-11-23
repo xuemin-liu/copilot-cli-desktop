@@ -68,8 +68,11 @@ const STAGES: readonly MeetingStage[] = ['waiting', 'reviewing', 'host', 'paused
 const OUTCOMES: readonly MeetingOutcome[] = ['agreed', 'ended', 'stopped', 'host-left']
 const DELIVERY_KINDS: readonly MeetingDeliveryKind[] = ['post', 'vote', 'discussion', 'digest', 'agreed', 'reminder']
 
-/** `guest`: an outside agent (meeting-guests.ts), whose `tabId` is its seat id; filled in by main, which knows the seats. */
-export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean; guest?: GuestContact }
+/**
+ * `guest`: an outside agent (meeting-guests.ts), whose `tabId` is its seat id; filled in by main, which knows the seats.
+ * `desktopTabId`: the desktop tab that guest runs in (a Claude Code or Codex tab), when there is one.
+ */
+export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean; guest?: GuestContact; desktopTabId?: string }
 
 /** An outside agent invited to the meeting that has not asked for its first message yet. */
 export interface MeetingInviteView { id: string; name: string; role: string | null }
@@ -83,6 +86,8 @@ export interface MeetingView {
   hostTitle: string
   /** An outside agent hosts it; filled in by main, like a participant's `guest`. */
   hostGuest?: GuestContact
+  /** The desktop tab that outside host runs in, like a participant's `desktopTabId`. */
+  hostDesktopTabId?: string
   topic: string
   stage: MeetingStage
   round: number

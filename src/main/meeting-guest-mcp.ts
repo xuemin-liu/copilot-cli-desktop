@@ -127,7 +127,10 @@ const TOOL_COMMANDS: Record<string, GuestCommand> = {
  * `meeting_start` of this session is waiting (on the folder check or Git), so no other join or start may slip past the
  * one-meeting check meanwhile.
  */
-interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number }
+interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean; wakeAsks: number; desktopTag: string | null }
+
+/** The `tab` query of the address the desktop gives an agent it runs in one of its own tabs: which tab its seat shows on. */
+export const DESKTOP_TAB_TAG = /^[0-9a-f]{32}$/
 
 /** An agent asked this many times without starting its wake-up is not going to: it may be refused, and the person asked each time. */
 const MAX_WAKE_ASKS = 3
@@ -146,13 +149,13 @@ export class GuestMcpSessions {
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
-  open(client: string | null = null): string {
+  open(client: string | null = null, desktopTag: string | null = null): string {
     if (this.sessions.size >= MAX_MCP_SESSIONS) {
       const oldest = [...this.sessions].sort((a, b) => a[1].usedAt - b[1].usedAt)[0]![0]
       this.sessions.delete(oldest)
     }
     const id = randomUUID()
-    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0 })
+    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false, wakeAsks: 0, desktopTag })
     return id
   }
 
@@ -184,7 +187,7 @@ const rpcError = (id: unknown, code: number, message: string): unknown => ({ jso
 const toolText = (text: string, isError = false): unknown => ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) })
 
 /** One JSON-RPC message from an MCP client. `sessionId` is its `Mcp-Session-Id` header. */
-export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: GuestMailbox, deps: GuestDeps, sessionId: string | undefined, message: unknown, signal?: AbortSignal): Promise<McpAnswer> {
+export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: GuestMailbox, deps: GuestDeps, sessionId: string | undefined, message: unknown, signal?: AbortSignal, desktopTag: string | null = null): Promise<McpAnswer> {
   if (!isRecord(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
     // A response or something else that is not a request: nothing to answer.
     if (isRecord(message) && message.jsonrpc === '2.0' && ('result' in message || 'error' in message)) return { status: 202 }
@@ -198,7 +201,7 @@ export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: Gues
     const client = isRecord(params.clientInfo) && typeof params.clientInfo.name === 'string' ? params.clientInfo.name.slice(0, 200) : null
     return {
       status: 200,
-      sessionId: sessions.open(client),
+      sessionId: sessions.open(client, desktopTag !== null && DESKTOP_TAB_TAG.test(desktopTag) ? desktopTag : null),
       body: { jsonrpc: '2.0', id, result: { protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: GUEST_MCP_SERVER_NAME, version: '1' }, instructions: guestMcpInstructions(client) } },
     }
   }
@@ -216,6 +219,7 @@ export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: Gues
       const seat = session.seatId ? mailbox.seat(session.seatId) : null
       // Codex names its thread on every call, which is all it takes to wake it later.
       const thread = isRecord(params._meta) ? params._meta.threadId : null
+      if (seat && session.desktopTag !== null) mailbox.setDesktopTag(seat, session.desktopTag)
       if (seat && isCodexClient(session.client) && typeof thread === 'string' && CODEX_THREAD_PATTERN.test(thread)) mailbox.setCodexThread(seat, thread)
       return { status: 200, body: { jsonrpc: '2.0', id, result: withWakeRequest(sessions, session, mailbox, seat, name, result) } }
     }
@@ -423,7 +427,8 @@ export class GuestMcpServer {
       let message: unknown
       try { message = JSON.parse(raw.toString('utf8')) } catch { send(400, rpcError(null, -32700, 'Parse error')); return }
       if (Array.isArray(message)) { send(400, rpcError(null, -32600, 'Batches are not supported')); return }
-      const answer = await handleMcpMessage(this.sessions, this.mailbox, this.deps, sessionId, message, gone.signal)
+      const desktopTag = new URL(request.url ?? '', 'http://127.0.0.1').searchParams.get('tab')
+      const answer = await handleMcpMessage(this.sessions, this.mailbox, this.deps, sessionId, message, gone.signal, desktopTag)
       send(answer.status, answer.body, answer.sessionId ? { 'mcp-session-id': answer.sessionId } : {})
     } catch {
       send(500, rpcError(null, -32603, 'The desktop could not handle the request'))

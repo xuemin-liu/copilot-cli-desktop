@@ -217,6 +217,28 @@ test('the HTTP endpoint answers JSON on POST, refuses what a web page could send
   }
 })
 
+test('the tag in the address a desktop tab launched its agent with goes on the seat; a malformed tag or none is ignored', async () => {
+  const { mailbox, deps } = meeting()
+  const server = new GuestMcpServer(mailbox, { ...deps, isOpen: () => true, join: () => null })
+  const port = (await server.listen(0))!
+  const json = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+  const tag = '0123456789abcdef0123456789abcdef'
+  const joinFrom = async (path: string, name: string): Promise<string | null> => {
+    const init = await http(port, 'POST', json, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }), path)
+    const headers = { ...json, 'mcp-session-id': String(init.headers['mcp-session-id']) }
+    await http(port, 'POST', headers, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'meeting_join', arguments: { meeting: 'K7QF', name } } }), path)
+    return mailbox.seatsOf('K7QF').find((seat) => seat.name === name)!.desktopTag
+  }
+  try {
+    assert.equal(await joinFrom(`/mcp?tab=${tag}`, 'Tagged'), tag)
+    assert.equal(mailbox.views().find((view) => view.name === 'Tagged')!.desktopTag, tag, 'main reads it from the views')
+    assert.equal(await joinFrom('/mcp?tab=not-a-tag', 'Malformed'), null)
+    assert.equal(await joinFrom('/mcp', 'Untagged'), null)
+  } finally {
+    await server.close()
+  }
+})
+
 test('every request over HTTP refreshes the state, so a quiet agent that asks for its status clears from the bar at once', async () => {
   const { hub, mailbox, deps } = meeting()
   hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: null })

@@ -75,12 +75,14 @@ export interface GuestSeat {
   via: GuestChannel | null
   /** The Codex thread that uses this seat, which Codex names on its tool calls: where a wake-up goes. */
   codexThread: string | null
+  /** The desktop tab this agent runs in, by the tag in the address the desktop launched it with: the tab shows the seat. */
+  desktopTag: string | null
 }
 
 export type GuestChannel = 'helper' | 'mcp'
 
 /** What the meeting bar shows of a seat. */
-export interface GuestView extends GuestContact { id: string; meetingId: string; kind: GuestKind; name: string; role: string | null; joined: boolean }
+export interface GuestView extends GuestContact { id: string; meetingId: string; kind: GuestKind; name: string; role: string | null; joined: boolean; desktopTag: string | null }
 
 interface Queue {
   items: MeetingDelivery[]
@@ -154,7 +156,7 @@ export class GuestMailbox {
     const seat: GuestSeat = {
       id, meetingId: kind === 'host' ? '' : meetingId, kind, folder: kind === 'host' ? options.folder ?? null : null, granted: options.granted ?? true, farewell: null,
       name: cleanGuestName(name) || 'Outside agent', role: kind === 'host' ? null : role ? cleanRole(role) || null : null,
-      tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null, codexThread: null,
+      tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null, codexThread: null, desktopTag: null,
     }
     this.seats.set(id, seat)
     this.changed()
@@ -200,9 +202,9 @@ export class GuestMailbox {
   /** Open seats, joined or still invited. */
   views(): GuestView[] {
     return [...this.seats.values()].filter((seat) => seat.closed === null)
-      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt, codexThread }) => {
+      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt, codexThread, desktopTag }) => {
         const wokenAt = this.woken.get(id) ?? null
-        return { id, meetingId, kind, name, role, joined, lastSeenAt, waiting: this.waiting(id) || this.watching(id) || (codexThread !== null && wokenAt === null), holding: this.given(id) !== null, wokenAt }
+        return { id, meetingId, kind, name, role, joined, lastSeenAt, desktopTag, waiting: this.waiting(id) || this.watching(id) || (codexThread !== null && wokenAt === null), holding: this.given(id) !== null, wokenAt }
       })
   }
 
@@ -216,6 +218,11 @@ export class GuestMailbox {
   /** The Codex thread behind the seat, from its latest tool call. */
   setCodexThread(seat: GuestSeat, threadId: string): void {
     if (seat.codexThread !== threadId) { seat.codexThread = threadId; this.changed() }
+  }
+
+  /** The desktop tab behind the seat, from the address its MCP session came in on. */
+  setDesktopTag(seat: GuestSeat, tag: string): void {
+    if (seat.desktopTag !== tag) { seat.desktopTag = tag; this.changed() }
   }
 
   /** The seat a wake-up command belongs to, or null. */
@@ -460,6 +467,8 @@ export class GuestMailbox {
         closedAt: time(value.closedAt),
         via: value.via === 'helper' || value.via === 'mcp' ? value.via : null,
         codexThread: typeof value.codexThread === 'string' && /^[0-9a-f-]{36}$/i.test(value.codexThread) ? value.codexThread : null,
+        // Tags are made fresh each run; the agent's next tool call in its relaunched tab names the new one.
+        desktopTag: null,
       })
     }
   }
