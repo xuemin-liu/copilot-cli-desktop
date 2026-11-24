@@ -10,7 +10,7 @@ import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
 import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
 import { requestGitCursorContext } from '../git-cursor-context.js'
-import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
+import { buildLogicalLine, parseTerminalHyperlink, scanLineForLinks, type TerminalLinkTarget } from '../terminal-links.js'
 import { LinkClickGate } from '../terminal-link-click.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -232,7 +232,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     }
 
     // A plain click on a path opens the file in a File tab; with Ctrl (Cmd on macOS) it is shown in the file manager.
-    const openLink = async (link: DetectedLink, reveal: boolean): Promise<void> => {
+    const openLink = async (link: TerminalLinkTarget, reveal: boolean): Promise<void> => {
       const request = ++linkRequestRef.current
       setLinkNotice(null)
       // An open that answers at once shows nothing; only one that takes a while says it is still working.
@@ -264,6 +264,16 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // A release that happens in another window never arrives here: forget the press it would have answered.
     const forgetLinkPress = (): void => linkClick.reset()
     window.addEventListener('blur', forgetLinkPress)
+    const activateLink = (event: MouseEvent, link: TerminalLinkTarget | null): void => {
+      if (link && linkClick.opens()) void openLink(link, event.ctrlKey || event.metaKey)
+    }
+    // Copilot renders Markdown destinations as OSC 8 links. xterm only activates HTTP(S) by default.
+    terminal.options.linkHandler = {
+      allowNonHttpProtocols: true,
+      activate: (event, uri) => activateLink(event, parseTerminalHyperlink(uri)),
+      hover: (_event, uri) => linkClick.hover(parseTerminalHyperlink(uri) !== null),
+      leave: () => linkClick.hover(false),
+    }
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
     // input unchanged while printed URLs and paths remain clickable.
@@ -281,7 +291,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: (event: MouseEvent) => { if (linkClick.opens()) void openLink(link, event.ctrlKey || event.metaKey) },
+            activate: (event: MouseEvent) => activateLink(event, link),
             hover: () => linkClick.hover(true),
             leave: () => linkClick.hover(false),
           }]

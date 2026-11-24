@@ -3,9 +3,28 @@ import test from 'node:test'
 import {
   LOGICAL_LINE_ROWS,
   buildLogicalLine,
+  parseTerminalHyperlink,
   scanLineForLinks,
   type BufferLineLike,
 } from '../renderer/terminal-links.js'
+
+test('OSC 8 file destinations resolve as paths with optional source locations', () => {
+  assert.deepEqual(parseTerminalHyperlink('README.md'), { type: 'path', text: 'README.md' })
+  assert.deepEqual(parseTerminalHyperlink('src/app.ts#L42-L44'), { type: 'path', text: 'src/app.ts', line: 42 })
+  assert.deepEqual(parseTerminalHyperlink('docs/My%20Guide%23draft.md:12:3'), {
+    type: 'path', text: 'docs/My Guide#draft.md', line: 12, column: 3,
+  })
+  assert.deepEqual(parseTerminalHyperlink(String.raw`D:\repo\app.ts`), { type: 'path', text: String.raw`D:\repo\app.ts` })
+})
+
+test('OSC 8 URLs keep their destination and unsupported protocols stay outside the link handlers', () => {
+  const url = 'https://example.com/docs?q=1#L42'
+  assert.deepEqual(parseTerminalHyperlink(url), { type: 'url', text: url })
+  for (const uri of ['#heading', 'javascript:alert(1)', 'data:text/html,test', 'file://server/share',
+    '//server/share', '%5C%5Cserver%5Cshare', 'src/%00file.ts']) {
+    assert.equal(parseTerminalHyperlink(uri), null, uri)
+  }
+})
 
 test('scanLineForLinks finds absolute macOS and Linux paths, without their location or a lone folder', () => {
   const texts = (line: string): string[] => scanLineForLinks(line).map((link) => link.text)

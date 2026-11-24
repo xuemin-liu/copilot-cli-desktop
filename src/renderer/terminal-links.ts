@@ -1,11 +1,14 @@
-export interface DetectedLink {
+export interface TerminalLinkTarget {
   type: 'url' | 'path'
   text: string
-  start: number
-  end: number
-  /** Where in the file a path link points, from a `path:line:column` or `path(line,column)` suffix. */
+  /** Where in the file a path link points. */
   line?: number
   column?: number
+}
+
+export interface DetectedLink extends TerminalLinkTarget {
+  start: number
+  end: number
 }
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
@@ -42,6 +45,21 @@ function splitLocation(candidate: string): { text: string; line?: number; column
   if (!match) return { text: candidate }
   const line = Number(match[1] ?? match[3]), column = Number(match[2] ?? match[4])
   return { text: candidate.slice(0, match.index), ...(line > 0 ? { line, ...(column > 0 ? { column } : {}) } : {}) }
+}
+
+/** Interpret the OSC 8 destination independently of its displayed label. */
+export function parseTerminalHyperlink(uri: string): TerminalLinkTarget | null {
+  if (uri.length > 8_192 || /[\x00-\x1f\x7f]/.test(uri)) return null
+  if (/^https?:\/\//i.test(uri)) return { type: 'url', text: uri }
+
+  const { text: encodedPath, ...location } = splitLocation(uri.split(/[?#]/, 1)[0] ?? '')
+  let text = encodedPath
+  try { text = decodeURIComponent(text) } catch { /* Allow literal percent signs in CLI paths. */ }
+  if (!text.trim() || /[\x00-\x1f\x7f]|^[\\/]{2}/.test(text)) return null
+  if (/^[a-z][a-z\d+.-]*:/i.test(text) && !/^[a-z]:[\\/]/i.test(text)) return null
+
+  const fragmentLine = /#L([1-9]\d*)(?:-L?[1-9]\d*)?$/i.exec(uri)
+  return { type: 'path', text, ...(fragmentLine ? { line: Number(fragmentLine[1]) } : {}), ...location }
 }
 
 /** A ratio, a version or a date written with slashes ("3.5/4.0", "v1.2/3.4", "10/11/2026.5"): every part is a number. */

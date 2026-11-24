@@ -56,8 +56,11 @@ if (!process.versions.electron) {
     // What the terminal sent to the session process. The history turns mouse reporting on, as Copilot does.
     const written = []
     const leftButton = data => { const report = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data); return Boolean(report) && (Number(report[1]) & 99) === 0 }
+    const hyperlink = (label, target) => `\u001b]8;id=copilot;${target}\u001b\\${label}\u001b]8;;\u001b\\`
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\u001b[?1003h\u001b[?1006h' + [
       'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
+      hyperlink('Read the guide', 'README.md'), hyperlink('View application', 'src/app.ts#L42-L44'),
+      hyperlink('Open website', 'https://example.com/docs'), hyperlink('Unrecognized target', 'javascript:alert(1)'),
     ].join('\r\n') }))
     // Every size the terminal reported to the session process. A size change makes the CLI redraw its whole screen.
     const sizes = []
@@ -188,6 +191,20 @@ if (!process.versions.electron) {
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: String.raw`C:\My Repo\lib\file.ts`, location: { line: 9, column: 3 } })
       await clickLink('src/app.ts', ['control'])
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7, reveal: true } })
+      written.length = 0
+      await clickLink('Read the guide')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'README.md' })
+      await clickLink('View application')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42 } })
+      await clickLink('View application', ['control'])
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, reveal: true } })
+      await clickLink('Open website')
+      assert.deepEqual(calls.pop(), { type: 'url', text: 'https://example.com/docs' })
+      assert.deepEqual(written.filter(leftButton), [], 'embedded links consume the mouse click')
+      calls.length = 0
+      await clickLink('Unrecognized target')
+      assert.equal(calls.length, 0, 'unsupported protocols do not open')
+      assert.equal(written.filter(leftButton).length, 2, 'unsupported targets leave the click with the CLI')
       mode = 'pending'
       await clickLink('src/app.ts', ['control'])
       assert.equal(await notice(), null, 'nothing is shown for an open that may answer at once')
@@ -264,7 +281,7 @@ if (!process.versions.electron) {
       // Through every click, notice, dismissal and tab switch above, the session process was never told a new size.
       assert.equal(await terminalBox(), box)
       assert.deepEqual([...new Set(sizes)].filter(reported => reported !== size), [], `the terminal changed size: ${sizes.join(' ')}`)
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'OSC 8 relative file and web links', 'unsupported OSC 8 protocols ignored', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
     } catch (error) {
       console.error(error)
