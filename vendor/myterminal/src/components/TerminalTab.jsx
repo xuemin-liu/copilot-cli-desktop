@@ -203,12 +203,14 @@ export default function TerminalTab({ tab, isActive, host }) {
   }, [isActive])
 
   // Context menu for copy/paste
-  const handleContextMenu = (e) => {
+  // The split pane shares this menu, so it records which pane was clicked.
+  const contextTerminal = (pane) => (pane === 'split' ? splitTermRef : terminalInstanceRef).current
+  const handleContextMenu = (e, pane = 'main') => {
     e.preventDefault()
     // Clamp so menu (≈120×70) doesn't overflow the window
     const x = Math.min(e.clientX, window.innerWidth - 130)
     const y = Math.min(e.clientY, window.innerHeight - 80)
-    setCtxMenu({ x, y, hasSelection: !!terminalInstanceRef.current?.getSelection()?.length })
+    setCtxMenu({ x, y, pane, hasSelection: !!contextTerminal(pane)?.getSelection()?.length })
   }
   // Menu/dialog clicks steal focus from xterm's hidden textarea, so the next
   // keystroke (e.g. Enter) wouldn't reach the terminal until refocused.
@@ -217,16 +219,18 @@ export default function TerminalTab({ tab, isActive, host }) {
   // so focus must land where the action's output goes — not the split pane.
   const focusTerminal = () => terminalInstanceRef.current?.focus()
   const handleCopy = () => {
-    const sel = terminalInstanceRef.current?.getSelection()
+    const term = contextTerminal(ctxMenu?.pane)
+    const sel = term?.getSelection()
     if (sel) (host ? api.clipboard : navigator.clipboard).writeText(sel)
     setCtxMenu(null)
-    focusTerminal()
+    term?.focus()
   }
   const handlePaste = async () => {
-    const text = await (host ? api.clipboard : navigator.clipboard).readText()
-    if (text) terminalInstanceRef.current?.paste(text)
+    const term = contextTerminal(ctxMenu?.pane)
     setCtxMenu(null)
-    focusTerminal()
+    const text = await (host ? api.clipboard : navigator.clipboard).readText()
+    if (text) term?.paste(text)
+    term?.focus()
   }
 
   useEffect(() => {
@@ -932,6 +936,7 @@ export default function TerminalTab({ tab, isActive, host }) {
                 config={tab.splitConfig}
                 termInstanceRef={splitTermRef}
                 onFocused={() => { focusedPaneRef.current = 'split' }}
+                onContextMenu={(e) => handleContextMenu(e, 'split')}
                 onClose={() => { removeSplitPane(tab.id); focusedPaneRef.current = 'main' }}
               />
             </div>

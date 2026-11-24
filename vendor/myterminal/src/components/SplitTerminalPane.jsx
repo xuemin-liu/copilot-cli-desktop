@@ -18,7 +18,7 @@ const TERMINAL_THEME = {
 
 const MAX_RECONNECT = 5
 
-export default function SplitTerminalPane({ host, channelId, config, onClose, termInstanceRef, onFocused }) {
+export default function SplitTerminalPane({ host, channelId, config, onClose, termInstanceRef, onFocused, onContextMenu }) {
   const api = host?.api || window.electronAPI
   const sessionStore = host?.store || useSessionStore
   const termRef = useRef(null)
@@ -146,7 +146,7 @@ export default function SplitTerminalPane({ host, channelId, config, onClose, te
       >
         <X size={14} />
       </button>
-      <div ref={termRef} style={{ width: '100%', height: '100%', padding: 4 }} />
+      <div ref={termRef} onContextMenu={onContextMenu} style={{ width: '100%', height: '100%', padding: 4 }} />
     </div>
   )
 }
