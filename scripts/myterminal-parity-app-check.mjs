@@ -99,6 +99,21 @@ if (!process.versions.electron) {
       // Saving the preserved editor must use the replacement SSH transport.
       await ui(`[...document.querySelectorAll('${host} .file-editor-overlay button')].find(b=>b.textContent==='Save').click()`)
       await until(()=>ssh.files.get('/sample.txt').toString()==='UNSAVED_AUDIT','draft saved after reconnect')
+      // The shared context menu must act on the split pane that was right-clicked.
+      const splitMenu=`document.querySelector('${host} button[title="Close split pane"]').nextElementSibling.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:60,clientY:60}))`
+      await clipboard.writeText('SPLIT_PASTE')
+      await ui(splitMenu)
+      await until(()=>ui(`Boolean(document.querySelector('${host} .context-menu'))`),'split context menu')
+      await ui(`[...document.querySelectorAll('${host} .context-menu button')].find(b=>b.textContent==='Paste').click()`)
+      await until(async()=>(await action({action:'read',id:split.id})).output.includes('SPLIT_PASTE'),'split paste reached split SSH')
+      assert.equal((await action({action:'read',id})).output.includes('SPLIT_PASTE'),false,'split paste stays out of the main pane')
+      await ui(`parityTerminal().clearSelection();parityTerminal().write('MAIN_ONLY');paritySplit().write('SPLIT_COPY_MARK');void 0`)
+      await delay(200)
+      await ui(`paritySplit().selectAll();${splitMenu}`)
+      await until(()=>ui(`document.querySelector('${host} .context-menu button')?.disabled===false`),'split copy enabled')
+      await ui(`[...document.querySelectorAll('${host} .context-menu button')].find(b=>b.textContent==='Copy').click()`)
+      await until(async()=>(await clipboard.readText()).includes('SPLIT_COPY_MARK'),'split copy reached system clipboard')
+      assert.equal((await clipboard.readText()).includes('MAIN_ONLY'),false,'split copy does not copy the main pane')
       await action({action:'unsplit',id})
       await ui(`[...document.querySelectorAll('${host} .file-editor-overlay button')].find(b=>b.textContent==='Close').click()`)
       await ui(`document.querySelector('${host} button[title="Toggle SFTP panel"]').click()`)
