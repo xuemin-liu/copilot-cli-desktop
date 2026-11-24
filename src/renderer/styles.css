@@ -685,6 +685,26 @@ button:disabled {
 
 .terminal-link-error button { pointer-events: auto; }
 
+.terminal-link-preview {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  border: 1px solid rgba(139, 148, 158, 0.35);
+  border-radius: 4px;
+  background: rgba(11, 16, 32, 0.92);
+  color: #c9d1d9;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+}
+
 .terminal-viewport {
   position: relative;
   flex: 1;

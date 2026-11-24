@@ -13,6 +13,7 @@ const BUTTON = 3, MOTION = 32, WHEEL = 64
 export class LinkClickGate {
   private overLink = false
   private armed = false
+  private primary = false
   private held: string | null = null
   private dragged = false
 
@@ -24,14 +25,15 @@ export class LinkClickGate {
     // A press still held from a gesture that never finished here belongs to nothing now.
     this.reset()
     this.dragged = false
-    this.armed = button === 0 && !shiftKey && this.overLink
+    this.primary = button === 0 && !shiftKey
+    this.armed = this.primary && this.overLink
   }
 
   /**
-   * Whether the gesture that just ended opens the link. A press that was passed on to the CLI as the start of a drag does
-   * not: a gesture goes to the link or to the CLI, never to both, even when the drag ends on the link it began on.
+   * Whether the gesture that just ended opens the link. Only an undragged primary click qualifies: non-primary buttons
+   * (such as right-click Copy), Shift selections, and drags passed on to the CLI never open a link.
    */
-  opens(): boolean { return !this.dragged }
+  opens(): boolean { return this.primary && !this.dragged }
 
   /** What to send to the CLI for input the terminal produced. */
   filter(data: string): string[] {
@@ -53,5 +55,5 @@ export class LinkClickGate {
   }
 
   /** Forget a gesture that never finished, such as a press whose release happened outside the window. */
-  reset(): void { this.armed = false; this.held = null }
+  reset(): void { this.armed = false; this.primary = false; this.held = null }
 }
