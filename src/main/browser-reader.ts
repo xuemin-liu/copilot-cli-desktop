@@ -11,7 +11,7 @@ import { browserTestScript } from './browser-test-script.js'
 import { browserPickScript } from './browser-pick-script.js'
 import { formatPickedElement } from './browser-pick-format.js'
 import { validateBrowserTestPlan } from './browser-test-plan.js'
-import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-test-plan.js'
+import type { BrowserTestCondition, BrowserTestState, BrowserTestStep, TestDelivery } from './browser-test-plan.js'
 import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
@@ -198,6 +198,8 @@ export class BrowserReader {
   private captureEpoch = 0
   private testViewport: BrowserTestViewport | null = null
   private frameMarks = new Map<number, number>()
+  /** The frame-event mark at the test page's last document change: frameCommitted reads nothing older. */
+  private frameDocumentMark = 0
   private resourceSamples = new Map<number, { epoch: number; source: string; values: Record<string, number>; definitions: NonNullable<BrowserTestStep['samples']> }>()
 
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
@@ -239,6 +241,7 @@ export class BrowserReader {
       executionStarted = true
       const consoleStart = this.options.console?.mark()
       this.testConsole = this.options.console ? new TestConsoleWatch(plan, page.contents.id, this.options.console) : null
+      this.frameDocumentMark = 0
       const report = await runBrowserTest(plan, page.contents.id, { active,
         ...(this.testConsole ? { console: this.testConsole } : {}),
         execute: (step, stop) => this.testStep(page, step, stop),
@@ -308,7 +311,7 @@ export class BrowserReader {
       void this.message(page, method, params, sessionId || undefined).catch(() => {})
     })
     contents.on('did-start-navigation', details => {
-      if (!details.isSameDocument && this.testPageId === contents.id) this.captureEpoch++
+      if (!details.isSameDocument && this.testPageId === contents.id) { this.captureEpoch++; this.frameDocumentMark = this.testConsole?.frames.mark() ?? 0 }
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
     })
     // Main-page navigation must obey the origin grant. Embedded pages may load
@@ -765,6 +768,13 @@ export class BrowserReader {
     return { passed: true, data: { metrics }, detail: `Heap ${reading.jsHeapUsedMb} MB, ${reading.nodes} DOM nodes${growth ? `; ${growth.heapMb >= 0 ? '+' : ''}${growth.heapMb} MB and ${growth.nodes >= 0 ? '+' : ''}${growth.nodes} nodes since step ${step.since}` : ''}.` }
   }
 
+  /** Reads one frameCommitted condition from the events of this run's current document, after its `since` step if it names one. Synchronous. */
+  private frameCommitted(condition: BrowserTestCondition): TestObservation {
+    if (!this.testConsole) return { passed: false, reason: 'Console instrumentation is unavailable.' }
+    const spec = condition.commit!, since = spec.since === undefined ? 0 : this.frameMarks.get(spec.since)
+    if (since === undefined) return { passed: false, reason: 'Frame commit start is unavailable.' }
+    return this.testConsole.frames.committed(spec, Math.max(since, this.frameDocumentMark))
+  }
   private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal, conditionKey = 'c1'): Promise<TestObservation> {
     if (step.action === 'measure') return this.measure(page, step, signal)
     if (step.action === 'metrics') return this.metrics(page, step, signal)
@@ -801,10 +811,14 @@ export class BrowserReader {
       return { passed: !failures.length, reason: failures.join(' '), data: { networkSummary: summary } }
     }
     if (['waitFor', 'assert'].includes(step.action) && step.all) {
-      const results: { passed: boolean; reason?: string }[] = []
-      for (const [index, condition] of step.all.entries()) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal, `c${index + 1}`))
-      return { passed: results.every(result => result.passed), reason: results.find(result => !result.passed)?.reason ?? 'Combined readiness conditions are not all satisfied.', data: { conditions: results.map(result => ({ passed: result.passed, reason: result.reason })) } }
+      const results: { passed: boolean; reason?: string; data?: Record<string, unknown> }[] = []
+      for (const [index, condition] of step.all.entries()) if (condition.condition !== 'frameCommitted') results[index] = await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal, `c${index + 1}`)
+      // Frame conditions are read last and together, with no await between them: linked viewports are judged on one event state.
+      for (const [index, condition] of step.all.entries()) if (condition.condition === 'frameCommitted') results[index] = this.frameCommitted(condition)
+      return { passed: results.every(result => result.passed), reason: results.find(result => !result.passed)?.reason ?? 'Combined readiness conditions are not all satisfied.',
+        data: { conditions: results.map(result => ({ passed: result.passed, reason: result.reason, ...(result.data?.frameCommitted ? { frameCommitted: result.data.frameCommitted } : {}) })) } }
     }
+    if (['waitFor', 'assert'].includes(step.action) && step.condition === 'frameCommitted') return this.frameCommitted(step)
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'consoleMessage') return {
       passed: this.testConsole?.matched(String(step.expected), step.level) ?? false, reason: `No ${step.level ? `${step.level} ` : ''}console message from this run matches the pattern.` }
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'requestComplete') return {

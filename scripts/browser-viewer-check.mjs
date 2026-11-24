@@ -22,7 +22,7 @@ if (!process.versions.electron) {
     app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
     app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
     const html = `<!doctype html><style>body{margin:0;font:12px sans-serif}button{font-size:12px}#canvas{position:absolute;left:20px;top:100px;width:300px;height:150px}#drop{position:absolute;left:380px;top:120px;width:70px;height:70px;background:#777}#privateInput{position:absolute;left:500px;top:150px;width:80px}#source{display:inline-block;background:#ccc}</style>
-      <button id="good">Good</button><button id="bad">Transient stale</button><button id="fetch">Fetch</button><button id="load">Load cache</button><button id="close">Close cache</button>
+      <button id="good">Good</button><button id="bad">Transient stale</button><button id="late">Late commit</button><button id="linked">Linked</button><button id="fetch">Fetch</button><button id="load">Load cache</button><button id="close">Close cache</button>
       <button id="line">Line</button><button id="probe">Probe</button><button id="zoom">Zoom 2x</button><button id="reset">Reset</button>
       <div id="source" draggable="true">Series</div><div id="drop" data-dropped="no"></div>
       <canvas id="canvas" width="300" height="150"></canvas><input id="privateInput" value="SECRET_FIXTURE">
@@ -40,7 +40,9 @@ if (!process.versions.electron) {
         canvas.onpointermove=e=>{if(tool==='probe'){measurement.dataset.measurementValue=String([-1000,0,1000][Math.max(0,Math.min(2,Math.floor(point(e).x/100)))]);measurement.dataset.measurementUnit='HU'}};
         document.getElementById('load').onclick=()=>{cache.dataset.cacheBytes='4096';cache.dataset.workers='2';cache.dataset.gpuEstimate='8192'};
         document.getElementById('close').onclick=()=>{cache.dataset.cacheBytes='0';cache.dataset.workers='0';cache.dataset.gpuEstimate='0'};
-        const emit=(type,revision,frame)=>console.debug('desktop-test-frame '+JSON.stringify({version:1,type,viewport:'v1',epoch:'fixture1',revision,frame,timeMs:performance.now()}));
+        const emit=(type,revision,frame,viewport='v1')=>console.debug('desktop-test-frame '+JSON.stringify({version:1,type,viewport,epoch:'fixture1',revision,frame,timeMs:performance.now()}));
+        late.onclick=()=>{emit('request',10,7);setTimeout(()=>{state.dataset.render='7';emit('commit',10,7)},300)};
+        linked.onclick=()=>{emit('request',20,5);emit('request',20,5,'v2');setTimeout(()=>emit('commit',20,5),100);setTimeout(()=>emit('commit',20,5,'v2'),300)};
         good.onclick=()=>{for(let i=0;i<4;i++){emit('request',i,i);state.dataset.render=String(i);emit('commit',i,i)}console.debug('frames complete')};
         bad.onclick=()=>{emit('request',1,1);emit('request',2,2);state.dataset.render='2';emit('commit',2,2);state.dataset.render='1';emit('commit',1,1);emit('request',3,2);state.dataset.render='2';emit('commit',3,2);console.debug('frames complete')};
         document.getElementById('fetch').onclick=async()=>{state.dataset.ready='no';await fetch('/image').then(r=>r.text());await fetch('/image').then(r=>r.text());state.dataset.ready='yes'};
@@ -86,6 +88,21 @@ if (!process.versions.electron) {
       pass(await execute(frameSteps('#good')))
       const stale = await execute(frameSteps('#bad')); fail(stale, /stale/)
       assert.equal(await wc.executeJavaScript('state.dataset.render'), '2', 'final state is correct, but the transient stale commit was caught')
+      // frameCommitted: the wait ends when the viewport's latest request has committed the expected frame.
+      const committed = (frame, extra = {}, viewport = 'v1') => ({ condition: 'frameCommitted', commit: { viewport, epoch: 'fixture1', frame, ...extra } })
+      const late = await execute([{ action: 'click', selector: '#late' }, { action: 'waitFor', ...committed(7, { since: 1 }), timeoutMs: 5000 },
+        { action: 'assert', selector: '#state', condition: 'attribute', attribute: 'data-render', expected: '7' }, { action: 'assert', ...committed(7) }]); pass(late)
+      assert.equal(late.steps[1].data.frameCommitted.revision, 10)
+      assert.ok(late.steps[1].data.frameCommitted.requestToCommitMs >= 250, 'the wait saw the delayed commit, not the request')
+      fail(await execute([{ action: 'click', selector: '#good' }, { action: 'assert', ...committed(2, { since: 1 }), timeoutMs: 400 }]), /latest request of the viewport is for frame 3/)
+      // Evidence from before the since step does not count, even though the viewport still shows that frame.
+      fail(await execute([{ action: 'click', selector: '#good' }, { action: 'waitFor', ...committed(3, { since: 1 }) }, visible, { action: 'assert', ...committed(3, { since: 3 }), timeoutMs: 400 }]), /no frame request/)
+      // The stale fixture ends settled on revision 3: readiness now is true, the transient stale commit is frameSequence's to catch.
+      pass(await execute([{ action: 'click', selector: '#bad' }, { action: 'assert', ...committed(2, { since: 1 }) }]))
+      const both = await execute([{ action: 'click', selector: '#linked' }, { action: 'waitFor', all: [committed(5, { since: 1 }), committed(5, { since: 1 }, 'v2')], timeoutMs: 5000 }, visible]); pass(both)
+      assert.deepEqual(both.steps[1].data.conditions.map(condition => condition.frameCommitted.revision), [20, 20])
+      // A reload starts a new document: the old document's commit is no longer evidence.
+      fail(await execute([{ action: 'click', selector: '#good' }, { action: 'waitFor', ...committed(3) }, { action: 'reload' }, { action: 'assert', ...committed(3), timeoutMs: 400 }]), /no frame request/)
       const m = (unit, expected) => ({ action: 'assertMeasurement', selector: '#measurement', unit, expected, tolerance: 0.05 })
       pass(await execute([{ action: 'click', selector: '#line' }, { action: 'drag', selector: '#canvas', path: [{ x: 20, y: 70 }, { x: 120, y: 70 }] }, m('mm', 50),
         { action: 'click', selector: '#zoom' }, { action: 'drag', selector: '#canvas', path: [{ x: 40, y: 140 }, { x: 240, y: 140 }] }, m('mm', 50)]))

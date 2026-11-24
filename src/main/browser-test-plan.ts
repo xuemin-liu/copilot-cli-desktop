@@ -1,5 +1,5 @@
 import { parseSafeHttpUrl } from './external-targets.js'
-import { frameAlias, type FrameSequenceSpec } from './browser-frame-sequence.js'
+import { frameAlias, type FrameCommitSpec, type FrameSequenceSpec } from './browser-frame-sequence.js'
 import type { TestViewport } from './browser-test-viewport.js'
 
 export const MAX_TEST_BYTES = 128 * 1024
@@ -47,7 +47,9 @@ export interface BrowserTestCondition {
   targetRef?: string
   text?: string
   frame?: string
-  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable' | 'consoleMessage' | 'visualStable'
+  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable' | 'consoleMessage' | 'visualStable' | 'frameCommitted'
+  /** frameCommitted: the viewport, epoch and frame that must be the viewport's latest committed request. */
+  commit?: FrameCommitSpec
   /** consoleMessage: only messages of this level. */
   level?: ConsoleLevel
   attribute?: string
@@ -253,10 +255,11 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
   const attribute = (v: unknown): void => {
     if (typeof v !== 'string' || !/^(data-[a-z0-9][a-z0-9-]{0,63}|aria-[a-z-]{1,64}|role|title|class)$/.test(v)) fail('use a public data-*, aria-*, role, title or class attribute.')
   }
-  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request', 'region', 'ignore', 'imageTolerance']
-  const condition = (v: Record<string, unknown>): void => {
-    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage', 'visualStable'].includes(String(v.condition))) fail('unsupported condition.')
-    const pageWide = ['url', 'requestComplete', 'consoleMessage'].includes(String(v.condition))
+  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request', 'region', 'ignore', 'imageTolerance', 'commit']
+  /** `index` is the step's 0-based position: a frameCommitted `since` must name an earlier step. */
+  const condition = (v: Record<string, unknown>, index: number, measureEnd = false): void => {
+    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage', 'visualStable', 'frameCommitted'].includes(String(v.condition))) fail('unsupported condition.')
+    const pageWide = ['url', 'requestComplete', 'consoleMessage', 'frameCommitted'].includes(String(v.condition))
     if (v.condition === 'visualStable') {
       // The pixels of one top-frame element or of a viewport region, captured the way test screenshots are.
       if (v.frame !== undefined) fail('visualStable reads the top frame; it takes no frame.')
@@ -277,6 +280,14 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (!['finished', 'failed'].includes(String(request.state))) fail('request state must be finished or failed.')
       if (request.status !== undefined && (typeof request.status !== 'number' || !Number.isInteger(request.status) || request.status < 100 || request.status > 599)) fail('invalid request status.')
     } else if (v.request !== undefined) fail('request requires requestComplete.')
+    if (v.condition === 'frameCommitted') {
+      // Timing a commit needs its arrival relative to the start, which a polled wait does not have.
+      if (measureEnd) fail('frameCommitted is a waitFor or assert condition, not a measure end.')
+      const commit = object(v.commit); fields(commit, ['viewport', 'epoch', 'frame', 'since'])
+      if (!frameAlias(commit.viewport) || !frameAlias(commit.epoch)) fail('commit viewport and epoch must be 1–64 letters, digits, underscores or hyphens; use fixture aliases.')
+      if (typeof commit.frame !== 'number' || !Number.isInteger(commit.frame) || commit.frame < 0 || commit.frame > 10_000_000) fail('commit frame must be an integer within 0–10,000,000.')
+      if (commit.since !== undefined && (typeof commit.since !== 'number' || !Number.isInteger(commit.since) || commit.since < 1 || commit.since > index)) fail('commit since must name an earlier step.')
+    } else if (v.commit !== undefined) fail('commit requires the frameCommitted condition.')
     if (v.condition === 'attribute') attribute(v.attribute)
     else if (v.attribute !== undefined) fail('attribute requires the attribute condition.')
     let reference: Record<string, unknown> | undefined
@@ -485,7 +496,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
           if (from.at !== undefined && from.at !== 'start' && from.at !== 'end') fail('from.at is start or end.')
           if (from.level !== undefined) fail('level is for a consoleMessage start.')
         } else { glob(from); if (from.at !== undefined) fail('at is for a step start.') }
-        const to = object(step.to); fields(to, conditionFields); condition(to)
+        const to = object(step.to); fields(to, conditionFields); condition(to, index, true)
         timeout(step.timeoutMs, 60000)
         if (step.maxMs !== undefined) {
           if (typeof step.maxMs !== 'number' || !Number.isInteger(step.maxMs) || step.maxMs < 1 || step.maxMs > 600000) fail('maxMs must be an integer within 1–600000.')
@@ -526,8 +537,8 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (step.all !== undefined) {
         if (conditionFields.some(key => step[key] !== undefined)) fail('all cannot be combined with a single condition.')
         if (!Array.isArray(step.all) || step.all.length < 1 || step.all.length > 10) fail('use 1–10 readiness conditions.')
-        for (const rawCondition of step.all as unknown[]) { const c = object(rawCondition); fields(c, conditionFields); condition(c) }
-      } else if (step.action !== 'reload') condition(step)
+        for (const rawCondition of step.all as unknown[]) { const c = object(rawCondition); fields(c, conditionFields); condition(c, index) }
+      } else if (step.action !== 'reload') condition(step, index)
       const stableWindow = Math.max(0, ...[step, ...(Array.isArray(step.all) ? step.all as Record<string, unknown>[] : [])]
         .filter(c => c.condition === 'stable' || c.condition === 'visualStable').map(c => Number(c.stableMs ?? (c.condition === 'visualStable' ? 750 : 500))))
       if (stableWindow && stableWindow >= Number(step.timeoutMs ?? (step.action === 'assert' ? 5000 : 30000))) fail('the stable window must be shorter than the step timeout.')

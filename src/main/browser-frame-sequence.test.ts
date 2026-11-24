@@ -65,3 +65,67 @@ test('new test operations reject unbounded schemas and have real assertions', ()
   assert.throws(() => plan({ action: 'assertMeasurement', selector: '#probe', unit: 'pixels', expected: 1 }))
   assert.throws(() => plan({ action: 'sampleMetrics', selector: '#cache', samples: [{ name: 'bytes', attribute: 'data-bytes', unit: 'bytes', maxGrowth: 1 }] }))
 })
+
+test('frameCommitted holds only while the viewport is settled on the expected frame', () => {
+  const events = stream(), want = { viewport: 'v1', epoch: 'series1', frame: 42 }
+  assert.match(events.committed(want, 0).reason!, /no frame request/)
+  emit(events, 'request', 7, 41, 0); emit(events, 'request', 8, 42, 1)
+  assert.match(events.committed(want, 0).reason!, /not committed/)
+  emit(events, 'commit', 8, 42, 5)
+  const settled = events.committed(want, 0)
+  assert.ok(settled.passed)
+  assert.deepEqual([settled.data.frameCommitted.revision, settled.data.frameCommitted.requestToCommitMs, settled.data.frameCommitted.supersededRequests], [8, 4, 1])
+  assert.match(events.committed({ ...want, frame: 41 }, 0).reason!, /frame 42/)
+  // Evidence before the window does not count: the request must be seen after the mark.
+  assert.match(events.committed(want, events.mark()).reason!, /no frame request/)
+  // The superseded request commits late and overwrites the image.
+  emit(events, 'commit', 7, 41, 6)
+  assert.match(events.committed(want, 0).reason!, /stale commit \(frame 41\)/)
+  // A newer request for the same frame is not ready until it commits.
+  emit(events, 'request', 9, 42, 7)
+  assert.match(events.committed(want, 0).reason!, /not committed/)
+  emit(events, 'commit', 9, 42, 8)
+  assert.ok(events.committed(want, 0).passed)
+})
+
+test('frameCommitted rejects other epochs, broken identity and incomplete evidence', () => {
+  const want = { viewport: 'v1', epoch: 'series1', frame: 2 }
+  const ready = () => { const events = stream(); emit(events, 'request', 1, 2, 0); emit(events, 'commit', 1, 2, 1); return events }
+  let events = ready()
+  emit(events, 'request', 1, 9, 2, 2, { epoch: 'series2' })
+  assert.match(events.committed(want, 0).reason!, /another epoch/)
+  // An old-epoch commit cannot restore readiness after a new-epoch request, and a new-epoch commit ends the old epoch's.
+  emit(events, 'commit', 1, 2, 3)
+  assert.equal(events.committed(want, 0).passed, false)
+  events = ready(); emit(events, 'commit', 5, 2, 2, 2, { epoch: 'series2' })
+  assert.match(events.committed(want, 0).reason!, /Another epoch committed/)
+  events = ready(); emit(events, 'commit', 1, 2, 2)
+  assert.match(events.committed(want, 0).reason!, /more than once/)
+  events = stream(); emit(events, 'request', 3, 1, 0); emit(events, 'request', 2, 2, 1); emit(events, 'commit', 2, 2, 2)
+  assert.match(events.committed(want, 0).reason!, /strictly increasing/)
+  events = stream(); emit(events, 'request', 1, 2, 0); emit(events, 'commit', 1, 3, 1)
+  assert.match(events.committed(want, 0).reason!, /does not match/)
+  // Another viewport's events are independent; a malformed event fails closed until the window starts after it.
+  events = ready(); emit(events, 'request', 4, 7, 2, 2, { viewport: 'v2' })
+  assert.ok(events.committed(want, 0).passed)
+  events.add(FRAME_EVENT_PREFIX + '{bad')
+  assert.match(events.committed(want, 0).reason!, /incomplete or malformed/)
+  const mark = events.mark(); emit(events, 'request', 2, 2, 3); emit(events, 'commit', 2, 2, 4)
+  assert.ok(events.committed(want, mark).passed)
+})
+
+test('frameCommitted plans validate the frame, the earlier step and where the condition may appear', () => {
+  const commit = { viewport: 'v1', epoch: 'series1', frame: 42 }
+  const plan = (...steps: unknown[]) => validateBrowserTestPlan({ description: 'Viewer', expected: 'Correct', steps: [{ action: 'click', selector: '#start' }, ...steps] })
+  assert.ok(plan({ action: 'assert', condition: 'frameCommitted', commit }))
+  assert.ok(plan({ action: 'waitFor', condition: 'frameCommitted', commit: { ...commit, since: 1 } }, { action: 'assert', all: [{ condition: 'frameCommitted', commit: { ...commit, since: 2 } }] }))
+  for (const bad of [{ ...commit, since: 2 }, { ...commit, since: 0 }, { ...commit, frame: -1 }, { ...commit, frame: 1.5 }, { ...commit, viewport: 'patient/name' }, { ...commit, revision: 1 }, { viewport: 'v1', epoch: 'series1' }]) {
+    assert.throws(() => plan({ action: 'assert', condition: 'frameCommitted', commit: bad }))
+    assert.throws(() => plan({ action: 'assert', all: [{ condition: 'frameCommitted', commit: bad }] }))
+  }
+  assert.throws(() => plan({ action: 'assert', condition: 'frameCommitted' }))
+  assert.throws(() => plan({ action: 'assert', condition: 'frameCommitted', commit, selector: '#viewport-1' }))
+  assert.throws(() => plan({ action: 'assert', condition: 'frameCommitted', commit, expected: 'x' }))
+  assert.throws(() => plan({ action: 'assert', selector: '#a', condition: 'visible', commit }))
+  assert.throws(() => plan({ action: 'measure', name: 'slice', from: { step: 1 }, to: { condition: 'frameCommitted', commit }, maxMs: 100 }))
+})
