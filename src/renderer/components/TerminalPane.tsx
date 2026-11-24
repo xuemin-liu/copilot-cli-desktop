@@ -10,7 +10,15 @@ import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
 import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
 import { requestGitCursorContext } from '../git-cursor-context.js'
-import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
+import {
+  Osc8LinkFilter,
+  buildLogicalLine,
+  formatTerminalLinkPreview,
+  isSupportedOsc8Payload,
+  parseTerminalHyperlink,
+  scanLineForLinks,
+  type TerminalLinkTarget,
+} from '../terminal-links.js'
 import { LinkClickGate } from '../terminal-link-click.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -65,6 +73,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
   // `pending`: the open it describes has not answered yet. Only an answered one leaves by itself.
   const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info'; pending?: true } | null>(null)
+  const [linkPreview, setLinkPreview] = useState<string | null>(null)
   const linkRequestRef = useRef(0)
   const linkClickRef = useRef<LinkClickGate | null>(null)
 
@@ -224,15 +233,19 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       return false
     })
 
+    const osc8Filter = new Osc8LinkFilter()
+    // Reject unsupported OSC 8 destinations before xterm claims their cell range, so visible paths still fall back to scanLineForLinks.
+    const osc8Disposable = terminal.parser.registerOscHandler(8, (data) => !isSupportedOsc8Payload(data))
+
     const writePtyOutput = (data: string): void => {
-      terminal.write(data, () => {
+      terminal.write(osc8Filter.filter(data), () => {
         const copyStatusRendered = clipboardRedraw.isAwaitingCopyStatus() && readNativeCopyStatus() !== null
         clipboardRedraw.onOutputParsed(copyStatusRendered)
       })
     }
 
     // A plain click on a path opens the file in a File tab; with Ctrl (Cmd on macOS) it is shown in the file manager.
-    const openLink = async (link: DetectedLink, reveal: boolean): Promise<void> => {
+    const openLink = async (link: TerminalLinkTarget, reveal: boolean): Promise<void> => {
       const request = ++linkRequestRef.current
       setLinkNotice(null)
       // An open that answers at once shows nothing; only one that takes a while says it is still working.
@@ -262,8 +275,26 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     const linkClick = new LinkClickGate()
     linkClickRef.current = linkClick
     // A release that happens in another window never arrives here: forget the press it would have answered.
-    const forgetLinkPress = (): void => linkClick.reset()
+    const forgetLinkPress = (): void => { linkClick.reset(); setLinkPreview(null) }
     window.addEventListener('blur', forgetLinkPress)
+    const activateLink = (event: MouseEvent, link: TerminalLinkTarget | null): void => {
+      if (event.button !== 0 || event.shiftKey || !link || !linkClick.opens()) return
+      void openLink(link, event.ctrlKey || event.metaKey)
+    }
+    // Copilot renders Markdown destinations as OSC 8 links. xterm only activates HTTP(S) by default.
+    terminal.options.linkHandler = {
+      allowNonHttpProtocols: true,
+      activate: (event, uri) => activateLink(event, parseTerminalHyperlink(uri)),
+      hover: (_event, uri) => {
+        const link = parseTerminalHyperlink(uri)
+        linkClick.hover(link !== null)
+        setLinkPreview(link ? formatTerminalLinkPreview(link) : null)
+      },
+      leave: () => {
+        linkClick.hover(false)
+        setLinkPreview(null)
+      },
+    }
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
     // input unchanged while printed URLs and paths remain clickable.
@@ -281,8 +312,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: (event: MouseEvent) => { if (linkClick.opens()) void openLink(link, event.ctrlKey || event.metaKey) },
-            hover: () => linkClick.hover(true),
+            activate: (event: MouseEvent) => activateLink(event, link),
+            hover: () => { linkClick.hover(true); setLinkPreview(null) },
             leave: () => linkClick.hover(false),
           }]
         })
@@ -382,7 +413,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
     // Historic OSC 52 commands must not overwrite today's clipboard.
-    const replay = new TerminalReplay(data => terminal.write(historyLineEndings(stripOsc52Commands(data))), writePtyOutput)
+    const replay = new TerminalReplay(data => terminal.write(osc8Filter.filter(historyLineEndings(stripOsc52Commands(data)))), writePtyOutput)
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
       if (payload.tabId === tabId) replay.push(payload)
     })
@@ -431,6 +462,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       hasTextRef.current = false
       refitRef.current = null
       osc52Disposable.dispose()
+      osc8Disposable.dispose()
+      osc8Filter.reset()
       cursorHomeDisposable.dispose()
       eraseLineDisposable.dispose()
       copyStatusElement.remove()
@@ -453,6 +486,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // tabs; a late filesystem response must not resurrect the old message.
     linkRequestRef.current++
     setLinkNotice(null)
+    setLinkPreview(null)
     // A link press held when the tab was switched away has lost its release; it must not reach the CLI later.
     linkClickRef.current?.reset()
   }, [active, tabId])
@@ -492,6 +526,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   return <div className={`terminal-pane${active ? ' terminal-pane-active' : ''}`}>
     {active && linkNotice && <OperationError message={linkNotice.message} tone={linkNotice.tone} className="terminal-link-error"
       onDismiss={() => { linkRequestRef.current++; setLinkNotice(null) }} />}
+    {active && linkPreview && <div className="terminal-link-preview" role="status">{linkPreview}</div>}
     <div ref={containerRef} className="terminal-viewport" />
   </div>
 }

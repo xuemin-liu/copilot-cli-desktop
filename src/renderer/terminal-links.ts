@@ -1,11 +1,14 @@
-export interface DetectedLink {
+export interface TerminalLinkTarget {
   type: 'url' | 'path'
   text: string
-  start: number
-  end: number
-  /** Where in the file a path link points, from a `path:line:column` or `path(line,column)` suffix. */
+  /** Where in the file a path link points. */
   line?: number
   column?: number
+}
+
+export interface DetectedLink extends TerminalLinkTarget {
+  start: number
+  end: number
 }
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
@@ -42,6 +45,130 @@ function splitLocation(candidate: string): { text: string; line?: number; column
   if (!match) return { text: candidate }
   const line = Number(match[1] ?? match[3]), column = Number(match[2] ?? match[4])
   return { text: candidate.slice(0, match.index), ...(line > 0 ? { line, ...(column > 0 ? { column } : {}) } : {}) }
+}
+
+const MAX_OSC8_SEQUENCE_CHARS = 16_384
+
+/** Format a parsed link destination for the hover preview overlay. */
+export function formatTerminalLinkPreview(link: TerminalLinkTarget): string {
+  if (link.type === 'url') return link.text
+  return `${link.text}${link.line ? `:${link.line}${link.column ? `:${link.column}` : ''}` : ''}`
+}
+
+/**
+ * Interpret the OSC 8 destination independently of its displayed label.
+ */
+export function parseTerminalHyperlink(uri: string): TerminalLinkTarget | null {
+  if (uri.length > 8_192 || /[\x00-\x1f\x7f]/.test(uri)) return null
+  if (/^https?:\/\//i.test(uri)) return { type: 'url', text: uri }
+
+  const { text: encodedPath, ...location } = splitLocation(uri.split(/[?#]/, 1)[0] ?? '')
+  let text = encodedPath
+  try { text = decodeURIComponent(text) } catch { /* Allow literal percent signs in CLI paths. */ }
+  if (!text.trim() || /[\x00-\x1f\x7f]|^[\\/]{2}/.test(text)) return null
+  if (/^[a-z][a-z\d+.-]*:/i.test(text) && !/^[a-z]:[\\/]/i.test(text)) return null
+
+  const fragmentLine = /#L([1-9]\d*)(?:-L?[1-9]\d*)?$/i.exec(uri)
+  return { type: 'path', text, ...(fragmentLine ? { line: Number(fragmentLine[1]) } : {}), ...location }
+}
+
+/** Whether an OSC 8 payload (`<params>;<uri>`) should pass through to xterm. Closing sequences always pass through. */
+export function isSupportedOsc8Payload(data: string): boolean {
+  const separator = data.indexOf(';')
+  if (separator === -1) return false
+  const uri = data.slice(separator + 1)
+  return uri === '' || parseTerminalHyperlink(uri) !== null
+}
+
+/**
+ * Strip unsupported OSC 8 hyperlink openers before xterm registers them, replacing each with an OSC 8 close sequence so
+ * any prior link ends cleanly while the visible label stays plain text for the text link scanner.
+ */
+export class Osc8LinkFilter {
+  private pending = ''
+  private discarding = false
+
+  filter(chunk: string): string {
+    const text = this.pending + chunk
+    this.pending = ''
+    let output = ''
+    let index = 0
+
+    while (index < text.length) {
+      if (this.discarding) {
+        const terminated = findOscTerminator(text, index)
+        if (terminated === null) {
+          // A trailing ESC may be the first byte of ST (`\x1b\\`).
+          if (text.endsWith('\u001b')) this.pending = '\u001b'
+          return output
+        }
+        this.discarding = false
+        output += '\u001b]8;;\u001b\\'
+        index = terminated.next
+        continue
+      }
+
+      const start = text.indexOf('\u001b]8;', index)
+      if (start === -1) {
+        const tail = trailingOsc8PrefixLength(text, index)
+        output += text.slice(index, text.length - tail)
+        if (tail > 0) this.pending = text.slice(text.length - tail)
+        return output
+      }
+
+      output += text.slice(index, start)
+      const terminated = findOscTerminator(text, start + 4)
+      if (terminated === null) {
+        if (text.length - start <= MAX_OSC8_SEQUENCE_CHARS) {
+          this.pending = text.slice(start)
+        } else {
+          this.discarding = true
+          if (text.endsWith('\u001b')) this.pending = '\u001b'
+        }
+        return output
+      }
+
+      if (terminated.aborted) {
+        // An unclosed OSC interrupted by CAN/SUB or another escape: leave the aborted bytes as-is and continue from the interrupt.
+        output += text.slice(start, terminated.next)
+        index = terminated.next
+        continue
+      }
+
+      const payload = text.slice(start + 4, terminated.payloadEnd)
+      output += isSupportedOsc8Payload(payload) ? text.slice(start, terminated.next) : '\u001b]8;;\u001b\\'
+      index = terminated.next
+    }
+
+    return output
+  }
+
+  reset(): void {
+    this.pending = ''
+    this.discarding = false
+  }
+}
+
+function findOscTerminator(text: string, from: number): { payloadEnd: number; next: number; aborted: boolean } | null {
+  for (let pos = from; pos < text.length; pos++) {
+    const code = text.charCodeAt(pos)
+    if (code === 0x07) return { payloadEnd: pos, next: pos + 1, aborted: false }
+    if (code === 0x18 || code === 0x1a) return { payloadEnd: pos, next: pos, aborted: true }
+    if (code === 0x1b) {
+      if (pos + 1 >= text.length) return null
+      if (text.charCodeAt(pos + 1) === 0x5c) return { payloadEnd: pos, next: pos + 2, aborted: false }
+      return { payloadEnd: pos, next: pos, aborted: true }
+    }
+  }
+  return null
+}
+
+function trailingOsc8PrefixLength(text: string, from: number): number {
+  const remaining = text.length - from
+  for (const prefix of ['\u001b]8', '\u001b]', '\u001b']) {
+    if (remaining >= prefix.length && text.endsWith(prefix)) return prefix.length
+  }
+  return 0
 }
 
 /** A ratio, a version or a date written with slashes ("3.5/4.0", "v1.2/3.4", "10/11/2026.5"): every part is a number. */

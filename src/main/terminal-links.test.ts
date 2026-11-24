@@ -2,10 +2,58 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   LOGICAL_LINE_ROWS,
+  Osc8LinkFilter,
   buildLogicalLine,
+  formatTerminalLinkPreview,
+  isSupportedOsc8Payload,
+  parseTerminalHyperlink,
   scanLineForLinks,
   type BufferLineLike,
 } from '../renderer/terminal-links.js'
+
+test('OSC 8 file destinations resolve as paths with optional source locations', () => {
+  assert.deepEqual(parseTerminalHyperlink('README.md'), { type: 'path', text: 'README.md' })
+  assert.deepEqual(parseTerminalHyperlink('src/app.ts#L42-L44'), { type: 'path', text: 'src/app.ts', line: 42 })
+  assert.deepEqual(parseTerminalHyperlink('docs/My%20Guide%23draft.md:12:3'), {
+    type: 'path', text: 'docs/My Guide#draft.md', line: 12, column: 3,
+  })
+  assert.deepEqual(parseTerminalHyperlink(String.raw`D:\repo\app.ts`), { type: 'path', text: String.raw`D:\repo\app.ts` })
+  assert.equal(formatTerminalLinkPreview({ type: 'url', text: 'https://example.com/docs' }), 'https://example.com/docs')
+  assert.equal(formatTerminalLinkPreview({ type: 'path', text: 'src/app.ts', line: 42 }), 'src/app.ts:42')
+  assert.equal(formatTerminalLinkPreview({ type: 'path', text: 'src/app.ts', line: 42, column: 7 }), 'src/app.ts:42:7')
+})
+
+test('OSC 8 URLs keep their destination and unsupported protocols stay outside the link handlers', () => {
+  const url = 'https://example.com/docs?q=1#L42'
+  assert.deepEqual(parseTerminalHyperlink(url), { type: 'url', text: url })
+  for (const uri of ['#heading', 'javascript:alert(1)', 'data:text/html,test', 'file://server/share',
+    '//server/share', '%5C%5Cserver%5Cshare', 'src/%00file.ts']) {
+    assert.equal(parseTerminalHyperlink(uri), null, uri)
+    assert.equal(isSupportedOsc8Payload(`id=1;${uri}`), false, uri)
+  }
+  assert.equal(isSupportedOsc8Payload(';'), true, 'closing OSC 8 passes through')
+  assert.equal(isSupportedOsc8Payload('id=1;README.md'), true)
+})
+
+test('Osc8LinkFilter strips unsupported OSC 8 destinations across chunks without bleeding prior links', () => {
+  const filter = new Osc8LinkFilter()
+  const supported = '\u001b]8;id=1;README.md\u001b\\Read\u001b]8;;\u001b\\'
+  assert.equal(filter.filter(supported), supported)
+
+  // Unsupported file:// opener becomes a close sequence so the visible path stays plain text for scanLineForLinks.
+  const overlapping = '\u001b]8;id=copilot;file://server/share\u001b\\src/app.ts\u001b]8;;\u001b\\'
+  assert.equal(filter.filter(overlapping), '\u001b]8;;\u001b\\src/app.ts\u001b]8;;\u001b\\')
+  assert.deepEqual(scanLineForLinks('src/app.ts').map((link) => link.text), ['src/app.ts'])
+
+  // An unclosed valid link followed directly by an unsupported link closes cleanly instead of bleeding into the next label.
+  const adjacent = '\u001b]8;;README.md\u001b\\Read\u001b]8;;javascript:alert(1)\u001b\\Bad\u001b]8;;\u001b\\'
+  assert.equal(filter.filter(adjacent), '\u001b]8;;README.md\u001b\\Read\u001b]8;;\u001b\\Bad\u001b]8;;\u001b\\')
+
+  // Split across PTY chunk boundaries (including mid-prefix and BEL terminator).
+  assert.equal(filter.filter('before \u001b]'), 'before ')
+  assert.equal(filter.filter('8;;file://ser'), '')
+  assert.equal(filter.filter('ver/share\u0007src/app.ts\u001b]8;;\u0007'), '\u001b]8;;\u001b\\src/app.ts\u001b]8;;\u0007')
+})
 
 test('scanLineForLinks finds absolute macOS and Linux paths, without their location or a lone folder', () => {
   const texts = (line: string): string[] => scanLineForLinks(line).map((link) => link.text)

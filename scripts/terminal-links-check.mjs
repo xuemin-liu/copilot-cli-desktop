@@ -56,8 +56,13 @@ if (!process.versions.electron) {
     // What the terminal sent to the session process. The history turns mouse reporting on, as Copilot does.
     const written = []
     const leftButton = data => { const report = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data); return Boolean(report) && (Number(report[1]) & 99) === 0 }
+    const rightButton = data => { const report = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data); return Boolean(report) && (Number(report[1]) & 99) === 2 }
+    const hyperlink = (label, target) => `\u001b]8;id=copilot;${target}\u001b\\${label}\u001b]8;;\u001b\\`
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\u001b[?1003h\u001b[?1006h' + [
       'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
+      hyperlink('Read the guide', 'README.md'), hyperlink('View application', 'src/app.ts#L42-L44'),
+      hyperlink('Open website', 'https://example.com/docs'), hyperlink('Unrecognized target', 'javascript:alert(1)'),
+      hyperlink('src/fallback.ts', 'file://server/share'),
     ].join('\r\n') }))
     // Every size the terminal reported to the session process. A size change makes the CLI redraw its whole screen.
     const sizes = []
@@ -91,14 +96,16 @@ if (!process.versions.electron) {
       throw new Error('Timed out: ' + label)
     }
     const notice = () => ui('document.querySelector(".terminal-link-error")?.textContent ?? null')
+    const preview = () => ui('document.querySelector(".terminal-link-preview")?.textContent ?? null')
     const locate = async text => {
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 0, y: 0 })
       await delay(100)
       const point = await ui(`(() => {
         const text = ${JSON.stringify(text)};
-        const row = Array.from(document.querySelectorAll('.xterm-rows > div')).find(row => row.textContent.includes(text));
+        const normalize = value => value.replace(/\\u00a0/g, ' ');
+        const row = Array.from(document.querySelectorAll('.xterm-rows > div')).find(row => normalize(row.textContent).includes(text));
         if (!row) throw new Error('Missing row: ' + text);
-        let offset = row.textContent.indexOf(text) + 3;
+        let offset = normalize(row.textContent).indexOf(text) + 3;
         const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
         let node;
         while ((node = walker.nextNode())) {
@@ -188,6 +195,49 @@ if (!process.versions.electron) {
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: String.raw`C:\My Repo\lib\file.ts`, location: { line: 9, column: 3 } })
       await clickLink('src/app.ts', ['control'])
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7, reveal: true } })
+      written.length = 0
+      await clickLink('Read the guide')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'README.md' })
+      // Right-clicking an embedded link belongs to CLI Copy and must not open the file.
+      {
+        const point = await locate('Read the guide')
+        assert.equal(await until(preview, 'hover preview for embedded file'), 'README.md')
+        written.length = 0
+        calls.length = 0
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'right', clickCount: 1, ...point })
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'right', clickCount: 1, ...point })
+        await delay(100)
+        assert.equal(calls.length, 0, 'right-click on an embedded link must not open it')
+        assert.equal(written.filter(rightButton).length, 2, 'right-click still reaches the CLI for Copy')
+      }
+      written.length = 0
+      await clickLink('View application')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42 } })
+      await clickLink('View application', ['control'])
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, reveal: true } })
+      // Hovering a web link whose label hides the URL discloses the destination without resizing the terminal.
+      {
+        const point = await locate('Open website')
+        assert.equal(await until(preview, 'hover preview for hidden web target'), 'https://example.com/docs')
+        assert.equal(await terminalBox(), box, 'hover preview takes no space from the terminal')
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+        await delay(100)
+        assert.deepEqual(calls.pop(), { type: 'url', text: 'https://example.com/docs' })
+      }
+      assert.deepEqual(written.filter(leftButton), [], 'embedded links consume the mouse click')
+      calls.length = 0
+      await clickLink('Unrecognized target')
+      assert.equal(await preview(), null, 'unsupported protocols show no hover preview')
+      assert.equal(calls.length, 0, 'unsupported protocols do not open')
+      assert.equal(written.filter(leftButton).length, 2, 'unsupported targets leave the click with the CLI')
+      // When OSC 8 rejects a file:// destination, the visible path label still opens via the text scanner.
+      calls.length = 0
+      written.length = 0
+      await clickLink('src/fallback.ts')
+      assert.equal(await preview(), null, 'rejected file:// OSC 8 does not show a hidden destination preview')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/fallback.ts' })
+      assert.deepEqual(written.filter(leftButton), [], 'fallback text link consumes the click')
       mode = 'pending'
       await clickLink('src/app.ts', ['control'])
       assert.equal(await notice(), null, 'nothing is shown for an open that may answer at once')
@@ -264,7 +314,7 @@ if (!process.versions.electron) {
       // Through every click, notice, dismissal and tab switch above, the session process was never told a new size.
       assert.equal(await terminalBox(), box)
       assert.deepEqual([...new Set(sizes)].filter(reported => reported !== size), [], `the terminal changed size: ${sizes.join(' ')}`)
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'OSC 8 relative file and web links', 'OSC 8 hover destination preview', 'right-click does not open embedded link', 'unsupported OSC 8 protocols ignored', 'rejected file:// OSC 8 preserves visible path fallback', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
     } catch (error) {
       console.error(error)
