@@ -36,7 +36,8 @@ export class TestConsoleWatch {
   private readonly bound: (text: string, max: number) => string
 
   constructor(plan: BrowserTestPlan, private readonly pageId: number, private readonly source: ConsoleSource) {
-    this.frames = new FrameEvents(plan.steps.filter(step => step.action === 'frameSequence').map(step => step.sequence!))
+    const commits = plan.steps.flatMap(step => [step, ...step.all ?? []]).filter(condition => condition.condition === 'frameCommitted').map(condition => condition.commit!)
+    this.frames = new FrameEvents([...plan.steps.filter(step => step.action === 'frameSequence').map(step => step.sequence!), ...commits])
     const add = (pattern: string, level: ConsoleLevel | undefined, timed: boolean): void => {
       const entry = this.patterns.get(key(pattern, level)) ?? { pattern, ...(level ? { level } : {}), matched: false }
       if (timed) entry.times ??= { count: 0, recent: [] }
@@ -55,7 +56,7 @@ export class TestConsoleWatch {
     this.bound = (text, max) => String(redactBrowserValue(redactInputs(text, inputs)).value).slice(0, max)
     this.ignore = plan.failOnConsoleError ? plan.consoleErrorIgnore ?? [] : []
     const latch = plan.failOnConsoleError === true
-    const watchFrames = plan.steps.some(step => step.action === 'frameSequence')
+    const watchFrames = commits.length > 0 || plan.steps.some(step => step.action === 'frameSequence')
     this.stop = source.watch(pageId, message => {
       const now = Date.now()
       if (watchFrames) this.frames.add(message.message, now)

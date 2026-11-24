@@ -559,8 +559,8 @@ for application readiness after navigation, supply `all`:
 Every condition must hold in the same polling pass; observations across frames are
 sequential, not an atomic application snapshot. Additional conditions are `enabled`,
 `attribute` (public `data-*`, `aria-*`, `role`, `title`, `class`),
-`numericValue` (`expected` number, optional nonnegative `tolerance`, default zero)
-`stable` and `visualStable`. An application can publish its own state in `data-*` attributes
+`numericValue` (`expected` number, optional nonnegative `tolerance`, default zero),
+`stable`, `visualStable` and `frameCommitted` (see *Waiting for a requested frame*). An application can publish its own state in `data-*` attributes
 (for example `data-grp="g"` on a link-group chip) and the plan can wait on or
 assert it directly, instead of encoding the value in a CSS selector.
 
@@ -663,6 +663,8 @@ request matches the capture and that image quality is complete. Use bounded sele
 network delays to reproduce out-of-order loading deterministically. `requestComplete`
 only establishes network completion; `visualStable` only establishes sampled pixel
 stability. Transient stale commits between polls require render-event instrumentation.
+When the viewer logs frame events, `frameCommitted` is that wait (see *Waiting for a
+requested frame*).
 For linked viewports, publish compatible patient-space coordinates and units; equal
 attributes alone do not establish correct registration.
 
@@ -827,6 +829,72 @@ events total are retained; overflow or malformed instrumented events fail closed
 Event time measures application-reported commit timing; silence uses desktop
 arrival time, including the start/end of the selected window. Neither is physical
 display presentation timing or CT acquisition temporal resolution.
+
+### Waiting for a requested frame
+
+`frameCommitted` is a `waitFor` or `assert` condition on the same events: it tells a
+test that one viewport now shows the frame the test asked for. It takes no target.
+
+```json
+[
+  { "action": "wheel", "selector": "#mpr-axial", "deltaY": 120, "repeat": 3 },
+  { "action": "waitFor", "condition": "frameCommitted",
+    "commit": { "viewport": "mpr-axial", "epoch": "study1", "frame": 42, "since": 1 }, "timeoutMs": 10000 },
+  { "action": "compareScreenshot", "label": "Axial slice 42 with ROI", "selector": "#mpr-axial",
+    "baseline": "baselines/axial-42-roi.png" },
+  { "action": "assert", "condition": "frameCommitted",
+    "commit": { "viewport": "mpr-axial", "epoch": "study1", "frame": 42, "since": 1 } }
+]
+```
+
+The condition holds only while the **last** event of that viewport is the commit of
+its **latest** request, in the expected epoch and for the expected frame:
+
+- A newer request makes it false until that request commits. Requests that were
+  superseded and never commit are normal; `data.frameCommitted.supersededRequests`
+  counts them.
+- A commit of a superseded request that arrives after the expected commit makes it
+  false: the old image has overwritten the new one.
+- A request or commit of another epoch in the viewport makes it false. An old-epoch
+  commit cannot make it true again.
+- A revision that committed twice, request revisions that do not increase, or a commit
+  whose frame differs from its request make it false.
+- Malformed events or the 5000-event overflow fail closed, as for `frameSequence`.
+
+`since` names an earlier step. Only events arriving from that step's start count, so a
+visit to the same frame earlier in the run cannot pass the wait: use the step that
+caused the request, such as the `wheel`. Without `since`, the events of this run's
+current document count, which covers a viewport that is already on the frame. When
+the test page's top document is replaced (a navigation or reload), earlier events are
+dropped either way, including what the outgoing document logged while the navigation
+was pending. A frame navigating inside the page does not drop them: events carry no
+frame identity, so after reloading an embedded viewer use `since`. Events from before
+the run are never seen.
+
+When it holds, `data.frameCommitted` reports the `revision`, `requestToCommitMs`
+(application clock) and the latest requested and committed frames; when it fails, the
+reason says what the viewport last requested or committed.
+
+Limits:
+
+- It observes the moment it is evaluated. The viewer can accept a new request right
+  after the wait passes, so the condition does not bind a later screenshot to that
+  revision. Use the recipe on a fixture that stops issuing requests, and assert the
+  condition again after the capture, as above. A `frameSequence` over the same steps
+  additionally fails on any stale commit in between.
+- Inside `all`, the `frameCommitted` conditions are evaluated last and together, on one
+  event state, so linked viewports are judged at the same moment. Other conditions in
+  the same `all` are still sampled one after another.
+- It is not a `measure` end. Time a commit with a `consoleMessage` end instead.
+- The desktop does not infer a frame from paints, labels, network or pixels. The viewer
+  must log the events, and `frame` is whatever integer index the fixture defines for
+  that viewport and epoch, including for an oblique stack.
+
+A version-1 commit means the image of that revision is on the viewport. For an overlay
+check (ROI, CAD marks), the viewer should emit the commit only once the image and the
+overlay that belongs to that revision are both drawn. If it paints the overlay
+independently, publish a separate overlay-ready signal that carries the revision (a
+`data-*` attribute or a log line) and wait for it as well, for example in the same `all`.
 
 ### Measurements, pixel probes and viewer resources
 

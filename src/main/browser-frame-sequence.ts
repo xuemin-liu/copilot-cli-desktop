@@ -6,6 +6,8 @@ export interface FrameSequenceSpec {
   order?: 'any' | 'ascending' | 'descending'; wrapAt?: number
   maxRepeats?: number; maxSkipped?: number; maxStallMs?: number; maxLatencyMs?: number
 }
+/** frameCommitted: the frame one viewport must be settled on. `since` is an earlier step; without it, the run's current document. */
+export interface FrameCommitSpec { viewport: string; epoch: string; frame: number; since?: number }
 const MAX_EVENTS = 5000
 const fields = ['version', 'type', 'viewport', 'epoch', 'revision', 'frame', 'timeMs']
 export const frameAlias = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(v)
@@ -31,6 +33,36 @@ export class FrameEvents {
     if (!this.scopes.some(scope => scope.viewport === raw.viewport)) return
     if (this.events.length >= MAX_EVENTS) { this.overflowAt ??= sequence; return }
     this.events.push({ event: raw as FrameEvent, arrival, sequence })
+  }
+  /** Whether the viewport is settled on the expected frame now: its last event (after `after`) is the commit of its
+   * latest request, in the expected epoch and for the expected frame. A stale or other-epoch commit that follows,
+   * or a newer request, makes it false. It observes this moment only; it does not hold the viewport there. */
+  committed(spec: FrameCommitSpec, after: number) {
+    const entries = this.events.filter(item => item.sequence > after && item.event.viewport === spec.viewport).map(item => item.event)
+    const complete = this.overflowAt === undefined && !this.invalid.some(sequence => sequence > after)
+    const request = entries.findLast(event => event.type === 'request'), last = entries.at(-1)
+    const inEpoch = entries.filter(event => event.epoch === spec.epoch)
+    const requests = inEpoch.filter(event => event.type === 'request'), commits = inEpoch.filter(event => event.type === 'commit')
+    const lastCommit = entries.findLast(event => event.type === 'commit')
+    const reason = !complete ? 'Event evidence is incomplete or malformed.'
+      : !request ? 'The viewport has reported no frame request in this window.'
+      : request.epoch !== spec.epoch ? 'The latest request of the viewport is for another epoch.'
+      : request.frame !== spec.frame ? `The latest request of the viewport is for frame ${request.frame}.`
+      // An accepted request has the highest revision of its epoch, and a revision commits once.
+      : requests.some(event => event !== request && event.revision >= request.revision) ? 'Request revisions are not strictly increasing.'
+      : commits.filter(event => event.revision === request.revision).length > 1 ? 'The requested revision committed more than once.'
+      : last === request || !commits.some(event => event.revision === request.revision) ? 'The latest request has not committed.'
+      : last!.epoch !== spec.epoch ? 'Another epoch committed into the viewport after the requested frame.'
+      : last!.revision !== request.revision ? `A stale commit (frame ${last!.frame}) followed the requested frame.`
+      : last!.frame !== request.frame || last!.timeMs < request.timeMs ? 'The commit does not match its request.' : ''
+    const passed = reason === ''
+    return { passed, ...(passed ? {} : { reason }), data: { frameCommitted: {
+      viewport: spec.viewport, epoch: spec.epoch, frame: spec.frame, ...(spec.since === undefined ? {} : { since: spec.since }), committed: passed, complete,
+      ...(request ? { requestedFrame: request.frame, requestedRevision: request.revision } : {}),
+      ...(lastCommit ? { lastCommittedFrame: lastCommit.frame, lastCommittedRevision: lastCommit.revision } : {}),
+      ...(passed ? { revision: request!.revision, requestToCommitMs: last!.timeMs - request!.timeMs } : {}),
+      supersededRequests: requests.filter(event => event !== request && !commits.some(commit => commit.revision === event.revision)).length,
+      source: 'Application-instrumented events, observed when the condition was evaluated; a later request can follow.' } } }
   }
   analyze(spec: FrameSequenceSpec, after: number, start: number, end = Date.now()) {
     const viewportEntries = this.events.filter(item => item.sequence > after && item.event.viewport === spec.viewport)
