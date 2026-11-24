@@ -198,7 +198,7 @@ export class BrowserReader {
   private captureEpoch = 0
   private testViewport: BrowserTestViewport | null = null
   private frameMarks = new Map<number, number>()
-  /** The frame-event mark at the test page's last document change: frameCommitted reads nothing older. */
+  /** The frame-event mark when the test page's top document was last replaced: frameCommitted reads nothing older. */
   private frameDocumentMark = 0
   private resourceSamples = new Map<number, { epoch: number; source: string; values: Record<string, number>; definitions: NonNullable<BrowserTestStep['samples']> }>()
 
@@ -311,7 +311,7 @@ export class BrowserReader {
       void this.message(page, method, params, sessionId || undefined).catch(() => {})
     })
     contents.on('did-start-navigation', details => {
-      if (!details.isSameDocument && this.testPageId === contents.id) { this.captureEpoch++; this.frameDocumentMark = this.testConsole?.frames.mark() ?? 0 }
+      if (!details.isSameDocument && this.testPageId === contents.id) this.captureEpoch++
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
     })
     // Main-page navigation must obey the origin grant. Embedded pages may load
@@ -323,6 +323,9 @@ export class BrowserReader {
     contents.on('will-frame-navigate', event => restrictNavigation(event, event.url))
     contents.on('will-redirect', (event, url) => restrictNavigation(event, url))
     contents.on('did-navigate', (_event, url) => {
+      // The top document is replaced here, not when its navigation starts: until then the outgoing document can still log
+      // events, and they must not count for the new one. A frame's own navigation leaves the top document's evidence alone.
+      if (this.testPageId === contents.id) this.frameDocumentMark = this.testConsole?.frames.mark() ?? 0
       if (this.testPageId === contents.id && this.httpOrigin(url) !== this.testOrigin) this.stopTest()
     })
     contents.on('did-finish-load', () => { void this.attach(page).catch(() => {}) })

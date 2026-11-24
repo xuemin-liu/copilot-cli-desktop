@@ -864,9 +864,12 @@ its **latest** request, in the expected epoch and for the expected frame:
 `since` names an earlier step. Only events arriving from that step's start count, so a
 visit to the same frame earlier in the run cannot pass the wait: use the step that
 caused the request, such as the `wheel`. Without `since`, the events of this run's
-current document count, which covers a viewport that is already on the frame. A
-navigation or reload of the test page drops earlier events either way. Events from
-before the run are never seen.
+current document count, which covers a viewport that is already on the frame. When
+the test page's top document is replaced (a navigation or reload), earlier events are
+dropped either way, including what the outgoing document logged while the navigation
+was pending. A frame navigating inside the page does not drop them: events carry no
+frame identity, so after reloading an embedded viewer use `since`. Events from before
+the run are never seen.
 
 When it holds, `data.frameCommitted` reports the `revision`, `requestToCommitMs`
 (application clock) and the latest requested and committed frames; when it fails, the

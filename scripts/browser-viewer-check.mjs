@@ -22,7 +22,7 @@ if (!process.versions.electron) {
     app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
     app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
     const html = `<!doctype html><style>body{margin:0;font:12px sans-serif}button{font-size:12px}#canvas{position:absolute;left:20px;top:100px;width:300px;height:150px}#drop{position:absolute;left:380px;top:120px;width:70px;height:70px;background:#777}#privateInput{position:absolute;left:500px;top:150px;width:80px}#source{display:inline-block;background:#ccc}</style>
-      <button id="good">Good</button><button id="bad">Transient stale</button><button id="late">Late commit</button><button id="linked">Linked</button><button id="fetch">Fetch</button><button id="load">Load cache</button><button id="close">Close cache</button>
+      <button id="good">Good</button><button id="bad">Transient stale</button><button id="late">Late commit</button><button id="linked">Linked</button><button id="embed">Embed</button><button id="leave">Leave</button><button id="fetch">Fetch</button><button id="load">Load cache</button><button id="close">Close cache</button>
       <button id="line">Line</button><button id="probe">Probe</button><button id="zoom">Zoom 2x</button><button id="reset">Reset</button>
       <div id="source" draggable="true">Series</div><div id="drop" data-dropped="no"></div>
       <canvas id="canvas" width="300" height="150"></canvas><input id="privateInput" value="SECRET_FIXTURE">
@@ -42,6 +42,8 @@ if (!process.versions.electron) {
         document.getElementById('close').onclick=()=>{cache.dataset.cacheBytes='0';cache.dataset.workers='0';cache.dataset.gpuEstimate='0'};
         const emit=(type,revision,frame,viewport='v1')=>console.debug('desktop-test-frame '+JSON.stringify({version:1,type,viewport,epoch:'fixture1',revision,frame,timeMs:performance.now()}));
         late.onclick=()=>{emit('request',10,7);setTimeout(()=>{state.dataset.render='7';emit('commit',10,7)},300)};
+        embed.onclick=()=>{const frame=document.createElement('iframe');frame.style.cssText='position:absolute;left:600px;top:30px;width:30px;height:30px';frame.onload=()=>{state.dataset.embedded='yes'};frame.src='/blank';document.body.append(frame)};
+        leave.onclick=()=>{emit('request',30,9);location.href='/slow';setTimeout(()=>emit('commit',30,9),150)};
         linked.onclick=()=>{emit('request',20,5);emit('request',20,5,'v2');setTimeout(()=>emit('commit',20,5),100);setTimeout(()=>emit('commit',20,5,'v2'),300)};
         good.onclick=()=>{for(let i=0;i<4;i++){emit('request',i,i);state.dataset.render=String(i);emit('commit',i,i)}console.debug('frames complete')};
         bad.onclick=()=>{emit('request',1,1);emit('request',2,2);state.dataset.render='2';emit('commit',2,2);state.dataset.render='1';emit('commit',1,1);emit('request',3,2);state.dataset.render='2';emit('commit',3,2);console.debug('frames complete')};
@@ -50,7 +52,10 @@ if (!process.versions.electron) {
       </script>`
     const server = createServer((req, res) => {
       if (req.url === '/image') { res.setHeader('Cache-Control', 'public, max-age=3600'); res.end('fixture image payload'); return }
-      res.setHeader('Cache-Control', 'no-store'); res.end(html)
+      res.setHeader('Cache-Control', 'no-store')
+      if (req.url === '/blank') { res.end('embedded'); return }
+      if (req.url === '/slow') { setTimeout(() => res.end(html), 800); return }
+      res.end(html)
     })
     let window, reader
     const reports = []
@@ -103,6 +108,15 @@ if (!process.versions.electron) {
       assert.deepEqual(both.steps[1].data.conditions.map(condition => condition.frameCommitted.revision), [20, 20])
       // A reload starts a new document: the old document's commit is no longer evidence.
       fail(await execute([{ action: 'click', selector: '#good' }, { action: 'waitFor', ...committed(3) }, { action: 'reload' }, { action: 'assert', ...committed(3), timeoutMs: 400 }]), /no frame request/)
+      // A frame navigating inside the page leaves the top document's evidence alone.
+      pass(await execute([{ action: 'click', selector: '#good' }, { action: 'waitFor', ...committed(3) }, { action: 'click', selector: '#embed' },
+        { action: 'waitFor', selector: '#state', condition: 'attribute', attribute: 'data-embedded', expected: 'yes' }, { action: 'assert', ...committed(3) }]))
+      // What the outgoing document logs while a slow navigation is pending is not evidence for the new document.
+      const left = await execute([{ action: 'click', selector: '#leave' }, { action: 'waitFor', ...committed(9, { since: 1 }) }, { action: 'waitFor', condition: 'url', expected: '/slow' },
+        { action: 'waitFor', selector: '#good', condition: 'visible' }, { action: 'assert', ...committed(9), timeoutMs: 400 }])
+      assert.deepEqual(left.steps.map(step => step.status), ['passed', 'passed', 'passed', 'passed', 'failed'], JSON.stringify(left.steps))
+      fail(left, /no frame request/)
+      await load()
       const m = (unit, expected) => ({ action: 'assertMeasurement', selector: '#measurement', unit, expected, tolerance: 0.05 })
       pass(await execute([{ action: 'click', selector: '#line' }, { action: 'drag', selector: '#canvas', path: [{ x: 20, y: 70 }, { x: 120, y: 70 }] }, m('mm', 50),
         { action: 'click', selector: '#zoom' }, { action: 'drag', selector: '#canvas', path: [{ x: 40, y: 140 }, { x: 240, y: 140 }] }, m('mm', 50)]))
