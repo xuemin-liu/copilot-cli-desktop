@@ -962,7 +962,7 @@ const reviewLaunches=new Set<string>()
 let reservations:ReviewReservations|null=null
 /** Which review owns which reviewer folder and worktree (pr-review-reservations.ts). */
 function reviewReservations():ReviewReservations|null{
-  if(!app.isReady())return null
+  if(typeof app.isReady==='function'&&!app.isReady())return null
   try{return reservations??=new ReviewReservations(join(app.getPath('userData'),'pr-review-reservations.json'))}catch{return null}
 }
 /** The same folder, by real path: a session may report its folder resolved where the desktop named it through a link. */
@@ -6601,7 +6601,10 @@ async function stopAllSessions(): Promise<void> {
   })))
   // Sync any rotated Codex OAuth refresh tokens from active/starting temporary reviewers back to the user's real
   // CODEX_HOME and delete seat credentials before Desktop exits on quit or update install.
-  await shutdownActiveReviewerSeats(tempReviewers.list(), reviewReservations())
+  const activeTempGroups = tempReviewers.list()
+  if (activeTempGroups.length > 0) {
+    await shutdownActiveReviewerSeats(activeTempGroups, reviewReservations())
+  }
 }
 
 // --- IPC: main window -------------------------------------------------
