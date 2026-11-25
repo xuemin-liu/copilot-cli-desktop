@@ -1,7 +1,8 @@
 # Plan: turn checkpoints and large-paste attachments
 
-Status: agreed in review meeting BK97 (2026-11-25; reviewers: Antigravity and Codex). B0 is done (go), and A1 and A2 are built;
-see the revision notes at the end. B1 is not built yet.
+Status: agreed in review meeting BK97 (2026-11-25; reviewers: Antigravity and Codex). A1 and A2 are built and merged (PRs 315 and
+316). B1 is not built and will not be: Copilot CLI already saves a large paste as a file itself. See the revision
+notes at the end.
 
 Both ideas come from T3 Code's documentation (MIT licensed). Only its docs were read, not its source, so
 the designs below are our own. The designs rest on reading our code and Git's documentation; no prototype
@@ -93,6 +94,9 @@ refused.
 
 ## Part B: large paste becomes a file
 
+**Not built.** The gate below was answered "no-go" once the real app was tried: see "B0, corrected" in the revision
+notes. The section is kept as the record of what was agreed.
+
 ### Goal
 
 A large paste into a local Copilot session's prompt is saved as a text file, and a reference to the file
@@ -131,7 +135,7 @@ B0, then A1, then A2. B1 only if B0 says go.
 
 ## Revision notes
 
-### B0 spike (2026-11-25, Copilot CLI 1.0.114): go
+### B0 spike (2026-11-25, Copilot CLI 1.0.114): go (later corrected to no-go, see below)
 
 Run with real `copilot -p` prompts against a 49 KB file in a folder whose name has a space and a non-ASCII letter.
 
@@ -185,3 +189,33 @@ each pasted file asks for approval.
   own text.
 - The tab reads the store only. It never runs Git in the project, so it needs no trust check of its own.
 - User documentation: [Turns in the Git panel](git-panel.md#turns).
+
+### B0, corrected: no-go, and B1 is dropped
+
+The spike left one question open: what the interactive prompt does with a large paste. The answer came from building
+B1 and running it in the real app with the real CLI (1.0.114) and the local mock model.
+
+- A 40 KB paste typed into the prompt as it is (Shift with the paste key, so B1's own handling was bypassed) was
+  recorded by Copilot as
+  `<pasted_content file="…/session-state/<session id>/files/paste-<number>.txt" size="40.2 KB" lines="703" />`.
+  The message sent to the model carried the same reference and none of the pasted text.
+- So Copilot CLI already does what B1 set out to do: it saves a large paste as a file in its own session folder and
+  puts a reference in the prompt.
+- Not verified, so do not rely on it for sensitive text: whether the model can read that file without an approval
+  (the mock model was not asked to read it; the only file read in this run was of the B1 prototype's own file, with
+  `--add-dir`), and how long the file is kept (no session was deleted and the file was not looked at again, so
+  which action, if any, removes it is unknown). The file sits under Copilot's `session-state` folder in plain text.
+- The note in `meeting-turns.ts` that "older CLIs recorded a large paste as a placeholder" does not mean that current
+  ones send the full text, as the first spike report assumed. That assumption was wrong.
+- Not measured: the size at which Copilot starts doing this. 40 KB is over it.
+
+B1 worked in that run (a 40 KB paste was saved whole, the prompt named the file, and the session read it without an
+approval because its folder was passed with `--add-dir`), but it would only duplicate the CLI's own behaviour with a
+second folder, a second set of limits and an extra launch argument. It was not opened as a pull request.
+
+What remains true in Desktop: a paste over 1,000,000 characters is cut at that length before it reaches the terminal
+(`terminal-paste.ts`), without a notice. That is a separate, smaller matter and is not changed here.
+
+Found on the way, not fixed here: `scripts/check-clipboard.mjs` calls `clipboard.availableFormats()`, which the
+installed Electron (45.3.2) does not have, so `npm run paste:check` fails at its native-paste step on this machine
+before it tests anything.
