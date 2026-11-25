@@ -477,6 +477,13 @@ test('the Turns list: newest first, with the files and the patch of a turn, read
   await assert.rejects(() => store.turnFiles(repo, 'one', first), /no longer available/)
   await assert.rejects(() => store.turnDiff(repo, 'one', first, 'a.txt'), /no longer available/)
   assert.equal((await store.listTurns(repo)).length, 4, 'the list itself still reads')
+  // A store that lost a folder Git runs in is reported the same way, not as a missing Git.
+  for (const lost of ['empty', join('git', 'HEAD')]) {
+    const path = join(store.storeDirectory(repo), lost)
+    renameSync(path, path + '.lost')
+    await assert.rejects(() => store.turnFiles(repo, 'one', first), /no longer available/, lost)
+    renameSync(path + '.lost', path)
+  }
 })
 
 test('a file left out of one snapshot of a turn is not shown as added or deleted', async (t) => {

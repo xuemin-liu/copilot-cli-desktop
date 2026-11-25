@@ -155,6 +155,7 @@ const MAX_TURN_FILES = 5_000
 const MAX_TURN_DIFF_BYTES = 512 * 1024
 const MAX_TURN_FILES_BYTES = 4 * 1024 * 1024
 const MAX_RECORDED_NOT_CAPTURED = 5_000
+const UNAVAILABLE = 'This checkpoint is no longer available'
 
 /** Which paths of a turn's diff cannot be compared, because one of its snapshots left them out. */
 function leftOutOf(record: CheckpointTurn): { has(path: string): boolean; complete: boolean } {
@@ -512,12 +513,16 @@ export class CheckpointStore {
       const leftOut = leftOutOf(record)
       // A file one snapshot left out is not compared: Git would call it added or deleted.
       if (path !== undefined && leftOut.has(path)) return { result: null, leftOut }
+      // A store that lost its folders is a damaged store, not a missing Git: the command is never started there.
+      const whole = await Promise.all([stat(hostPath.join(store, 'empty')).then(entry => entry.isDirectory(), () => false), stat(hostPath.join(this.gitDirectory(store), 'HEAD')).then(entry => entry.isFile(), () => false)])
+      if (whole.includes(false)) throw new CheckpointRefused(UNAVAILABLE)
       // Read no more than is shown: Git is stopped once the output passes the cap.
       const result = await this.shadow(store, null, commitDiffTreeArgs(after, before, path), {
         write: false, timeoutMs: 30_000, maxStdoutBytes: path === undefined ? MAX_TURN_FILES_BYTES : MAX_TURN_DIFF_BYTES + 64 * 1024,
       })
+      if (result.timedOut) throw new CheckpointRefused('Reading this turn’s changes took too long')
       // Space was reclaimed, or the store was damaged: said for this turn only.
-      if (!gitSucceeded(result) && !result.stdoutTruncated) throw new CheckpointRefused('This checkpoint is no longer available')
+      if (!gitSucceeded(result) && !result.stdoutTruncated) throw new CheckpointRefused(UNAVAILABLE)
       return { result, leftOut }
     })
   }

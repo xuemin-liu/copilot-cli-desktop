@@ -5,20 +5,23 @@ import { errorMessage } from '../errors.js'
 import { GitDiffView } from './GitDiffView.js'
 
 type ChangedFile = TurnFiles['files'][number]
-interface TurnProps { profileId: string; repoId: string; turn: TurnSummary }
+/** `reload` changes when the person asks for the list again: open details and patches are read again too. */
+interface TurnProps { profileId: string; repoId: string; turn: TurnSummary; reload: number }
 
 const turnKey = (turn: TurnSummary): string => `${turn.sessionId}\n${turn.n}`
 
-function TurnPatch({ profileId, repoId, turn, file }: TurnProps & { file: ChangedFile }): JSX.Element {
+function TurnPatch({ profileId, repoId, turn, file, reload }: TurnProps & { file: ChangedFile }): JSX.Element {
   const [patch, setPatch] = useState<{ text: string; truncated: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let stale = false
+    // An error from an earlier try must not outlive the answer that follows it.
+    setError(null)
     if (!file.binary && !file.leftOut) window.copilotDesktop.gitTurnDiff(profileId, repoId, turn.sessionId, turn.n, file.path)
-      .then(value => { if (!stale) setPatch(value) })
+      .then(value => { if (!stale) { setPatch(value); setError(null) } })
       .catch((cause: unknown) => { if (!stale) setError(errorMessage(cause)) })
     return () => { stale = true }
-  }, [profileId, repoId, turn.sessionId, turn.n, file])
+  }, [profileId, repoId, turn.sessionId, turn.n, file, reload])
   if (file.leftOut) return <p role="status" className="git-turn-observed">This file was left out of the snapshot at the start or at the end of the turn (a link, or over 25 MB at that moment), so whether it changed is not known.</p>
   if (error) return <p role="alert" className="git-message git-message-error">{error}</p>
   if (!patch && !file.binary) return <p role="status">Loading diff…</p>
@@ -26,17 +29,18 @@ function TurnPatch({ profileId, repoId, turn, file }: TurnProps & { file: Change
     text: patch?.text ?? '', truncated: patch?.truncated ?? false, added: file.added, deleted: file.deleted }} />
 }
 
-function TurnDetails({ profileId, repoId, turn }: TurnProps): JSX.Element {
+function TurnDetails({ profileId, repoId, turn, reload }: TurnProps): JSX.Element {
   const [details, setDetails] = useState<TurnFiles | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [path, setPath] = useState<string | null>(null)
   useEffect(() => {
     let stale = false
+    setError(null)
     if (turn.diffable && !turn.unchanged) window.copilotDesktop.gitTurnFiles(profileId, repoId, turn.sessionId, turn.n)
-      .then(value => { if (!stale) setDetails(value) })
+      .then(value => { if (!stale) { setDetails(value); setError(null) } })
       .catch((cause: unknown) => { if (!stale) setError(errorMessage(cause)) })
     return () => { stale = true }
-  }, [profileId, repoId, turn.sessionId, turn.n, turn.diffable, turn.unchanged])
+  }, [profileId, repoId, turn.sessionId, turn.n, turn.diffable, turn.unchanged, reload])
   return <section className="git-commit-details" aria-label="Turn details">
     {turn.state === 'open' && <p role="status">This turn is still running. Its changes can be shown when it ends.</p>}
     {turn.state === 'incomplete' && <p role="status">No changes to show: {turn.note ?? 'this turn has no snapshot of its end'}.</p>}
@@ -48,7 +52,7 @@ function TurnDetails({ profileId, repoId, turn }: TurnProps): JSX.Element {
     {details && details.files.map(file => <div key={file.path}>
       <button type="button" className="git-commit-file" aria-expanded={path === file.path}
         onClick={() => setPath(path === file.path ? null : file.path)}>{file.path}{file.leftOut ? ' (not compared)' : ''}</button>
-      {path === file.path && <TurnPatch profileId={profileId} repoId={repoId} turn={turn} file={file} />}
+      {path === file.path && <TurnPatch profileId={profileId} repoId={repoId} turn={turn} file={file} reload={reload} />}
     </div>)}
     {details?.truncated && <p role="status">The changed file list was cut short.</p>}
     {details?.uncertain && <p role="status">Some paths were left out of this turn’s snapshots and the record of them is incomplete: a file shown here as added or deleted may have been left out instead.</p>}
@@ -93,7 +97,7 @@ export function GitTurns({ profileId, repoId, refreshKey }: { profileId: string;
             <button type="button" className="git-log-subject" aria-expanded={selected === key} title={turn.label}
               onClick={() => setSelected(selected === key ? null : key)}>{turn.label || '(no prompt text)'}</button>
             <span className="git-log-meta">{new Date(turn.startedAt).toLocaleString()}{state ? ` · ${state}` : ''}</span>
-            {selected === key && <TurnDetails profileId={profileId} repoId={repoId} turn={turn} />}
+            {selected === key && <TurnDetails profileId={profileId} repoId={repoId} turn={turn} reload={reload} />}
           </li>
         })}
       </ol>}
