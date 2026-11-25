@@ -394,3 +394,23 @@ test('a store with a turn still running is never deleted for its size, and a tur
   assert.equal(gateAsked, false, 'no Git is run for it')
   assert.equal(existsSync(store.storeDirectory(repo)), false, 'and nothing is written back')
 })
+
+test('clear deletes each store inside its queue, a store whose first write is still queued too', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, store } = made
+  const busy = fixture.repo('busy')
+  const turn = await store.beginTurn(busy, 's', 'p')
+  const fresh = fixture.repo('fresh')
+  // A capture is under way in one store, and another store's very first write is queued and not on disk yet.
+  const capture = store.capture(busy, 's', turn, 'before')
+  const begun = store.beginTurn(fresh, 's', 'p')
+  assert.equal(existsSync(store.storeDirectory(fresh)), false)
+  await store.clear()
+  await Promise.all([capture, begun])
+  assert.equal(existsSync(store.storeDirectory(busy)), false)
+  assert.equal(existsSync(store.storeDirectory(fresh)), false, 'deleted after its queued write, not missed')
+  // Work that was queued behind the delete finds no record and writes nothing back.
+  assert.equal(await store.capture(fresh, 's', await begun, 'before'), null)
+  assert.equal(existsSync(store.storeDirectory(fresh)), false)
+})

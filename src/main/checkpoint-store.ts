@@ -440,10 +440,16 @@ export class CheckpointStore {
     await rm(hostPath.join(this.root, name), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 
-  /** Delete every checkpoint of every worktree, each after the work queued for it: what turning the feature off does. */
+  /**
+   * Delete every checkpoint of every worktree: what turning the feature off does. Each store is deleted inside its own
+   * queue, so no capture or prune runs in a folder while it is removed, and a store whose first write is still queued
+   * (it is not on disk yet) is deleted after that write. Throws when a store could not be removed.
+   */
   async clear(): Promise<void> {
-    await Promise.all((await this.storeNames()).map(name => this.queued(hostPath.join(this.root, name), async () => undefined)))
-    await clearCheckpointFolder(this.root)
+    const names = new Set([...(await this.storeNames()), ...[...this.queues.keys()].map(store => hostPath.basename(store))])
+    const failed: string[] = []
+    await Promise.all([...names].map(name => this.queued(hostPath.join(this.root, name), () => this.removeStore(name)).catch(() => { failed.push(name) })))
+    if (failed.length > 0) throw new Error(`${failed.length} checkpoint ${failed.length === 1 ? 'store' : 'stores'} could not be deleted`)
   }
 
   /** Turns left open by a run of the app that has ended have no end snapshot, and never will. */
