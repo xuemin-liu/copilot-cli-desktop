@@ -309,6 +309,15 @@ export class GitService {
     return project
   }
 
+  /**
+   * The folder of a repository the panel lists, for data kept outside Git's reach (turn checkpoints). Null for the
+   * repository above the project folder, which has none.
+   */
+  repoRootFor(subscriberId: number, profileId: string, repoId: string): string | null {
+    const repo = this.repoFor(this.projectFor(subscriberId, profileId), repoId)
+    return repo.discovered.kind === 'parent' ? null : repo.discovered.root
+  }
+
   private repoFor(project: ProjectRuntime, repoId: string): RepoRuntime {
     for (const repo of project.repos.values()) if (repo.id === repoId) return repo
     throw new GitStaleError('That repository is no longer in this project. Rescan and try again.')

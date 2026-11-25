@@ -1,7 +1,7 @@
 # Plan: turn checkpoints and large-paste attachments
 
-Status: agreed in review meeting BK97 (2026-11-25; reviewers: Antigravity and Codex). B0 is done (go) and A1 is built;
-see the revision notes at the end. A2 and B1 are not built yet.
+Status: agreed in review meeting BK97 (2026-11-25; reviewers: Antigravity and Codex). B0 is done (go), and A1 and A2 are built;
+see the revision notes at the end. B1 is not built yet.
 
 Both ideas come from T3 Code's documentation (MIT licensed). Only its docs were read, not its source, so
 the designs below are our own. The designs rest on reading our code and Git's documentation; no prototype
@@ -164,3 +164,24 @@ each pasted file asks for approval.
   "changes observed during this turn".
 - The trust gate needs the Git panel's own answer: a repository whose settings need review gets no snapshot until
   the person accepts them in the Git panel.
+
+### A1 after review (PR 315)
+
+- The trust gate is asked inside the store's queue right before each snapshot, the end one too, instead of once when
+  the turn starts.
+- An end snapshot can be discarded until it is saved, not only while it waits in the queue.
+- The turn caps are enforced after every turn, and space is reclaimed once ten turns have ended or been dropped;
+  the full prune repeats every six hours.
+- Turning the feature off cancels open turns, and deleting the snapshots needs no Git.
+- Unloading or restarting a tab, and a switch to another conversation, close the open turn as incomplete.
+
+### A2 as built
+
+- The Git panel has a **Turns** tab between Changes and History. It lists up to 200 turns of the repository, newest
+  first, over all its sessions. A complete turn opens to its changed files (`diff-tree` between its two snapshots,
+  run inside the store) and each file to its patch, in the panel's existing diff view.
+- Every diff is labelled "Changes observed during this turn". An open turn, an incomplete turn (with its reason), a
+  turn with no changes, paths left out of the snapshot and a checkpoint that is no longer available each have their
+  own text.
+- The tab reads the store only. It never runs Git in the project, so it needs no trust check of its own.
+- User documentation: [Turns in the Git panel](git-panel.md#turns).

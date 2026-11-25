@@ -714,7 +714,11 @@ ${point.missing}`)
     }
     await ui('document.querySelector(".git-tabs [aria-selected=true]").focus()')
     key('Right')
-    await until('document.activeElement?.textContent === "History" && !!document.querySelector(".git-history")', 'Right selects History')
+    await until('document.activeElement?.textContent === "Turns" && !!document.querySelector(".git-turns")', 'Right selects Turns')
+    // The check's service has no checkpoint store: the tab says so and lists nothing.
+    await until('document.querySelector(".git-turns")?.innerText.includes("Turn checkpoints are not available here")', 'Turns without a store')
+    key('Right')
+    await until('document.activeElement?.textContent === "History" && !!document.querySelector(".git-history") && !document.querySelector(".git-turns")', 'Right selects History')
     key('Home')
     await until('document.activeElement?.textContent.startsWith("Changes") && !!document.querySelector(".git-path-filter")', 'Home returns to Changes')
     await focusFilter()

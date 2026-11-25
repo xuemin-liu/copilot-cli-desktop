@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { caseInsensitivePaths, hostPath, pathKey } from './host-path.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { splitNul } from './git-parse.js'
+import { commitDiffTreeArgs } from './git-commands.js'
+import { boundText, parseNumstat, splitNul } from './git-parse.js'
 import { gitSucceeded, type GitRunResult, type GitRunner } from './git-runner.js'
 import { safeRepoSegments } from './git-untracked.js'
 
@@ -87,6 +88,29 @@ interface StoreMeta {
   sessions: Record<string, { turns: CheckpointTurn[] }>
 }
 
+/** A turn as the Git panel lists it. */
+export interface TurnSummary {
+  sessionId: string
+  n: number
+  label: string
+  startedAt: number
+  endedAt: number | null
+  state: TurnState
+  /** Why an incomplete turn has no diff. */
+  note: string | null
+  /** Both snapshots exist, so the turn's changes can be shown. */
+  diffable: boolean
+  /** Both snapshots are the same: nothing changed during the turn. */
+  unchanged: boolean
+  notCaptured: number
+  notCapturedSample: string[]
+}
+
+export interface TurnFiles {
+  files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean }>
+  truncated: boolean
+}
+
 export interface CheckpointStoreOptions {
   /** `<userData>/checkpoints`. Everything this class writes is inside it. */
   root: string
@@ -118,6 +142,9 @@ const LIST_MAX_BYTES = 64 * 1024 * 1024
 const OID = /^[0-9a-f]{40,64}$/
 const MAX_LABEL_CHARS = 120
 const SAMPLE = 20
+const MAX_LISTED_TURNS = 200
+const MAX_TURN_FILES = 5_000
+const MAX_TURN_DIFF_BYTES = 512 * 1024
 /** Space is reclaimed while the app runs once this many turns were dropped, or this many ended, since the last time. */
 const RECLAIM_AFTER_DROPPED_TURNS = 10
 const RECLAIM_AFTER_TURNS = 10
@@ -427,6 +454,56 @@ export class CheckpointStore {
       const result = await this.shadow(store, null, ['cat-file', 'blob', `${commit}:${path}`], { write: false })
       return gitSucceeded(result) ? result.stdout : null
     })
+  }
+
+  /** The turns of a worktree, over all its sessions, newest first: what the Git panel lists. */
+  listTurns(worktreeRoot: string): Promise<TurnSummary[]> {
+    const store = this.storeDirectory(worktreeRoot)
+    return this.queued(store, async () => {
+      const meta = await this.readMeta(store, worktreeRoot)
+      return Object.entries(meta.sessions)
+        .flatMap(([sessionId, session]) => session.turns.map(turn => ({
+          sessionId, n: turn.n, label: turn.label, startedAt: turn.startedAt, endedAt: turn.endedAt, state: turn.state,
+          note: turn.state === 'incomplete' ? turn.note ?? turn.before?.reason ?? turn.after?.reason ?? null : null,
+          diffable: turn.state === 'complete' && Boolean(turn.before?.commit && turn.after?.commit),
+          unchanged: turn.state === 'complete' && Boolean(turn.before?.commit) && turn.before?.commit === turn.after?.commit,
+          notCaptured: Math.max(turn.before?.notCaptured ?? 0, turn.after?.notCaptured ?? 0),
+          notCapturedSample: (turn.after?.notCapturedSample.length ? turn.after.notCapturedSample : turn.before?.notCapturedSample ?? []).slice(0, SAMPLE),
+        })))
+        .sort((left, right) => right.startedAt - left.startedAt)
+        .slice(0, MAX_LISTED_TURNS)
+    })
+  }
+
+  /** Run a diff between a complete turn's two snapshots, inside the shadow. Git never runs in the project for this. */
+  private turnDiffTree(worktreeRoot: string, sessionId: string, turn: number, path?: string): Promise<GitRunResult> {
+    const store = this.storeDirectory(worktreeRoot)
+    return this.queued(store, async () => {
+      const meta = await this.readMeta(store, worktreeRoot)
+      const record = meta.sessions[sessionId]?.turns.find(candidate => candidate.n === turn)
+      const before = record?.before?.commit, after = record?.after?.commit
+      if (!record || record.state !== 'complete' || !before || !after) throw new CheckpointRefused('This turn has no snapshots to compare')
+      const result = await this.shadow(store, null, commitDiffTreeArgs(after, before, path), { write: false, timeoutMs: 30_000 })
+      // Space was reclaimed, or the store was damaged: said for this turn only.
+      if (!gitSucceeded(result) && !result.stdoutTruncated) throw new CheckpointRefused('This checkpoint is no longer available')
+      return result
+    })
+  }
+
+  /** The files a turn changed, with line counts. */
+  async turnFiles(worktreeRoot: string, sessionId: string, turn: number): Promise<TurnFiles> {
+    const result = await this.turnDiffTree(worktreeRoot, sessionId, turn)
+    // Only complete NUL-terminated records can name a file.
+    const files = parseNumstat(result.stdout.subarray(0, result.stdout.lastIndexOf(0) + 1).toString('utf8'))
+      .map(({ path, added, deleted, binary }) => ({ path, added, deleted, binary }))
+    return { files: files.slice(0, MAX_TURN_FILES), truncated: result.stdoutTruncated || files.length > MAX_TURN_FILES }
+  }
+
+  /** One file's changes in a turn, as a patch. */
+  async turnDiff(worktreeRoot: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean }> {
+    const result = await this.turnDiffTree(worktreeRoot, sessionId, turn, path)
+    const bounded = boundText(result.stdout, MAX_TURN_DIFF_BYTES)
+    return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated }
   }
 
   private async storeNames(): Promise<string[]> {

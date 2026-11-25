@@ -5633,6 +5633,8 @@ registerGitIpc({
   service: gitServiceInstance,
   assertTrustedSender: (event: GitIpcEvent) => assertTrustedIpcSender(event as unknown as IpcMainInvokeEvent),
   isMainWindowSender: (event: GitIpcEvent) => mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.webContents.id === event.sender.id,
+  // The Turns tab reads the store only while the feature is on: turning it off deletes the snapshots.
+  checkpoints: async () => desktopConfig.turnCheckpoints ? (await turnCheckpointRuntime())?.store ?? null : null,
 })
 ipcMain.handle('desktop:pop-out-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

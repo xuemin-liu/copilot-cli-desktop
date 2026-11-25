@@ -79,8 +79,28 @@ export async function runTurnCheckpointsCheck() {
     assert.deepEqual({ ...after, status: '' }, { ...was, status: '' })
     assert.equal(existsSync(join(workspace, '.git', 'refs', 'checkpoints')), false)
 
-    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, cli: (await state()).resolution.version, checks: ['start snapshot while the turn runs', 'end snapshot when idle', 'turn diff of two files', 'bytes on disk', 'project repository untouched'] }, null, 2))
-    console.log('[turn-checkpoints] PASS: a real turn was snapshotted in the app data folder and the project repository is untouched')
+    // The Git panel's Turns tab lists the turn, its two files and the patch of one, read from the app's own store.
+    const click = selector => ui(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) return false; element.click(); return true })()`)
+    await click('.session-git-toggle')
+    await until(() => ui('!!document.querySelector(".git-tabs")'), 'Git panel')
+    assert.deepEqual(await ui('[...document.querySelectorAll(".git-tabs [role=tab]")].map(tab => tab.textContent.replace(/ \\(\\d+\\)$/, ""))'), ['Changes', 'Turns', 'History', 'Branches'])
+    await ui('[...document.querySelectorAll(".git-tabs [role=tab]")].find(tab => tab.textContent === "Turns").click()')
+    await until(() => ui('document.querySelector(".git-turns .git-log-subject")?.textContent === "Reply with the saved marker."'), 'the turn is listed')
+    assert.equal(await ui('document.querySelectorAll(".git-turns .git-log > li").length'), 1)
+    await click('.git-turns .git-log-subject')
+    await until(() => ui('document.querySelectorAll(".git-turns .git-commit-file").length === 2'), 'the two changed files')
+    assert.deepEqual(await ui('[...document.querySelectorAll(".git-turns .git-commit-file")].map(file => file.textContent)'), ['a.txt', 'agent.txt'])
+    assert.match(await ui('document.querySelector(".git-turn-observed").textContent'), /^Changes observed during this turn/)
+    await ui('[...document.querySelectorAll(".git-turns .git-commit-file")].find(file => file.textContent === "a.txt").click()')
+    await until(() => ui('document.querySelector(".git-turns").innerText.includes("edited during the turn")'), 'the patch of a.txt')
+    const shown = await ui('document.querySelector(".git-turns").innerText')
+    assert.ok(shown.includes('one') && shown.includes('edited during the turn'), 'the removed and the added line are both shown')
+    await writeFile(join(artifacts, 'turns.png'), (await window.webContents.capturePage()).toPNG())
+    // Looking at the turns ran no Git write in the project either.
+    assert.deepEqual({ ...JSON.parse(await fingerprint()), status: '' }, { ...was, status: '' })
+
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, cli: (await state()).resolution.version, checks: ['start snapshot while the turn runs', 'end snapshot when idle', 'turn diff of two files', 'bytes on disk', 'project repository untouched', 'Turns tab lists the turn, its files and a patch'] }, null, 2))
+    console.log('[turn-checkpoints] PASS: a real turn was snapshotted in the app data folder, the Turns tab shows its changes, and the project repository is untouched')
   } catch (error) {
     await writeFile(join(artifacts, 'failure.png'), (await window.webContents.capturePage()).toPNG()).catch(() => {})
     console.error('[turn-checkpoints] state', JSON.stringify(await state()).slice(0, 2000))
