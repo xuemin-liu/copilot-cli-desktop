@@ -227,9 +227,29 @@ function RepoSwitcher({ repos, repo, locked, active, onSelect }: {
 }): JSX.Element {
   const id = useId()
   const picker = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
   useLayoutEffect(() => { if (!active) picker.current?.hidePopover() }, [active])
+  // Place the list under the button from its on-screen rect: the popover sits in the top layer, and CSS anchor()
+  // without a resolved anchor falls back to auto, which put the list at the window's top-left corner.
+  useLayoutEffect(() => {
+    const list = picker.current
+    if (!list) return
+    const place = (): void => {
+      const button = trigger.current
+      if (!button) return
+      const rect = button.getBoundingClientRect()
+      const width = Math.min(360, window.innerWidth * 0.9)
+      list.style.top = `${Math.round(rect.bottom)}px`
+      list.style.left = `${Math.round(Math.max(4, Math.min(rect.left, window.innerWidth - width - 4)))}px`
+    }
+    const onBeforeToggle = (event: Event): void => { if ((event as ToggleEvent).newState === 'open') place() }
+    const onResize = (): void => { if (list.matches(':popover-open')) place() }
+    list.addEventListener('beforetoggle', onBeforeToggle)
+    window.addEventListener('resize', onResize)
+    return () => { list.removeEventListener('beforetoggle', onBeforeToggle); window.removeEventListener('resize', onResize) }
+  }, [])
   return <>
-    <button type="button" className="git-repo-switch" popoverTarget={id} aria-label={`Switch repository, current repository ${repo.name}, ${repos.length} repositories`}
+    <button ref={trigger} type="button" className="git-repo-switch" popoverTarget={id} aria-label={`Switch repository, current repository ${repo.name}, ${repos.length} repositories`}
       title={`${repo.folder} · ${repos.length} repositories`}>
       <span>{repo.name}</span><span aria-hidden="true">▾</span>
     </button>

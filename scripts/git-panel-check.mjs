@@ -231,6 +231,13 @@ ${point.missing}`)
     const chooseRepo = async name => {
       if (!await ui('!!document.querySelector(".git-repos:popover-open")')) await click('.git-repo-switch')
       await until('!!document.querySelector(".git-repos:popover-open")', 'repository picker opened')
+      // The list opens just under its button, not at the window's top-left corner.
+      const placement = await ui(`(() => {
+        const button = document.querySelector('.git-repo-switch').getBoundingClientRect()
+        const list = document.querySelector('.git-repos').getBoundingClientRect()
+        return { gap: list.top - button.bottom, overlaps: list.left <= button.right && list.right >= button.left }
+      })()`)
+      assert.ok(placement.gap >= 0 && placement.gap <= 8 && placement.overlaps, `repository list opens under its button: ${JSON.stringify(placement)}`)
       await clickByText('.git-repo', name)
     }
     // A hidden window does not repaint on its own, so a capture would show the previous frame. Paint, then capture.
