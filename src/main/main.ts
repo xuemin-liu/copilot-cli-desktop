@@ -160,8 +160,10 @@ import {
   prReviewAndFixRequest,
   readReviewerDiffPage,
   readSeatFeedbackPage,
+  recoverSweptReviewerCredentials,
   reviewerPromptLine,
   seatGrantTarget,
+  shutdownActiveReviewerSeats,
   TempReviewerRegistry,
   validateSeatReviewSubmission,
   type TempReviewerGroup,
@@ -987,7 +989,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(grant?.enabled)continue
       const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&sameRealPath(session.sessionCwd,record.checkout))
       if(open)continue
-      await cleanupReviewerSeatCredentials({ home: join(record.root, 'home'), helper: join(record.root, 'helper'), github: join(record.root, 'gh') }, null)
+      await recoverSweptReviewerCredentials(record, store)
       const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(outcome==='removed')await store.release(record.launchId)
@@ -2182,7 +2184,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
         tempSeat.seat.codexAuthSync = null
         tempReviewers.revokeSeat(tempSeat.seat, status === 'crashed' ? 'failed' : 'stopped',
           status === 'crashed' ? 'Reviewer session exited unexpectedly.' : 'Reviewer session ended; retry if another review round is needed.')
-        void cleanupReviewerSeatCredentials(tempSeat.seat.area, sync)
+        void cleanupReviewerSeatCredentials(tempSeat.seat.area, sync).then(() => {
+          if (tempSeat.seat.launchId) return reviewReservations()?.setCodexAuthSync(tempSeat.seat.launchId, null)
+        }).catch(() => {})
       }
     }
     if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) {
@@ -3610,9 +3614,10 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
   const area = seat.area
   const authSync = seat.codexAuthSync
   seat.codexAuthSync = null
-  await cleanupReviewerSeatCredentials(area, authSync)
-  if (!area) return
   const store = reviewReservations()
+  await cleanupReviewerSeatCredentials(area, authSync)
+  if (seat.launchId) await store?.setCodexAuthSync(seat.launchId, null).catch(() => {})
+  if (!area) return
   const runner = await meetingGitRunner().catch(() => null)
   const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
   if (outcome === 'removed') {
@@ -4056,6 +4061,7 @@ async function launchTempReviewerSeat(
         checkoutPath: area.checkout,
       })
       seat.codexAuthSync = authSync
+      if (authSync) await store.setCodexAuthSync(launchId, authSync)
       const codexLaunch = buildCodexReviewerLaunch({
         help,
         mcpUrl,
@@ -4123,6 +4129,7 @@ async function launchTempReviewerSeat(
     const sync = seat.codexAuthSync
     seat.codexAuthSync = null
     await cleanupReviewerSeatCredentials(area, sync)
+    await store.setCodexAuthSync(launchId, null).catch(() => {})
     if (!tabId) {
       const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
       if (outcome === 'removed') await store.release(launchId).catch(() => {})
@@ -5106,6 +5113,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
             tempReviewers.revokeSeat(seat, 'stopped', 'Reviewer tab was closed.')
           }
           await cleanupReviewerSeatCredentials(seat.area, sync)
+          if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
         }
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
@@ -6574,6 +6582,9 @@ async function stopAllSessions(): Promise<void> {
     managed.session.removeAllListeners()
     managedTabs.delete(tabId)
   })))
+  // Sync any rotated Codex OAuth refresh tokens from active/starting temporary reviewers back to the user's real
+  // CODEX_HOME and delete seat credentials before Desktop exits on quit or update install.
+  await shutdownActiveReviewerSeats(tempReviewers.list(), reviewReservations())
 }
 
 // --- IPC: main window -------------------------------------------------
@@ -8336,7 +8347,7 @@ app.on('before-quit', (event) => {
     return
   }
   clearTimeout(updateQuitTimer)
-  if (managedTabs.size === 0 && !usageService && !projectToolService) return
+  if (managedTabs.size === 0 && tempReviewers.list().length === 0 && !usageService && !projectToolService) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via

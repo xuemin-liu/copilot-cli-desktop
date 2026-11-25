@@ -7,6 +7,7 @@ import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import { receiptTag, type PostReceipt } from './pr-loop-posts.js'
 import { makeReviewerArea, planReviewerArea, removeReviewerArea } from './pr-review-launch.js'
+import { ReviewReservations } from './pr-review-reservations.js'
 import { PR_REVIEWER_TOKEN_ENV } from './pr-reviewer-mcp.js'
 import {
   buildClaudeMcpConfigJson,
@@ -19,6 +20,8 @@ import {
   prReviewAndFixRequest,
   readReviewerDiffPage,
   readSeatFeedbackPage,
+  recoverSweptReviewerCredentials,
+  shutdownActiveReviewerSeats,
   TempReviewerRegistry,
   validateSeatReviewSubmission,
   type ReceiptReader,
@@ -495,6 +498,119 @@ test('cleanupReviewerSeatCredentials syncs rotated Codex auth atomically when un
     await cleanupReviewerSeatCredentials(area2, authSync2)
     assert.equal(existsSync(join(codexHome2, 'auth.json')), false, 'seat copy deleted')
     assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), concurrentRealAuth, 'diverged real auth.json never overwritten')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('quitting Desktop or recovering after a crash preserves a rotated Codex sign-in from an active reviewer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-quit-recovery-'))
+  try {
+    const reservationsFile = join(dir, 'pr-review-reservations.json')
+    const fakeRealCodex = join(dir, 'disposable-codex-home')
+    mkdirSync(fakeRealCodex, { recursive: true })
+    const initialAuth = JSON.stringify({ tokens: { refresh_token: 'rt_v1', access_token: 'at_v1' } })
+    writeFileSync(join(fakeRealCodex, 'auth.json'), initialAuth)
+
+    // 1. Normal Desktop quit / update with an active Codex reviewer running:
+    const registry = new TempReviewerRegistry()
+    const snap = makeSnapshot()
+    const group = registry.createGroup({
+      hostTabId: 'tab-quit',
+      hostSessionId: 'sess-quit',
+      profileId: 'prof-1',
+      accountId: 42,
+      repository: 'owner/repo',
+      prNumber: 77,
+      prUrl: 'https://github.com/owner/repo/pull/77',
+      head: HEAD,
+      base: BASE,
+      feedbackSignature: prFeedbackSignature(snap),
+      materialFeedbackSignature: materialFeedbackSignature(snap),
+      authorReplySignature: 'empty',
+      clis: ['codex'],
+      origin: 'https://github.com/owner/repo.git',
+    })
+    group.stage = 'active'
+    const seat = group.requiredSeats.get('codex')!
+    seat.lifecycle = 'running'
+
+    const areaQuit = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    const launchIdQuit = resolve(areaQuit.root).split(/[\\/]/).at(-1)!
+    seat.launchId = launchIdQuit
+    seat.area = areaQuit
+
+    const reservations = new ReviewReservations(reservationsFile)
+    await reservations.reserve({
+      launchId: launchIdQuit,
+      repository: 'owner/repo',
+      number: 77,
+      reviewer: '42:temp:codex',
+      project: join(dir, 'project'),
+      root: areaQuit.root,
+      checkout: areaQuit.checkout,
+      ref: areaQuit.ref,
+    })
+
+    const { codexHome: quitCodexHome, authSync: quitAuthSync } = await prepareCodexReviewerHome({
+      areaHome: areaQuit.home,
+      realCodexHome: fakeRealCodex,
+      checkoutPath: areaQuit.checkout,
+    })
+    seat.codexAuthSync = quitAuthSync
+    if (quitAuthSync) await reservations.setCodexAuthSync(launchIdQuit, quitAuthSync)
+
+    // Reviewer refreshes single-use token while running, then Desktop quits (`stopAllSessions` -> `shutdownActiveReviewerSeats`):
+    const rotatedDuringRun = JSON.stringify({ tokens: { refresh_token: 'rt_v2_quit', access_token: 'at_v2_quit' } })
+    writeFileSync(join(quitCodexHome, 'auth.json'), rotatedDuringRun)
+    let stoppedSeat = false
+    await shutdownActiveReviewerSeats(registry.list(), reservations, async () => { stoppedSeat = true })
+
+    assert.equal(stoppedSeat, true)
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedDuringRun, 'normal quit preserves rotated token')
+    assert.equal(existsSync(join(quitCodexHome, 'auth.json')), false, 'normal quit removes seat credential')
+    assert.equal(reservations.list()[0]?.codexAuthSync, undefined, 'persisted sync cleared after normal quit')
+    await reservations.release(launchIdQuit)
+
+    // 2. Abrupt crash / power loss while reviewer is running -> next-launch `ReviewReservations` + `recoverSweptReviewerCredentials`:
+    const areaCrash = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    const launchIdCrash = resolve(areaCrash.root).split(/[\\/]/).at(-1)!
+    areaCrash.project = join(dir, 'project')
+    mkdirSync(areaCrash.checkout, { recursive: true })
+    writeFileSync(join(areaCrash.checkout, 'untracked.txt'), 'dirty')
+
+    await reservations.reserve({
+      launchId: launchIdCrash,
+      repository: 'owner/repo',
+      number: 78,
+      reviewer: '42:temp:codex-crash',
+      project: areaCrash.project,
+      root: areaCrash.root,
+      checkout: areaCrash.checkout,
+      ref: areaCrash.ref,
+    })
+    const { codexHome: crashCodexHome, authSync: crashAuthSync } = await prepareCodexReviewerHome({
+      areaHome: areaCrash.home,
+      realCodexHome: fakeRealCodex,
+      checkoutPath: areaCrash.checkout,
+    })
+    assert.ok(crashAuthSync)
+    await reservations.setCodexAuthSync(launchIdCrash, crashAuthSync)
+
+    const rotatedBeforeCrash = JSON.stringify({ tokens: { refresh_token: 'rt_v3_crash', access_token: 'at_v3_crash' } })
+    writeFileSync(join(crashCodexHome, 'auth.json'), rotatedBeforeCrash)
+
+    // Simulate cold Desktop restart reading `pr-review-reservations.json` from disk and sweeping abandoned areas:
+    const restartedReservations = new ReviewReservations(reservationsFile)
+    const restoredRecord = restartedReservations.list().find((r) => r.launchId === launchIdCrash)
+    assert.ok(restoredRecord?.codexAuthSync, 'restart recovery loads persisted codexAuthSync')
+
+    await recoverSweptReviewerCredentials(restoredRecord, restartedReservations)
+    const sweepOutcome = await removeReviewerArea(restoredRecord, null)
+    assert.equal(sweepOutcome, 'kept')
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedBeforeCrash, 'crash recovery syncs rotated token before deleting seat home')
+    assert.equal(existsSync(join(crashCodexHome, 'auth.json')), false, 'crash recovery deletes seat credential')
+    assert.equal(restartedReservations.list().find((r) => r.launchId === launchIdCrash)?.codexAuthSync, undefined)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -8,6 +8,7 @@ import type { GitRunner } from './git-runner.js'
 import type { PostReceipt, PrLoopGrantTarget } from './pr-loop-posts.js'
 import { DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
 import type { ReviewerArea, ReviewerPolicy } from './pr-review-launch.js'
+import type { ReviewReservation, ReviewReservations } from './pr-review-reservations.js'
 import { PR_REVIEWER_MCP_SERVER_NAME, PR_REVIEWER_TOKEN_ENV } from './pr-reviewer-mcp.js'
 import { sessionCliLabel, SUPPORTED_REVIEWER_CLIS, type ReviewerCli } from './session-cli.js'
 import type {
@@ -330,6 +331,55 @@ export async function cleanupReviewerSeatCredentials(
       )
     }
     await Promise.all(removals)
+  }
+}
+
+/**
+ * Normal Desktop quit / update-install cleanup for active or starting temporary reviewer seats:
+ * stops any live seat process first, syncs any rotated Codex OAuth refresh token back to the user's real
+ * `~/.codex/auth.json`, deletes the seat's copied credentials, and clears the persisted `codexAuthSync` record.
+ */
+export async function shutdownActiveReviewerSeats(
+  groups: Iterable<Pick<TempReviewerGroup, 'requiredSeats'>>,
+  reservations: Pick<ReviewReservations, 'setCodexAuthSync'> | null | undefined,
+  stopSeatProcess?: (seat: TempReviewerSeat) => Promise<void>,
+): Promise<void> {
+  for (const group of groups) {
+    for (const seat of group.requiredSeats.values()) {
+      seat.bearerToken = ''
+      if (stopSeatProcess) {
+        await stopSeatProcess(seat).catch(() => {})
+      }
+      const sync = seat.codexAuthSync
+      seat.codexAuthSync = null
+      if (seat.area || sync) {
+        await cleanupReviewerSeatCredentials(seat.area, sync)
+      }
+      if (seat.launchId && reservations) {
+        await reservations.setCodexAuthSync(seat.launchId, null).catch(() => {})
+      }
+    }
+  }
+}
+
+/**
+ * Next-launch restart recovery for an abandoned reviewer area: recovers any pending rotated Codex OAuth sign-in
+ * recorded in `ReviewReservations` BEFORE deleting `record.root/home/codex-home/auth.json`.
+ */
+export async function recoverSweptReviewerCredentials(
+  record: Pick<ReviewReservation, 'launchId' | 'root' | 'codexAuthSync'>,
+  reservations: Pick<ReviewReservations, 'setCodexAuthSync'> | null | undefined,
+): Promise<void> {
+  await cleanupReviewerSeatCredentials(
+    {
+      home: join(record.root, 'home'),
+      helper: join(record.root, 'helper'),
+      github: join(record.root, 'gh'),
+    },
+    record.codexAuthSync ?? null,
+  )
+  if (record.codexAuthSync && reservations) {
+    await reservations.setCodexAuthSync(record.launchId, null).catch(() => {})
   }
 }
 
