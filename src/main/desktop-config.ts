@@ -45,12 +45,14 @@ export interface DesktopConfig {
   desktopControl: boolean
   /** A clicked path outside the session's workspace opens in a File tab too. Off: such paths are refused, as before. */
   openFilesOutsideWorkspace: boolean
+  /** Snapshot a session's working folder at each turn, in the app's own data folder. Turning it off deletes the snapshots. */
+  turnCheckpoints: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints'
 >
 
 /**
@@ -127,6 +129,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   maxSessionTabs: DEFAULT_MAX_SESSION_TABS,
   desktopControl: false,
   openFilesOutsideWorkspace: false,
+  turnCheckpoints: true,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -380,6 +383,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     maxSessionTabs: normalizeMaxSessionTabs(value.maxSessionTabs),
     desktopControl: value.desktopControl === true,
     openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
+    turnCheckpoints: value.turnCheckpoints !== false,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }
