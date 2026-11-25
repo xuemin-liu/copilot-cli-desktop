@@ -1,8 +1,23 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { approvalHead, authorPostProblem, DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
+import { approvalHead, authorPostProblem, DEFAULT_PR_MARKER, isMarked, type PrLoopRole } from './pr-loop-rules.js'
 import { GithubWriteRefused, type GithubApi, type GithubWrite } from './workflow-github.js'
-import type { FollowupGrant } from './workflow-followups.js'
+
+/**
+ * Minimal grant shape needed by PrLoopPosts, satisfied by both a FollowupGrant and a temporary reviewer seat.
+ */
+export interface PrLoopGrantTarget {
+  id: string
+  enabled: boolean
+  role?: PrLoopRole | undefined
+  sessionId: string
+  accountId?: number | undefined
+  repository: string
+  number: number
+  marker?: string | undefined
+  checkedOut?: string | null | undefined
+  checkedOutBase?: string | null | undefined
+}
 
 /**
  * The PR loops' only way to write to GitHub (docs/pr-loops-plan.md, decisions 1 and 6). A session asks through its
@@ -12,6 +27,7 @@ import type { FollowupGrant } from './workflow-followups.js'
  */
 
 export type ReceiptState = 'intent' | 'posted' | 'uncertain' | 'dismissed'
+export interface PostChecks { ran: string[]; missing: string[] }
 export interface PostReceipt {
   id: string; grantId: string; sessionId: string; repository: string; number: number
   kind: 'reply' | 'comment' | 'review' | 'approval'; target: number | null; bodyHash: string; state: ReceiptState
@@ -20,11 +36,17 @@ export interface PostReceipt {
   head?: string | null; base?: string | null
   /** A review that is an approval held back for missing checks, not a review with findings. */
   heldApproval?: boolean
+  /** The checks reported with an approval or held approval, preserved across reconciliation. */
+  checks?: PostChecks
+  /** For temporary reviewer seats: binds the receipt to a specific seat launch generation. */
+  seatGeneration?: string
 }
 export interface ReviewComment { path: string; line: number; body: string }
 export interface ReviewRequest { body: string; comments: ReviewComment[]; approve: boolean
   /** Set by the desktop, never by the reviewer: this comment stands in for an approval held for missing checks. */
-  heldApproval?: boolean }
+  heldApproval?: boolean
+  checks?: PostChecks
+  seatGeneration?: string }
 export interface PostHost { api: GithubApi; write: GithubWrite; now?: () => number }
 export interface ReplyRequest { to: string; body: string }
 
@@ -70,7 +92,7 @@ export class PrLoopPosts {
    * An author's reply on its own PR. `grant` is the grant as stored now; `sessionId` is the session the helper call
    * came from, which must be the grant's.
    */
-  async reply(grant: FollowupGrant | null, sessionId: string, request: ReplyRequest, authorized: () => boolean = () => true): Promise<PostReceipt> {
+  async reply(grant: PrLoopGrantTarget | null, sessionId: string, request: ReplyRequest, authorized: () => boolean = () => true): Promise<PostReceipt> {
     if (!grant || !grant.enabled || (grant.role !== 'author' && grant.role !== 'reviewer')) throw new PrPostRejected('This session has no active fix loop or review loop.')
     if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the fix loop for that PR.')
     if (this.busy.has(grant.id)) throw new PrPostRejected('Another reply of this loop is being posted; try again in a moment.')
@@ -176,7 +198,7 @@ export class PrLoopPosts {
    * A reviewer's review or approval of the head the desktop checked out for it. `onPosted` records the reviewed head
    * and base on the grant. An approval names that head in its first words and carries no findings.
    */
-  async review(grant: FollowupGrant | null, sessionId: string, request: ReviewRequest, onPosted: (head: string, base: string) => void, authorized: () => boolean = () => true): Promise<PostReceipt> {
+  async review(grant: PrLoopGrantTarget | null, sessionId: string, request: ReviewRequest, onPosted: (head: string, base: string) => void, authorized: () => boolean = () => true): Promise<PostReceipt> {
     if (!grant || !grant.enabled || grant.role !== 'reviewer') throw new PrPostRejected('This session has no active review loop.')
     if (grant.sessionId !== sessionId) throw new PrPostRejected('This session does not hold the review loop for that PR.')
     if (this.busy.has(grant.id)) throw new PrPostRejected('Another review of this loop is being posted; try again in a moment.')
@@ -226,7 +248,9 @@ export class PrLoopPosts {
       if (!authorized()) throw new PrPostRejected('The review loop was stopped or changed; nothing was posted.')
       const receipt: PostReceipt = { id: randomUUID(), grantId: grant.id, sessionId, repository: grant.repository, number: grant.number,
         kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base,
-        ...(!request.approve && request.heldApproval === true && !comments.length ? { heldApproval: true } : {}) }
+        ...(!request.approve && request.heldApproval === true && !comments.length ? { heldApproval: true } : {}),
+        ...(request.checks ? { checks: { ran: [...request.checks.ran], missing: [...request.checks.missing] } } : {}),
+        ...(request.seatGeneration ? { seatGeneration: request.seatGeneration } : {}) }
       const posted = `${body}\n\n${receiptTag(receipt.id)}`
       receipt.bodyHash = sha256(posted)
       this.save(receipt)

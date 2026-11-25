@@ -5,7 +5,7 @@ import { basename, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isSessionPermissionMode } from './permission-modes.js'
-import { isOtherCli, type OtherCli } from './session-cli.js'
+import { isOtherCli, normalizeReviewerClis, DEFAULT_REVIEWER_CLIS, type OtherCli, type ReviewerCli } from './session-cli.js'
 import { normalizeOtherCliConfig, normalizePerCliConfig } from './agent-cli-settings.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
@@ -47,13 +47,21 @@ export interface DesktopConfig {
   openFilesOutsideWorkspace: boolean
   /** Snapshot a session's working folder at each turn, in the app's own data folder. Turning it off deletes the snapshots. */
   turnCheckpoints: boolean
+  /** Default CLIs launched as temporary PR reviewers when a workspace has no override of its own. */
+  reviewerClis: ReviewerCli[]
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis'
 >
+
+function samePrefValue(a: unknown, b: unknown): boolean {
+  return Array.isArray(a) && Array.isArray(b)
+    ? a.length === b.length && a.every((item, index) => item === b[index])
+    : a === b
+}
 
 /**
  * What to put back when saving a preference change fails: each value the change set returns to what it was
@@ -66,7 +74,9 @@ export function preferenceRollback(
 ): Partial<DesktopPreferences> {
   const rollback: Partial<DesktopPreferences> = {}
   for (const key of Object.keys(before) as Array<keyof DesktopPreferences>) {
-    if (before[key] !== applied[key] && current[key] === applied[key]) Object.assign(rollback, { [key]: before[key] })
+    if (!samePrefValue(before[key], applied[key]) && samePrefValue(current[key], applied[key])) {
+      Object.assign(rollback, { [key]: Array.isArray(before[key]) ? [...before[key]] : before[key] })
+    }
   }
   return rollback
 }
@@ -130,6 +140,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   desktopControl: false,
   openFilesOutsideWorkspace: false,
   turnCheckpoints: true,
+  reviewerClis: [...DEFAULT_REVIEWER_CLIS],
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -250,6 +261,13 @@ function otherCliProfileField(value: unknown): Pick<WorkspaceProfile, 'otherCli'
   return Object.keys(otherCli).length > 0 ? { otherCli } : {}
 }
 
+/** Omit the profile's reviewerClis override when unset or when no supported CLI remains in it. */
+function reviewerClisProfileField(value: unknown): Pick<WorkspaceProfile, 'reviewerClis'> {
+  if (!Array.isArray(value)) return {}
+  const normalized = normalizeReviewerClis(value, [])
+  return normalized.length > 0 ? { reviewerClis: normalized } : {}
+}
+
 /** A restored non-Copilot tab keeps its CLI and, when it had a saved permission/model snapshot, that snapshot. */
 function otherCliTabFields(cli: OtherCli, config: unknown): Pick<RestoredTab, 'cli' | 'otherCliConfig'> {
   const otherCliConfig = normalizePerCliConfig(cli, config)
@@ -345,6 +363,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
         defaultResumeMode,
         launch: normalizeSessionLaunchConfig(profile.launch),
         ...otherCliProfileField(profile.otherCli),
+        ...reviewerClisProfileField(profile.reviewerClis),
         tabs: readRestoredTabs(profile.tabs),
         ...(profile.general === true ? { general: true as const } : {}),
       })
@@ -384,6 +403,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     desktopControl: value.desktopControl === true,
     openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
     turnCheckpoints: value.turnCheckpoints !== false,
+    reviewerClis: normalizeReviewerClis(value.reviewerClis),
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

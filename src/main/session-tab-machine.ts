@@ -1,6 +1,6 @@
 import type { PermissionPreset } from './permission-presets.js'
 import type { SessionPermissionMode } from './permission-modes.js'
-import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
+import type { DesktopSessionTab, SessionLifecycleStatus, TempReviewerTabInfo } from './types.js'
 import type { OtherCli } from './session-cli.js'
 import type { PerCliConfig } from './agent-cli-settings.js'
 
@@ -8,6 +8,8 @@ import { DEFAULT_MAX_SESSION_TABS } from './session-tab-limit.js'
 
 /** The default limit; the app passes the one set in Settings. */
 export const MAX_SESSION_TABS = DEFAULT_MAX_SESSION_TABS
+/** Maximum concurrent hidden temporary PR reviewer tabs across active review runs. */
+export const MAX_TEMP_REVIEWER_TABS = 3
 
 export interface TabsState {
   tabs: DesktopSessionTab[]
@@ -40,10 +42,34 @@ export interface NewTabInput {
   launchWorktree?: boolean
   launchWorktreePath?: string
   privateOverrides?: boolean
+  tempReviewer?: TempReviewerTabInfo
+}
+
+export function regularTabCount(state: Pick<TabsState, 'tabs'>): number {
+  return state.tabs.filter((tab) => !tab.tempReviewer).length
+}
+
+function tempReviewerTabCount(state: TabsState): number {
+  return state.tabs.filter((tab) => Boolean(tab.tempReviewer)).length
 }
 
 export function createTab(state: TabsState, input: NewTabInput, maxTabs = MAX_SESSION_TABS): TabsState {
   return { tabs: [...state.tabs, newTab(state, input, 'starting', maxTabs)], activeTabId: input.id }
+}
+
+/**
+ * Starts a hidden temporary PR reviewer tab in the background: never steals `activeTabId`, and uses a dedicated
+ * temporary-reviewer cap so spawning reviewers does not consume the user's normal session tab slots.
+ */
+export function createBackgroundTab(state: TabsState, input: NewTabInput, maxTempTabs = MAX_TEMP_REVIEWER_TABS): TabsState {
+  if (!input.tempReviewer) throw new Error('Background reviewer tabs require tempReviewer metadata')
+  if (tempReviewerTabCount(state) >= maxTempTabs) {
+    throw new Error(`No more than ${maxTempTabs} temporary reviewer sessions can run at once`)
+  }
+  return {
+    tabs: [...state.tabs, newTab(state, input, 'starting', Number.POSITIVE_INFINITY)],
+    activeTabId: state.activeTabId,
+  }
 }
 
 /** A saved tab listed without starting its process; it takes focus only when nothing else has it. */
@@ -52,7 +78,7 @@ export function addDormantTab(state: TabsState, input: NewTabInput, maxTabs = MA
 }
 
 function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleStatus, maxTabs: number): DesktopSessionTab {
-  if (state.tabs.length >= maxTabs) {
+  if (!input.tempReviewer && regularTabCount(state) >= maxTabs) {
     throw new Error(`No more than ${maxTabs} session tabs can be open`)
   }
   if (state.tabs.some((tab) => tab.id === input.id)) {
@@ -82,12 +108,14 @@ function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleSt
     ...(input.privateOverrides ? { privateOverrides: true as const } : {}),
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
+    ...(input.tempReviewer ? { tempReviewer: input.tempReviewer } : {}),
   }
 }
 
 export function closeTab(state: TabsState, tabId: string): TabsState {
   const index = state.tabs.findIndex((tab) => tab.id === tabId)
   if (index === -1) return state
+  const closing = state.tabs[index]
   const tabs = state.tabs.filter((tab) => tab.id !== tabId).map((tab) => {
     if (tab.sideParentTabId !== tabId) return tab
     const { sideParentTabId: _parent, ...detached } = tab
@@ -95,12 +123,16 @@ export function closeTab(state: TabsState, tabId: string): TabsState {
   })
   let activeTabId = state.activeTabId
   if (activeTabId === tabId) {
-    // Keep the surviving pane of a split in view. For ordinary tabs,
-    // prefer the next tab, then the previous tab.
-    const parentId = state.tabs[index]?.sideParentTabId
-    const childId = state.tabs.find((tab) => tab.sideParentTabId === tabId)?.id
-    activeTabId = (parentId && tabs.some((tab) => tab.id === parentId) ? parentId : null)
-      ?? childId ?? tabs[index]?.id ?? tabs[index - 1]?.id ?? null
+    // Keep the surviving pane of a split in view. Closing a directly-focused temp reviewer returns to its host tab;
+    // closing any tab never falls back to focusing a hidden tempReviewer tab.
+    const hostId = closing?.tempReviewer?.hostTabId
+    const parentId = closing?.sideParentTabId
+    const childId = state.tabs.find((tab) => tab.sideParentTabId === tabId && !tab.tempReviewer)?.id
+    const regularAfter = tabs.slice(index).find((tab) => !tab.tempReviewer)?.id
+    const regularBefore = [...tabs.slice(0, index)].reverse().find((tab) => !tab.tempReviewer)?.id
+    activeTabId = (hostId && tabs.some((tab) => tab.id === hostId && !tab.tempReviewer) ? hostId : null)
+      ?? (parentId && tabs.some((tab) => tab.id === parentId && !tab.tempReviewer) ? parentId : null)
+      ?? childId ?? regularAfter ?? regularBefore ?? null
   }
   return { tabs, activeTabId }
 }
@@ -214,13 +246,28 @@ export function activeWorkspaceFor(state: TabsState, current: string | null): st
 }
 
 export function canOpenAnotherTab(state: TabsState, maxTabs = MAX_SESSION_TABS): boolean {
-  return state.tabs.length < maxTabs
+  return regularTabCount(state) < maxTabs
 }
 
-/** activeTabId is keyboard focus; a linked pair stays visible for either focus. */
-export function visibleSessionTabs(state: TabsState): { main: DesktopSessionTab | null; side: DesktopSessionTab | null } {
+/**
+ * `activeTabId` is keyboard focus; a linked pair stays visible for either focus. When `peekTabId` names a live
+ * temporary reviewer belonging to `main`, it temporarily occupies the right split pane without mutating `sideParentTabId`,
+ * so closing the peek restores any existing `sideChat`.
+ */
+export function visibleSessionTabs(
+  state: TabsState,
+  peekTabId: string | null = null,
+): { main: DesktopSessionTab | null; side: DesktopSessionTab | null } {
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  if (active?.tempReviewer) {
+    const host = state.tabs.find((tab) => tab.id === active.tempReviewer!.hostTabId) ?? null
+    if (host && peekTabId === active.id) return { main: host, side: active }
+    return { main: active, side: null }
+  }
   const main = state.tabs.find((tab) => tab.id === active?.sideParentTabId) ?? active
-  const side = main ? state.tabs.find((tab) => tab.sideParentTabId === main.id) ?? null : null
+  const peek = main && peekTabId
+    ? state.tabs.find((tab) => tab.id === peekTabId && tab.tempReviewer?.hostTabId === main.id) ?? null
+    : null
+  const side = peek ?? (main ? state.tabs.find((tab) => tab.sideParentTabId === main.id) ?? null : null)
   return { main, side }
 }

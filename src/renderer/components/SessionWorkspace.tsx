@@ -35,6 +35,9 @@ interface SessionWorkspaceProps {
   desktopControlAllowed?: boolean
   desktopControlReadyTabIds?: string[]
   desktopControl?: Record<string, DesktopControlTabView>
+  /** Optional temporary reviewer tab being peeked in the right-hand split pane without leaving the host tab. */
+  peekTabId?: string | null
+  onClearPeek?: () => void
 }
 
 function savedSplit(): number {
@@ -44,8 +47,8 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onUseCliSettings, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
-  const { main, side } = visibleSessionTabs({ tabs, activeTabId })
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onUseCliSettings, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {}, peekTabId = null, onClearPeek }: SessionWorkspaceProps): JSX.Element {
+  const { main, side } = visibleSessionTabs({ tabs, activeTabId }, peekTabId)
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
   const toggleDesktopPanel = (tabId: string): void => setDesktopPanels(open => {
@@ -117,7 +120,15 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
-              {tab.sideChat ? (
+              {tab.tempReviewer ? (
+                <>
+                  <span className="side-chat-badge" title={`Temporary reviewer for ${tab.tempReviewer.repository} #${tab.tempReviewer.prNumber}`}>Temp reviewer</span>
+                  {onClearPeek && peekTabId === tab.id && (
+                    <button type="button" className="meeting-bar-button" onClick={onClearPeek}
+                      aria-label={`Hide ${tab.title}`} title="Hide reviewer pane — keep the review running in the background">Hide</button>
+                  )}
+                </>
+              ) : tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && !tab.cli && (
                 <button type="button" className="icon-button session-fork" aria-label="Fork into side chat" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'dormant' || tab.status === 'completed' || tab.status === 'crashed'}

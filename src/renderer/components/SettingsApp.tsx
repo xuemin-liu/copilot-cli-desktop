@@ -8,7 +8,7 @@ import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import type { SessionLaunchConfig } from '../../main/session-launch.js'
 import { AGENT_CLI_SETTINGS, type OtherCliConfig } from '../../main/agent-cli-settings.js'
-import { OTHER_CLIS, sessionCliLabel, type OtherCli } from '../../main/session-cli.js'
+import { OTHER_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli } from '../../main/session-cli.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
@@ -80,10 +80,12 @@ const CREDENTIAL_LABELS: Record<CredentialName, string> = {
 function WorkspaceProfileEditor({
   profile,
   active,
+  defaultReviewerClis,
   onSave,
 }: {
   profile: WorkspaceProfile
   active: boolean
+  defaultReviewerClis: readonly ReviewerCli[]
   onSave: Save
 }): JSX.Element {
   const [saving, setSaving] = useState(false)
@@ -92,6 +94,7 @@ function WorkspaceProfileEditor({
   const [defaultResumeMode, setDefaultResumeMode] = useState(profile.defaultResumeMode)
   const [launch, setLaunch] = useState<SessionLaunchConfig>(profile.launch)
   const [otherCli, setOtherCli] = useState<OtherCliConfig>(profile.otherCli ?? {})
+  const [reviewerOverride, setReviewerOverride] = useState<ReviewerCli[] | null>(profile.reviewerClis ? [...profile.reviewerClis] : null)
   const [activeCli, setActiveCli] = useState<OtherCli>(OTHER_CLIS[0])
 
   const nullableNumber = (value: string): number | null => value === '' ? null : Number(value)
@@ -323,6 +326,43 @@ function WorkspaceProfileEditor({
         </div>
         {activeDescriptor.permissionNote && <p className="settings-disclaimer">{activeDescriptor.permissionNote}</p>}
       </div>
+      <div className="other-cli-settings">
+        <div className="other-cli-heading">
+          <strong>Temporary PR reviewer CLIs</strong>
+          <span>Which CLIs start temporary reviewer sessions when <code>review-and-fix-pr</code> runs in this workspace.</span>
+        </div>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={reviewerOverride === null}
+            onChange={(event) => setReviewerOverride(event.target.checked ? null : [...defaultReviewerClis])}
+          />
+          Use default PR reviewer CLIs ({defaultReviewerClis.map((cli) => sessionCliLabel(cli)).join(', ')})
+        </label>
+        {reviewerOverride !== null && (
+          <div className="settings-form-grid" role="group" aria-label={`PR reviewer CLIs for ${profile.name}`}>
+            {SUPPORTED_REVIEWER_CLIS.map((cli) => {
+              const checked = reviewerOverride.includes(cli)
+              return (
+                <label key={cli} className="settings-row">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={checked && reviewerOverride.length <= 1}
+                    onChange={(event) => {
+                      const next = event.target.checked
+                        ? SUPPORTED_REVIEWER_CLIS.filter((item) => item === cli || reviewerOverride.includes(item))
+                        : reviewerOverride.filter((item) => item !== cli)
+                      if (next.length > 0) setReviewerOverride(next)
+                    }}
+                  />
+                  {sessionCliLabel(cli)}
+                </label>
+              )
+            })}
+          </div>
+        )}
+      </div>
       <div className="settings-actions">
         <button
           type="button"
@@ -330,7 +370,15 @@ function WorkspaceProfileEditor({
           onClick={() => {
             setSaving(true)
             void onSave(
-              window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch, Object.keys(otherCli).length > 0 ? otherCli : undefined),
+              window.copilotDesktopSettings.updateWorkspaceProfile(
+                profile.id,
+                name,
+                permissionPreset,
+                defaultResumeMode,
+                launch,
+                Object.keys(otherCli).length > 0 ? otherCli : undefined,
+                reviewerOverride ?? undefined,
+              ),
               `Saved profile "${name.trim() || profile.name}".`,
               `Could not save profile "${profile.name}"`,
             ).finally(() => setSaving(false))
@@ -695,7 +743,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -922,6 +970,36 @@ export function SettingsApp(): JSX.Element | null {
       </section>
 
       <section>
+        <h2>Pull request reviewers</h2>
+        <div role="group" aria-label="Default PR reviewer CLIs">
+          {SUPPORTED_REVIEWER_CLIS.map((cli) => {
+            const checked = snapshot.reviewerClis.includes(cli)
+            return (
+              <label key={cli} className="settings-row">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={checked && snapshot.reviewerClis.length <= 1}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                      ? SUPPORTED_REVIEWER_CLIS.filter((item) => item === cli || snapshot.reviewerClis.includes(item))
+                      : snapshot.reviewerClis.filter((item) => item !== cli)
+                    if (next.length > 0) updatePreference({ reviewerClis: next })
+                  }}
+                />
+                {sessionCliLabel(cli)}
+              </label>
+            )
+          })}
+        </div>
+        <p className="settings-disclaimer">
+          Default CLIs launched as hidden temporary PR reviewer sessions when <code>review-and-fix-pr</code> runs (each workspace
+          profile can override this). Copilot CLI runs inside Desktop&rsquo;s OS command sandbox; Claude Code and Codex CLI run in
+          read-only review mode over Desktop&rsquo;s scoped reviewer MCP channel under your OS account, after your confirmation.
+        </p>
+      </section>
+
+      <section>
         <h2>Desktop control</h2>
         <label className="settings-row">
           <input
@@ -1046,6 +1124,7 @@ export function SettingsApp(): JSX.Element | null {
             key={profile.id}
             profile={profile}
             active={profile.id === snapshot.activeProfileId}
+            defaultReviewerClis={snapshot.reviewerClis}
             onSave={save}
           />
         ))}

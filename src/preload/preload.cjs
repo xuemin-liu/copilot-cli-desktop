@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   extendFollowup: (id) => ipcRenderer.invoke('desktop:followup-extend', id),
   dismissPrPost: (id) => ipcRenderer.invoke('desktop:pr-post-dismiss', id),
   startPrReview: (url, consent) => ipcRenderer.invoke('desktop:pr-review-start', url, consent),
+  tempReviewerAction: (groupId, action, payload) => ipcRenderer.invoke('desktop:temp-reviewer-action', groupId, action, payload),
   saveFollowupDefault:(projectId,url,reviewers,checks,complete)=>ipcRenderer.invoke('desktop:followup-default-save',projectId,url,reviewers,checks,complete),
   removeFollowupDefault:projectId=>ipcRenderer.invoke('desktop:followup-default-remove',projectId),
   pauseFollowup: (id) => ipcRenderer.invoke('desktop:followup-pause', id),
