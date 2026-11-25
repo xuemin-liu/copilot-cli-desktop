@@ -1519,7 +1519,7 @@ button:disabled {
 
 .git-repo-switch { display: flex; align-items: center; gap: 8px; max-width: 70%; min-width: 0; margin-right: auto; padding: 3px 8px; }
 .git-repo-switch span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-repos { position: fixed; inset: auto; top: anchor(bottom); left: clamp(4px, anchor(left), calc(100vw - min(360px, 90vw) - 4px)); margin: 4px 0 0; width: min(360px, 90vw); box-sizing: border-box; max-height: 60vh; overflow: auto; padding: 5px; border: 1px solid #3a4a66; border-radius: 6px; background: #10151e; }
+.git-repos { position: fixed; inset: auto; margin: 4px 0 0; width: min(360px, 90vw); box-sizing: border-box; max-height: 60vh; overflow: auto; padding: 5px; border: 1px solid #3a4a66; border-radius: 6px; background: #10151e; }
 .git-repos:popover-open { display: grid; gap: 4px; }
 .git-repo-path { grid-column: 2; font-size: 11px; color: #aeb9c8; overflow-wrap: anywhere; }
 .git-repo { display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 8px; align-items: center; text-align: left; padding: 6px 8px; border: 1px solid #252a33; border-radius: 6px; background: #131a26; color: #c8d0dc; }
