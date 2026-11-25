@@ -163,8 +163,10 @@ function leftOutOf(record: CheckpointTurn): { has(path: string): boolean; comple
   const exact = new Set<string>()
   const folders: string[] = []
   for (const capture of captures) for (const path of capture.notCapturedPaths ?? capture.notCapturedSample) {
-    // An embedded repository is recorded as its folder, with a trailing slash.
-    if (path.endsWith('/')) folders.push(path); else exact.add(path)
+    // An embedded repository is recorded as its folder, with a trailing slash; a POSIX symlink replacing a folder is
+    // recorded without a slash, and files behind it from the other snapshot are left out too.
+    if (path.endsWith('/')) folders.push(path)
+    else { exact.add(path); folders.push(`${path}/`) }
   }
   return {
     has: path => exact.has(path) || folders.some(folder => path.startsWith(folder)),
