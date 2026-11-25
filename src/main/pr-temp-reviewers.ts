@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { helpListsFlag } from './agent-cli-settings.js'
+import { writeFileAtomic } from './atomic-file.js'
 import type { GitRunner } from './git-runner.js'
 import type { PostReceipt, PrLoopGrantTarget } from './pr-loop-posts.js'
 import { DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
@@ -236,6 +237,16 @@ export function buildClaudeMcpConfigJson(mcpUrl: string, bearerToken: string): s
   }, null, 2)
 }
 
+export interface CodexAuthSync {
+  seatAuthPath: string
+  realAuthPath: string
+  initialSha256: string
+}
+
+function sha256Buffer(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
 /**
  * Creates an isolated per-seat `CODEX_HOME` inside `areaHome` so a Codex temporary reviewer never inherits user-configured
  * MCP servers (`copilot-meeting`, `node_repl`, computer-use, etc.), hooks, or profiles from `~/.codex/config.toml`.
@@ -245,21 +256,81 @@ export async function prepareCodexReviewerHome(options: {
   areaHome: string
   realCodexHome: string
   checkoutPath: string
-}): Promise<string> {
+}): Promise<{ codexHome: string; authSync: CodexAuthSync | null }> {
   const codexHome = join(resolve(options.areaHome), 'codex-home')
   await mkdir(codexHome, { recursive: true, mode: 0o700 })
   const authSource = join(resolve(options.realCodexHome), 'auth.json')
   const authInfo = await lstat(authSource).catch(() => null)
+  let authSync: CodexAuthSync | null = null
   if (authInfo?.isFile()) {
+    const authBytes = await readFile(authSource)
     const authDest = join(codexHome, 'auth.json')
-    await writeFile(authDest, await readFile(authSource), { mode: 0o600 })
+    await writeFile(authDest, authBytes, { mode: 0o600 })
     await chmod(authDest, 0o600).catch(() => {})
+    authSync = {
+      seatAuthPath: authDest,
+      realAuthPath: authSource,
+      initialSha256: sha256Buffer(authBytes),
+    }
   }
   const escapedCheckout = resolve(options.checkoutPath).replaceAll('\\', '\\\\').replaceAll('"', '\\"')
   const configPath = join(codexHome, 'config.toml')
   await writeFile(configPath, `[projects."${escapedCheckout}"]\ntrust_level = "trusted"\n`, { encoding: 'utf8', mode: 0o600 })
   await chmod(configPath, 0o600).catch(() => {})
-  return codexHome
+  return { codexHome, authSync }
+}
+
+/**
+ * Syncs a single-use OAuth refresh rotation from the seat's isolated `CODEX_HOME/auth.json` back to the user's real
+ * `~/.codex/auth.json` (only if the seat copy is a valid regular JSON object file that changed AND the user's real file
+ * is still byte-identical to what was copied), then unconditionally removes the seat's credential/home/helper folders
+ * even when `removeReviewerArea` preserves `area.checkout`.
+ */
+export async function cleanupReviewerSeatCredentials(
+  area: Pick<ReviewerArea, 'home' | 'helper' | 'github'> | null | undefined,
+  authSync: CodexAuthSync | null = null,
+): Promise<void> {
+  try {
+    if (authSync) {
+      const seatInfo = await lstat(authSync.seatAuthPath).catch(() => null)
+      if (seatInfo?.isFile() && seatInfo.size > 0 && seatInfo.size <= 65_536) {
+        const seatBytes = await readFile(authSync.seatAuthPath).catch(() => null)
+        if (seatBytes && sha256Buffer(seatBytes) !== authSync.initialSha256) {
+          let validJsonObject = false
+          try {
+            const parsed: unknown = JSON.parse(seatBytes.toString('utf8'))
+            validJsonObject = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          } catch {
+            validJsonObject = false
+          }
+          if (validJsonObject) {
+            const realInfo = await lstat(authSync.realAuthPath).catch(() => null)
+            if (realInfo?.isFile()) {
+              const realBytes = await readFile(authSync.realAuthPath).catch(() => null)
+              if (realBytes && sha256Buffer(realBytes) === authSync.initialSha256) {
+                await writeFileAtomic(authSync.realAuthPath, seatBytes.toString('utf8')).catch(() => {})
+                await chmod(authSync.realAuthPath, 0o600).catch(() => {})
+              }
+            }
+          }
+        }
+      }
+    }
+  } finally {
+    const removals: Promise<unknown>[] = []
+    if (authSync) {
+      removals.push(rm(authSync.seatAuthPath, { force: true, maxRetries: 3 }).catch(() => {}))
+    }
+    if (area) {
+      removals.push(
+        rm(join(resolve(area.home), 'codex-home'), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        rm(resolve(area.home), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        rm(resolve(area.helper), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        rm(resolve(area.github), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+      )
+    }
+    await Promise.all(removals)
+  }
 }
 
 export function buildCodexReviewerLaunch(options: {
@@ -409,6 +480,16 @@ export async function readReviewerDiffPage(
   }
 }
 
+export interface AssessedFeedbackState {
+  head: string
+  base: string
+  materialSignature: string
+}
+
+export interface PendingFeedbackReadState extends AssessedFeedbackState {
+  nextCursor: string
+}
+
 export interface TempReviewerSeat {
   groupId: string
   cli: ReviewerCli
@@ -419,6 +500,7 @@ export interface TempReviewerSeat {
   tabId: string | null
   area: ReviewerArea | null
   policy: ReviewerPolicy | null
+  codexAuthSync: CodexAuthSync | null
   origin: string
   lifecycle: 'starting' | 'running' | 'failed' | 'stopped'
   checkedOut: string
@@ -427,9 +509,122 @@ export interface TempReviewerSeat {
   lastSeenBase: string
   lastSeenAuthorReplies: string
   lastSeenMaterialFeedback: string
+  pendingFeedbackRead: PendingFeedbackReadState | null
+  assessedFeedback: AssessedFeedbackState | null
   needsAttention: boolean
   error: string | null
   keptCheckoutPath: string | null
+}
+
+/**
+ * Tracks the exact PR feedback snapshot delivered to a reviewer seat across `pr_read` / `pr-read` pagination.
+ * Refreshes the group's GitHub snapshot BEFORE reading page 1 so any feedback arriving during or after the read
+ * produces a newer `materialFeedbackSignature` at submission time rather than being stamped onto an older read.
+ * `seat.assessedFeedback` is promoted only when the final page (`nextPage === null`) is delivered.
+ */
+export async function readSeatFeedbackPage(
+  group: Pick<TempReviewerGroup, 'stage' | 'head' | 'base' | 'materialFeedbackSignature'>,
+  seat: Pick<TempReviewerSeat, 'pendingFeedbackRead' | 'assessedFeedback' | 'lastSeenMaterialFeedback'>,
+  cursor: string | undefined,
+  deps: {
+    refreshSnapshot: () => Promise<void>
+    readPage: (cursor?: string) => Promise<string>
+  },
+): Promise<string> {
+  const normalizedCursor = cursor?.trim() || '1'
+  let startCandidate: AssessedFeedbackState | null = null
+  if (normalizedCursor === '1') {
+    await deps.refreshSnapshot()
+    if (group.stage === 'ended') throw new Error('This temporary review group is no longer active.')
+    startCandidate = {
+      head: group.head,
+      base: group.base,
+      materialSignature: group.materialFeedbackSignature,
+    }
+    seat.pendingFeedbackRead = null
+  }
+  const rawText = await deps.readPage(cursor)
+  let parsed: { head?: unknown; base?: unknown; nextPage?: unknown } | null = null
+  try {
+    parsed = JSON.parse(rawText) as { head?: unknown; base?: unknown; nextPage?: unknown }
+  } catch {
+    seat.pendingFeedbackRead = null
+    return rawText
+  }
+  const nextPage = parsed?.nextPage === null || parsed?.nextPage === undefined ? null : String(parsed.nextPage)
+  if (normalizedCursor === '1' && startCandidate) {
+    if (parsed?.head === startCandidate.head && parsed?.base === startCandidate.base) {
+      if (nextPage === null) {
+        seat.assessedFeedback = startCandidate
+        seat.lastSeenMaterialFeedback = startCandidate.materialSignature
+      } else {
+        seat.pendingFeedbackRead = { ...startCandidate, nextCursor: nextPage }
+      }
+    } else {
+      seat.pendingFeedbackRead = null
+    }
+  } else if (seat.pendingFeedbackRead && seat.pendingFeedbackRead.nextCursor === normalizedCursor) {
+    if (parsed?.head !== seat.pendingFeedbackRead.head || parsed?.base !== seat.pendingFeedbackRead.base) {
+      seat.pendingFeedbackRead = null
+    } else if (nextPage === null) {
+      seat.assessedFeedback = {
+        head: seat.pendingFeedbackRead.head,
+        base: seat.pendingFeedbackRead.base,
+        materialSignature: seat.pendingFeedbackRead.materialSignature,
+      }
+      seat.lastSeenMaterialFeedback = seat.assessedFeedback.materialSignature
+      seat.pendingFeedbackRead = null
+    } else {
+      seat.pendingFeedbackRead = { ...seat.pendingFeedbackRead, nextCursor: nextPage }
+    }
+  } else {
+    seat.pendingFeedbackRead = null
+  }
+  return rawText
+}
+
+/**
+ * Validates that a reviewer seat actually read all pages of the current PR feedback snapshot before accepting an
+ * approval or held approval. Never advances `lastSeenMaterialFeedback` on unread feedback so `pr_wait` still wakes.
+ */
+export function validateSeatReviewSubmission(
+  group: Pick<TempReviewerGroup, 'head' | 'base' | 'materialFeedbackSignature'>,
+  seat: Pick<TempReviewerSeat, 'assessedFeedback' | 'pendingFeedbackRead'>,
+  wantsApprove: boolean,
+): { ok: true; feedbackSignature: string; readMatchesCurrent: boolean } | { ok: false; error: string } {
+  const assessed = seat.assessedFeedback
+  const readMatchesCurrent = Boolean(
+    assessed
+    && assessed.head === group.head
+    && assessed.base === group.base
+    && assessed.materialSignature === group.materialFeedbackSignature,
+  )
+  if (wantsApprove) {
+    if (seat.pendingFeedbackRead) {
+      return {
+        ok: false,
+        error: `Finish reading all PR feedback pages (nextPage: ${seat.pendingFeedbackRead.nextCursor}) before submitting an approval.`,
+      }
+    }
+    if (!assessed || assessed.head !== group.head || assessed.base !== group.base) {
+      return {
+        ok: false,
+        error: 'Read current PR feedback from page 1 with pr_read before submitting an approval for this revision.',
+      }
+    }
+    if (!readMatchesCurrent) {
+      return {
+        ok: false,
+        error: 'New feedback arrived on the pull request since your last read; call pr_read from page 1 to assess the latest comments before approving.',
+      }
+    }
+    return { ok: true, feedbackSignature: assessed.materialSignature, readMatchesCurrent: true }
+  }
+  return {
+    ok: true,
+    feedbackSignature: readMatchesCurrent ? assessed!.materialSignature : group.materialFeedbackSignature,
+    readMatchesCurrent,
+  }
 }
 
 export interface TempReviewerGroup {
@@ -651,6 +846,7 @@ export class TempReviewerRegistry {
         tabId: null,
         area: null,
         policy: null,
+        codexAuthSync: null,
         origin: init.origin,
         lifecycle: 'starting',
         checkedOut: init.head,
@@ -659,6 +855,8 @@ export class TempReviewerRegistry {
         lastSeenBase: init.base,
         lastSeenAuthorReplies: init.authorReplySignature,
         lastSeenMaterialFeedback: initialMaterialSig,
+        pendingFeedbackRead: null,
+        assessedFeedback: null,
         needsAttention: false,
         error: null,
         keptCheckoutPath: null,
@@ -699,6 +897,7 @@ export class TempReviewerRegistry {
     seat.tabId = null
     seat.area = null
     seat.policy = null
+    seat.codexAuthSync = null
     seat.launchId = ''
     seat.checkedOut = group.head
     seat.checkedOutBase = group.base
@@ -706,6 +905,8 @@ export class TempReviewerRegistry {
     seat.lastSeenBase = group.base
     seat.lastSeenAuthorReplies = group.authorReplySignature
     seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
+    seat.pendingFeedbackRead = null
+    seat.assessedFeedback = null
     seat.needsAttention = false
     seat.error = null
     this.wakeAll()
@@ -714,6 +915,7 @@ export class TempReviewerRegistry {
 
   revokeSeat(seat: TempReviewerSeat, lifecycle: 'failed' | 'stopped', error: string | null = null): void {
     seat.bearerToken = ''
+    seat.pendingFeedbackRead = null
     seat.lifecycle = lifecycle
     if (error !== null) seat.error = error
     this.wakeAll()

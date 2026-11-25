@@ -6,17 +6,21 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import { receiptTag, type PostReceipt } from './pr-loop-posts.js'
+import { makeReviewerArea, planReviewerArea, removeReviewerArea } from './pr-review-launch.js'
 import { PR_REVIEWER_TOKEN_ENV } from './pr-reviewer-mcp.js'
 import {
   buildClaudeMcpConfigJson,
   buildClaudeReviewerLaunch,
   buildCodexReviewerLaunch,
+  cleanupReviewerSeatCredentials,
   materialFeedbackSignature,
   prepareCodexReviewerHome,
   prFeedbackSignature,
   prReviewAndFixRequest,
   readReviewerDiffPage,
+  readSeatFeedbackPage,
   TempReviewerRegistry,
+  validateSeatReviewSubmission,
   type ReceiptReader,
 } from './pr-temp-reviewers.js'
 import type { GithubSnapshot } from './workflow-github.js'
@@ -78,11 +82,12 @@ test('CLI launch builders verify flags, isolate CODEX_HOME outside user home, an
     )
     writeFileSync(join(fakeRealCodex, 'hooks.json'), '{"hooks":[]}')
 
-    const isolatedCodexHome = await prepareCodexReviewerHome({
+    const { codexHome: isolatedCodexHome, authSync } = await prepareCodexReviewerHome({
       areaHome: seatHome,
       realCodexHome: fakeRealCodex,
       checkoutPath,
     })
+    assert.ok(authSync, 'authSync returned when real auth.json exists')
     assert.equal(isolatedCodexHome.startsWith(resolve(fakeUserHome)), false, 'CODEX_HOME must live outside user home')
     assert.equal(existsSync(join(isolatedCodexHome, 'auth.json')), true, 'auth.json copied to isolated CODEX_HOME')
     assert.equal(existsSync(join(isolatedCodexHome, 'hooks.json')), false, 'user hooks never copied')
@@ -348,6 +353,148 @@ test('readReviewerDiffPage streams patches larger than 4 MiB past the buffer cap
     }
     assert.equal(sawTailMarker, true, 'must read TAIL_MARKER_END well past 4 MiB')
     assert.equal(finalComplete, true, 'final page reports complete: true')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('validateSeatReviewSubmission rejects approval and held-approval when a blocking comment arrives between pr_read and submission', async () => {
+  const registry = new TempReviewerRegistry()
+  let currentSnapshot = makeSnapshot()
+  const group = registry.createGroup({
+    hostTabId: 'tab-race',
+    hostSessionId: 'sess-race',
+    profileId: 'prof-1',
+    accountId: 42,
+    repository: 'owner/repo',
+    prNumber: 33,
+    prUrl: 'https://github.com/owner/repo/pull/33',
+    head: HEAD,
+    base: BASE,
+    feedbackSignature: prFeedbackSignature(currentSnapshot),
+    materialFeedbackSignature: materialFeedbackSignature(currentSnapshot),
+    authorReplySignature: 'empty',
+    clis: ['claude'],
+    origin: 'https://github.com/owner/repo.git',
+  })
+  group.stage = 'active'
+  const seat = group.requiredSeats.get('claude')!
+  seat.lifecycle = 'running'
+
+  // Cannot approve before reading PR feedback at all:
+  const beforeAnyRead = validateSeatReviewSubmission(group, seat, true)
+  assert.equal(beforeAnyRead.ok, false)
+
+  // Multi-page read: stopping after page 1 (nextPage: '2') does NOT allow approval:
+  await readSeatFeedbackPage(group, seat, '1', {
+    refreshSnapshot: async () => { registry.applySnapshot(group.id, currentSnapshot) },
+    readPage: async () => JSON.stringify({ head: HEAD, base: BASE, reviews: [], inline: [], conversation: [], nextPage: 2 }),
+  })
+  const halfRead = validateSeatReviewSubmission(group, seat, true)
+  assert.equal(halfRead.ok, false)
+
+  // Completing page 2 (nextPage: null) records the delivered feedback signature on the seat:
+  await readSeatFeedbackPage(group, seat, '2', {
+    refreshSnapshot: async () => { registry.applySnapshot(group.id, currentSnapshot) },
+    readPage: async () => JSON.stringify({ head: HEAD, base: BASE, reviews: [], inline: [], conversation: [], nextPage: null }),
+  })
+  const deliveredSignature = seat.assessedFeedback?.materialSignature
+  assert.equal(deliveredSignature, group.materialFeedbackSignature)
+
+  // RACE: A blocking comment arrives AFTER the seat read the PR and BEFORE it submits its first approval / held approval!
+  currentSnapshot = makeSnapshot({
+    feedback: [{
+      source: 'github/owner/repo/pull/33/inline/777',
+      version: 'race-comment-v1',
+      actorId: 99,
+      kind: 'review',
+      body: 'Blocking: security bug introduced here',
+      head: HEAD,
+      at: 50,
+    }],
+  })
+  // Submission refreshes the group snapshot from GitHub:
+  registry.applySnapshot(group.id, currentSnapshot)
+  assert.notEqual(group.materialFeedbackSignature, deliveredSignature)
+
+  // Both direct approval and held-approval (wantsApprove = true) are REJECTED because delivered != fresh:
+  const rejectedApproval = validateSeatReviewSubmission(group, seat, true)
+  assert.equal(rejectedApproval.ok, false)
+  if (!rejectedApproval.ok) {
+    assert.match(rejectedApproval.error, /New feedback arrived/)
+  }
+  // And `lastSeenMaterialFeedback` was NOT advanced, so `pr_wait` still detects and wakes on the unread comment:
+  assert.notEqual(seat.lastSeenMaterialFeedback, group.materialFeedbackSignature, 'pr_wait still sees unread feedback')
+
+  // Once the seat re-reads from page 1 and sees the new comment, approval covers the new signature:
+  await readSeatFeedbackPage(group, seat, '1', {
+    refreshSnapshot: async () => { registry.applySnapshot(group.id, currentSnapshot) },
+    readPage: async () => JSON.stringify({
+      head: HEAD,
+      base: BASE,
+      reviews: [],
+      inline: [{ id: 777, body: 'Blocking: security bug introduced here' }],
+      conversation: [],
+      nextPage: null,
+    }),
+  })
+  const acceptedAfterReread = validateSeatReviewSubmission(group, seat, true)
+  assert.equal(acceptedAfterReread.ok, true)
+  if (acceptedAfterReread.ok) {
+    assert.equal(acceptedAfterReread.feedbackSignature, group.materialFeedbackSignature)
+  }
+})
+
+test('cleanupReviewerSeatCredentials syncs rotated Codex auth atomically when unchanged and deletes seat credentials even when worktree is kept', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-cred-cleanup-'))
+  try {
+    const fakeRealCodex = join(dir, 'real-codex')
+    mkdirSync(fakeRealCodex, { recursive: true })
+    const initialAuth = JSON.stringify({ tokens: { refresh_token: 'rt_initial', access_token: 'at_initial' } })
+    writeFileSync(join(fakeRealCodex, 'auth.json'), initialAuth)
+
+    // Case 1: Seat rotates refresh token AND `removeReviewerArea` returns `'kept'` (e.g. unavailable Git runner / local edits)
+    const area1 = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    area1.project = join(dir, 'some-project')
+    mkdirSync(area1.checkout, { recursive: true })
+    writeFileSync(join(area1.checkout, 'local-edit.txt'), 'keep me')
+
+    const { codexHome: codexHome1, authSync: authSync1 } = await prepareCodexReviewerHome({
+      areaHome: area1.home,
+      realCodexHome: fakeRealCodex,
+      checkoutPath: area1.checkout,
+    })
+    writeFileSync(join(area1.helper, 'claude-reviewer-mcp.json'), '{"secret":"tok"}')
+    assert.equal(existsSync(join(codexHome1, 'auth.json')), true)
+
+    // Simulate Codex single-use refresh-token rotation inside the seat's isolated CODEX_HOME:
+    const rotatedAuth = JSON.stringify({ tokens: { refresh_token: 'rt_rotated', access_token: 'at_rotated' } })
+    writeFileSync(join(codexHome1, 'auth.json'), rotatedAuth)
+
+    await cleanupReviewerSeatCredentials(area1, authSync1)
+    const outcome1 = await removeReviewerArea(area1, null)
+    assert.equal(outcome1, 'kept', 'worktree area is kept when runner is unavailable or checkout has local changes')
+    assert.equal(existsSync(join(area1.checkout, 'local-edit.txt')), true, 'user checkout preserved')
+    assert.equal(existsSync(join(codexHome1, 'auth.json')), false, 'copied auth.json removed even when area is kept')
+    assert.equal(existsSync(area1.home), false, 'seat home removed even when area is kept')
+    assert.equal(existsSync(area1.helper), false, 'seat helper removed even when area is kept')
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedAuth, 'rotated token synced back to real CODEX_HOME')
+
+    // Case 2: Real ~/.codex/auth.json ALSO changed independently while seat ran -> do NOT overwrite real auth, still delete copy
+    const area2 = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    mkdirSync(area2.checkout, { recursive: true })
+    const { codexHome: codexHome2, authSync: authSync2 } = await prepareCodexReviewerHome({
+      areaHome: area2.home,
+      realCodexHome: fakeRealCodex,
+      checkoutPath: area2.checkout,
+    })
+    const concurrentRealAuth = JSON.stringify({ tokens: { refresh_token: 'rt_user_relogin', access_token: 'at_user_relogin' } })
+    writeFileSync(join(fakeRealCodex, 'auth.json'), concurrentRealAuth)
+    writeFileSync(join(codexHome2, 'auth.json'), JSON.stringify({ tokens: { refresh_token: 'rt_seat2' } }))
+
+    await cleanupReviewerSeatCredentials(area2, authSync2)
+    assert.equal(existsSync(join(codexHome2, 'auth.json')), false, 'seat copy deleted')
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), concurrentRealAuth, 'diverged real auth.json never overwritten')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

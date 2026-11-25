@@ -18,7 +18,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const { resolveAgentCli, agentCliHelp } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/agent-cli.js')).href)
 const { withCopilotPathAdditions } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/resolve-copilot.js')).href)
 const { reviewerEnvironment } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/pr-reviewer-sandbox.js')).href)
-const { prepareCodexReviewerHome, buildCodexReviewerLaunch } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/pr-temp-reviewers.js')).href)
+const { buildCodexReviewerLaunch, cleanupReviewerSeatCredentials, prepareCodexReviewerHome } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/pr-temp-reviewers.js')).href)
 
 const outIndex = process.argv.indexOf('--out')
 const baseDir = outIndex >= 0 && process.argv[outIndex + 1]
@@ -247,7 +247,7 @@ try {
     const help = await agentCliHelp(codexRes)
     const hasSandbox = Boolean(help && help.includes('--sandbox') && help.includes('--ask-for-approval'))
     const realCodexHome = process.env.CODEX_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.codex')
-    const codexHome = await prepareCodexReviewerHome({
+    const { codexHome, authSync } = await prepareCodexReviewerHome({
       areaHome: dummyHome,
       realCodexHome,
       checkoutPath: checkout,
@@ -319,6 +319,7 @@ try {
       reviewBodies: codexCalls.filter((c) => c.tool === 'pr_review').map((c) => c.args?.body),
       stderrTail: (run.stderr ?? '').trim().slice(-500),
     }
+    await cleanupReviewerSeatCredentials({ home: dummyHome, helper: join(baseDir, 'helper'), github: emptyGhDir }, authSync)
   } else {
     report.codex = { skipped: codexRes.error }
   }

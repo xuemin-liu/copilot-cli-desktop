@@ -152,14 +152,18 @@ import {
   buildCodexReviewerLaunch,
   buildReviewerBrief,
   hostAuthorGrantTarget,
+  cleanupReviewerSeatCredentials,
+  groupApprovalReceiptIds,
   materialFeedbackSignature,
   prepareCodexReviewerHome,
   prFeedbackSignature,
   prReviewAndFixRequest,
   readReviewerDiffPage,
+  readSeatFeedbackPage,
   reviewerPromptLine,
   seatGrantTarget,
   TempReviewerRegistry,
+  validateSeatReviewSubmission,
   type TempReviewerGroup,
   type TempReviewerSeat,
 } from './pr-temp-reviewers.js'
@@ -983,6 +987,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(grant?.enabled)continue
       const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&sameRealPath(session.sessionCwd,record.checkout))
       if(open)continue
+      await cleanupReviewerSeatCredentials({ home: join(record.root, 'home'), helper: join(record.root, 'helper'), github: join(record.root, 'gh') }, null)
       const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(outcome==='removed')await store.release(record.launchId)
@@ -2173,8 +2178,11 @@ function wireSessionEvents(id: string, session: PtySession): void {
       if (status === 'approval-needed') { tempSeat.seat.needsAttention = true; tempReviewers.wakeAll() }
       else if (status === 'running') { tempSeat.seat.needsAttention = false }
       else if (!shuttingDown() && (status === 'crashed' || status === 'completed') && (tempSeat.seat.lifecycle === 'starting' || tempSeat.seat.lifecycle === 'running')) {
+        const sync = tempSeat.seat.codexAuthSync
+        tempSeat.seat.codexAuthSync = null
         tempReviewers.revokeSeat(tempSeat.seat, status === 'crashed' ? 'failed' : 'stopped',
           status === 'crashed' ? 'Reviewer session exited unexpectedly.' : 'Reviewer session ended; retry if another review round is needed.')
+        void cleanupReviewerSeatCredentials(tempSeat.seat.area, sync)
       }
     }
     if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) {
@@ -3600,6 +3608,9 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
     await closeSessionTab(tabId).catch(() => {})
   }
   const area = seat.area
+  const authSync = seat.codexAuthSync
+  seat.codexAuthSync = null
+  await cleanupReviewerSeatCredentials(area, authSync)
   if (!area) return
   const store = reviewReservations()
   const runner = await meetingGitRunner().catch(() => null)
@@ -3662,7 +3673,10 @@ async function submitTempSeatReview(
   }
   const posts = await ensurePrLoopPosts().catch(() => null)
   if (!posts) return { ok: false, text: prPostsError ?? 'PR loops are unavailable.' }
-  await refreshTempGroupFromGithub(group, true).catch(() => null)
+  const freshBeforePost = await refreshTempGroupFromGithub(group, true).catch(() => null)
+  if (!freshBeforePost) {
+    return { ok: false, text: 'Could not verify current pull request feedback on GitHub; retry submitting the review.' }
+  }
   if (!isGroupLive()) {
     return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
   }
@@ -3678,6 +3692,10 @@ async function submitTempSeatReview(
   if (fields.approve && !ran?.length) {
     return { ok: false, text: 'An approval must include "checks": {"ran": [...], "missing": [...]}.' }
   }
+  const validatedRead = validateSeatReviewSubmission(group, seat, fields.approve)
+  if (!validatedRead.ok) {
+    return { ok: false, text: validatedRead.error }
+  }
   let approve = fields.approve
   let body = fields.body
   const normalizedChecks = ran && missing ? { ran, missing } : undefined
@@ -3692,7 +3710,7 @@ async function submitTempSeatReview(
     return { ok: false, text: 'Reviewer checkout has local changes or is no longer at the prepared head.' }
   }
   const target = seatGrantTarget(group, seat, callerSessionId)
-  const assessedFeedbackSignature = group.materialFeedbackSignature
+  const assessedFeedbackSignature = validatedRead.feedbackSignature
   try {
     const held = fields.approve && !approve
     const receipt = await posts.review(
@@ -3710,7 +3728,16 @@ async function submitTempSeatReview(
       () => {},
       isGroupLive,
     )
-    seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
+    if (!fields.approve && validatedRead.readMatchesCurrent) {
+      const postSnapshot = await refreshTempGroupFromGithub(group, true).catch(() => null)
+      if (postSnapshot) {
+        const excludingOwn = new Set([...groupApprovalReceiptIds(group, tempReviewerReceiptReader()), receipt.id])
+        if (materialFeedbackSignature(postSnapshot, excludingOwn, group.marker) === assessedFeedbackSignature) {
+          seat.assessedFeedback = { head: group.head, base: group.base, materialSignature: group.materialFeedbackSignature }
+          seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
+        }
+      }
+    }
     tempReviewers.wakeAll()
     broadcastState()
     if (held) {
@@ -3824,9 +3851,16 @@ async function waitTempReviewerSeat(
 
 const prReviewerMcpDeps: PrReviewerMcpDeps<{ group: TempReviewerGroup; seat: TempReviewerSeat }> = {
   authorize: (token) => tempReviewers.authorizeBearer(token),
-  prRead: async ({ group }, page) => {
+  prRead: async ({ group, seat }, page) => {
     try {
-      const text = await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), group.repository, group.prNumber, page)
+      const api = await githubCliApi(app.getPath('userData'))
+      const text = await readSeatFeedbackPage(group, seat, page, {
+        refreshSnapshot: async () => {
+          const fresh = await refreshTempGroupFromGithub(group, true)
+          if (!fresh && group.stage !== 'ended') throw new Error('Failed to refresh pull request snapshot')
+        },
+        readPage: (cursor) => readPrFeedbackPage(api, group.repository, group.prNumber, cursor),
+      })
       return { ok: true, text }
     } catch {
       return { ok: false, text: 'The pull request page could not be read. Restart pr_read from page one.' }
@@ -4016,11 +4050,12 @@ async function launchTempReviewerSeat(
       }).args
     } else {
       const realCodexHome = process.env.CODEX_HOME || join(app.getPath('home'), '.codex')
-      const codexHome = await prepareCodexReviewerHome({
+      const { codexHome, authSync } = await prepareCodexReviewerHome({
         areaHome: area.home,
         realCodexHome,
         checkoutPath: area.checkout,
       })
+      seat.codexAuthSync = authSync
       const codexLaunch = buildCodexReviewerLaunch({
         help,
         mcpUrl,
@@ -4082,6 +4117,12 @@ async function launchTempReviewerSeat(
     seat.lifecycle = 'running'
     broadcastState()
   } catch (error) {
+    if (tabId) {
+      await managedTabs.get(tabId)?.session.stop().catch(() => {})
+    }
+    const sync = seat.codexAuthSync
+    seat.codexAuthSync = null
+    await cleanupReviewerSeatCredentials(area, sync)
     if (!tabId) {
       const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
       if (outcome === 'removed') await store.release(launchId).catch(() => {})
@@ -4582,7 +4623,18 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           const group = tempSeat ? tempSeat.group : tempHost!
           if (group.stage === 'ended') return { ok: false, message: 'This temporary review group is no longer active.' }
           try {
-            return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), group.repository, group.prNumber, request.page) }
+            const api = await githubCliApi(app.getPath('userData'))
+            if (tempSeat) {
+              const message = await readSeatFeedbackPage(tempSeat.group, tempSeat.seat, request.page, {
+                refreshSnapshot: async () => {
+                  const fresh = await refreshTempGroupFromGithub(tempSeat.group, true)
+                  if (!fresh && tempSeat.group.stage !== 'ended') throw new Error('Failed to refresh pull request snapshot')
+                },
+                readPage: (cursor) => readPrFeedbackPage(api, group.repository, group.prNumber, cursor),
+              })
+              return { ok: true, message }
+            }
+            return { ok: true, message: await readPrFeedbackPage(api, group.repository, group.prNumber, request.page) }
           } catch {
             return { ok: false, message: 'The page could not be read. If the PR changed, restart pr-read from page one.' }
           }
@@ -5048,9 +5100,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
         const seat = tempReviewers.group(closing.tempReviewer.groupId)?.requiredSeats.get(closing.tempReviewer.cli)
         if (seat && seat.tabId === tabId) {
           seat.tabId = null
+          const sync = seat.codexAuthSync
+          seat.codexAuthSync = null
           if (seat.lifecycle === 'starting' || seat.lifecycle === 'running') {
             tempReviewers.revokeSeat(seat, 'stopped', 'Reviewer tab was closed.')
           }
+          await cleanupReviewerSeatCredentials(seat.area, sync)
         }
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
@@ -5179,6 +5234,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // remote tabs everywhere (menu/tray/button) rather than silently regress
     // one of those entry points to a runtime error.
     if (tab.remote) throw new Error('A remote session cannot be restarted')
+    if (tab.tempReviewer) throw new Error('Use Retry in the PR reviewers bar to restart a temporary reviewer')
     const managed = managedTabs.get(tabId)
     const workspaceProfileId = tab.workspaceProfileId
     const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === workspaceProfileId)
