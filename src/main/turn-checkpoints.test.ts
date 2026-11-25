@@ -133,3 +133,56 @@ test('a closed tab, a refused repository, a session with no target and the off s
   assert.deepEqual(Object.keys(await store.turns(repo)).sort(), ['held-session', 's'])
   assert.deepEqual(errors, [])
 })
+
+test('a prompt that arrives while an end snapshot is being taken discards it', async (t) => {
+  const fixture = await createGitFixture()
+  if (!fixture) { t.skip('git is not installed'); return }
+  t.after(() => fixture.cleanup())
+  // The end snapshot of a turn stops after Git has listed the files, as it would on a large repository.
+  let hold: (() => void) | null = null
+  let reached: (() => void) | null = null
+  let pauseNext = false
+  class Paused extends CheckpointStore {
+    override async eligiblePaths(worktreeRoot: string, signal?: AbortSignal) {
+      const found = await super.eligiblePaths(worktreeRoot, signal)
+      if (pauseNext) { pauseNext = false; await new Promise<void>(resolve => { hold = resolve; reached?.() }) }
+      return found
+    }
+  }
+  const store = new Paused({ root: join(fixture.root, 'checkpoints'), runner: fixture.runner })
+  const repo = fixture.repo('work')
+  const turns = new TurnCheckpoints({ store, enabled: () => true, resolve: async tabId => ({ sessionId: tabId === 'tab' ? 's' : 'other', worktreeRoot: repo, refused: null }) })
+  const paused = (): Promise<void> => new Promise<void>(resolve => { reached = resolve; pauseNext = true })
+
+  turns.promptStarted('tab', 'first')
+  await turns.settled()
+  let stopped = paused()
+  turns.idle('tab')
+  await stopped
+  turns.promptStarted('tab', 'second')
+  writeFileSync(join(repo, 'second.txt'), 'written by the second turn\n')
+  hold!()
+  turns.idle('tab')
+  await turns.settled()
+  let records = (await store.turns(repo)).s!
+  assert.equal(records[0]!.state, 'incomplete')
+  assert.equal(records[0]!.note, SUPERSEDED_NOTE)
+  assert.equal(records[0]!.after, null, 'no end snapshot that holds the file of the second turn')
+  assert.equal(records[1]!.state, 'complete')
+
+  // The same from another tab that works in the same folder.
+  turns.promptStarted('tab', 'third')
+  await turns.settled()
+  stopped = paused()
+  turns.idle('tab')
+  await stopped
+  turns.promptStarted('neighbour', 'from another tab')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  hold!()
+  turns.idle('neighbour')
+  await turns.settled()
+  records = (await store.turns(repo)).s!
+  assert.equal(records[2]!.state, 'incomplete')
+  assert.equal(records[2]!.note, SUPERSEDED_NOTE)
+  assert.equal((await store.turns(repo)).other![0]!.state, 'complete')
+})

@@ -33,13 +33,15 @@ interface OpenTurn {
 }
 
 /** An end snapshot that waits for its place in a worktree's queue. */
-interface PendingEnd { tabId: string; worktreeRoot: string | null; superseded: boolean; running: boolean }
+interface PendingEnd { tabId: string; worktreeRoot: string | null; superseded: boolean }
 
 export const SUPERSEDED_NOTE = 'Another prompt started before this turn’s end was captured'
 
 export class TurnCheckpoints {
   private readonly open = new Map<string, OpenTurn>()
   private readonly pendingEnds = new Set<PendingEnd>()
+  /** Where each tab last worked, so a new prompt can invalidate another tab's end snapshot of that folder at once. */
+  private readonly lastRoot = new Map<string, string>()
   private readonly work = new Set<Promise<unknown>>()
   private readonly now: () => number
 
@@ -52,19 +54,24 @@ export class TurnCheckpoints {
     return promise
   }
 
-  /** An end snapshot not yet taken would now include the new turn's edits, so it is not taken. */
+  /**
+   * An end snapshot that is not saved yet would now include the new turn's edits, so it is not saved. That holds while
+   * it waits in the queue and while Git is still reading files for it.
+   */
   private supersede(match: (pending: PendingEnd) => boolean): void {
-    for (const pending of this.pendingEnds) if (!pending.running && match(pending)) pending.superseded = true
+    for (const pending of this.pendingEnds) if (match(pending)) pending.superseded = true
   }
 
   private begin(tabId: string, label: string): void {
     if (!this.options.enabled()) return
-    this.supersede(pending => pending.tabId === tabId)
+    const known = this.lastRoot.get(tabId)
+    this.supersede(pending => pending.tabId === tabId || (known !== undefined && pending.worktreeRoot === known))
     const turn: OpenTurn = { label, started: Promise.resolve(null) }
     this.open.set(tabId, turn)
     turn.started = this.track((async () => {
       const target = await this.options.resolve(tabId)
       if (!target || !this.options.enabled()) { if (this.open.get(tabId) === turn) this.open.delete(tabId); return null }
+      this.lastRoot.set(tabId, target.worktreeRoot)
       // Another tab may work in the same folder.
       this.supersede(pending => pending.worktreeRoot === target.worktreeRoot)
       const n = await this.options.store.beginTurn(target.worktreeRoot, target.sessionId, turn.label)
@@ -112,7 +119,7 @@ export class TurnCheckpoints {
     if (!turn) return
     this.open.delete(tabId)
     // Registered at once, so a prompt that arrives before the start is worked out still counts as coming first.
-    const pending: PendingEnd | null = incomplete === null ? { tabId, worktreeRoot: null, superseded: false, running: false } : null
+    const pending: PendingEnd | null = incomplete === null ? { tabId, worktreeRoot: null, superseded: false } : null
     if (pending) this.pendingEnds.add(pending)
     void this.track(turn.started.then(async started => {
       if (!started || !pending) { if (pending) this.pendingEnds.delete(pending) }
@@ -131,7 +138,7 @@ export class TurnCheckpoints {
       try {
         const taken = await store.capture(target.worktreeRoot, target.sessionId, n, 'after', {
           refused: target.refused,
-          skip: () => { pending.running = true; return pending.superseded },
+          skip: () => pending.superseded,
         })
         if (taken === null) await markIncomplete(SUPERSEDED_NOTE)
       } finally { this.pendingEnds.delete(pending) }

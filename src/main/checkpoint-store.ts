@@ -81,6 +81,9 @@ interface StoreMeta {
   worktree: string
   lastTree: string | null
   lastCommit: string | null
+  /** Turns dropped since space was last reclaimed, and turns ended since then. */
+  unreclaimed?: number
+  turnsSinceReclaim?: number
   sessions: Record<string, { turns: CheckpointTurn[] }>
 }
 
@@ -115,6 +118,9 @@ const LIST_MAX_BYTES = 64 * 1024 * 1024
 const OID = /^[0-9a-f]{40,64}$/
 const MAX_LABEL_CHARS = 120
 const SAMPLE = 20
+/** Space is reclaimed while the app runs once this many turns were dropped, or this many ended, since the last time. */
+const RECLAIM_AFTER_DROPPED_TURNS = 10
+const RECLAIM_AFTER_TURNS = 10
 
 export class CheckpointRefused extends Error {
   constructor(message: string) { super(message); this.name = 'CheckpointRefused' }
@@ -342,12 +348,15 @@ export class CheckpointStore {
   /**
    * Snapshot the worktree for one side of a turn and record it on the turn. Never throws: a snapshot that cannot be
    * taken is recorded with its reason. `refused` is the reason from the caller's own checks (the trust gate), if any.
-   * `skip` is asked once the capture reaches the front of the queue; a true answer records nothing.
+   * `skip` says the snapshot is no longer wanted. It is asked when the capture reaches the front of the queue and
+   * again after the last file was read, just before the snapshot is saved; a true answer records nothing. After a
+   * turn's end snapshot the store's turn caps are enforced, so they hold while the app stays open.
    */
   capture(worktreeRoot: string, sessionId: string, turn: number, phase: CheckpointPhase, options: { refused?: string | null; skip?: () => boolean } = {}): Promise<CheckpointCapture | null> {
     const store = this.storeDirectory(worktreeRoot)
     return this.queued(store, async () => {
       if (options.skip?.()) return null
+      let discarded = false
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), this.limits.captureTimeoutMs)
       let result: CheckpointCapture
@@ -357,6 +366,8 @@ export class CheckpointStore {
         await this.ensureShadow(store, controller.signal)
         const eligible = await this.eligiblePaths(worktreeRoot, controller.signal)
         const tree = await this.stage(store, worktreeRoot, eligible.paths, controller.signal)
+        // Every file has been read. A prompt that arrived meanwhile may already be in this tree.
+        if (options.skip?.()) { discarded = true; throw new CheckpointRefused('Discarded') }
         let commit = meta.lastTree === tree ? meta.lastCommit : null
         if (!commit) {
           const made = await this.shadow(store, worktreeRoot, ['commit-tree', tree, '-m', 'checkpoint'], { signal: controller.signal })
@@ -372,6 +383,7 @@ export class CheckpointStore {
         const reason = controller.signal.aborted ? 'The snapshot took too long' : error instanceof CheckpointRefused ? error.message : 'The snapshot failed'
         result = { commit: null, reason, notCaptured: 0, notCapturedSample: [], at: this.now() }
       } finally { clearTimeout(timer) }
+      if (discarded) return null
       const record = meta.sessions[sessionId]?.turns.find(candidate => candidate.n === turn)
       if (record) {
         record[phase] = result
@@ -383,6 +395,9 @@ export class CheckpointStore {
       }
       await mkdir(store, { recursive: true })
       await this.writeMeta(store, meta)
+      if (phase === 'after') {
+        await this.pruneStore(storeNameFor(worktreeRoot), store, { sessionExists: () => true }, { stores: 0, deletedStores: 0, removedTurns: 0, bytesBefore: 0, bytesAfter: 0 }, false)
+      }
       return result
     })
   }
@@ -417,12 +432,10 @@ export class CheckpointStore {
     await rm(hostPath.join(this.root, name), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 
-  /** Delete every checkpoint of every worktree: what turning the feature off does. */
+  /** Delete every checkpoint of every worktree, each after the work queued for it: what turning the feature off does. */
   async clear(): Promise<void> {
-    for (const name of await this.storeNames()) {
-      const store = hostPath.join(this.root, name)
-      await this.queued(store, () => this.removeStore(name))
-    }
+    await Promise.all((await this.storeNames()).map(name => this.queued(hostPath.join(this.root, name), async () => undefined)))
+    await clearCheckpointFolder(this.root)
   }
 
   /** Turns left open by a run of the app that has ended have no end snapshot, and never will. */
@@ -448,57 +461,97 @@ export class CheckpointStore {
     const report: PruneReport = { stores: 0, deletedStores: 0, removedTurns: 0, bytesBefore: 0, bytesAfter: 0 }
     for (const name of await this.storeNames()) {
       const store = hostPath.join(this.root, name)
-      await this.queued(store, async () => {
-        report.stores++
-        report.bytesBefore += await folderBytes(store)
-        const meta = await this.readMeta(store, null)
-        const worktreeThere = meta.worktree !== '' && await stat(meta.worktree).then(entry => entry.isDirectory(), () => false)
-        if (!worktreeThere) { await this.removeStore(name); report.deletedStores++; return }
-        const removed: Array<{ sessionId: string; n: number }> = []
-        const drop = (sessionId: string, turns: CheckpointTurn[]): void => { for (const turn of turns) removed.push({ sessionId, n: turn.n }) }
-        const cutoff = this.now() - this.limits.maxAgeMs
-        for (const [sessionId, session] of Object.entries(meta.sessions)) {
-          if (!(await options.sessionExists(sessionId))) { drop(sessionId, session.turns); delete meta.sessions[sessionId]; continue }
-          const keep = session.turns.filter(turn => turn.state === 'open' || turn.startedAt >= cutoff).slice(-this.limits.maxTurnsPerSession)
-          drop(sessionId, session.turns.filter(turn => !keep.includes(turn)))
-          session.turns = keep
-          if (keep.length === 0) delete meta.sessions[sessionId]
-        }
-        const dropOldest = (count: number): void => {
-          const all = Object.entries(meta.sessions).flatMap(([sessionId, session]) => session.turns.filter(turn => turn.state !== 'open').map(turn => ({ sessionId, turn })))
-            .sort((left, right) => left.turn.startedAt - right.turn.startedAt).slice(0, Math.max(0, count))
-          for (const { sessionId, turn } of all) {
-            const session = meta.sessions[sessionId]!
-            session.turns = session.turns.filter(candidate => candidate !== turn)
-            if (session.turns.length === 0) delete meta.sessions[sessionId]
-            removed.push({ sessionId, n: turn.n })
-          }
-        }
-        const count = (): number => Object.values(meta.sessions).reduce((sum, session) => sum + session.turns.length, 0)
-        dropOldest(count() - this.limits.maxTurnsPerStore)
-        const reclaim = async (): Promise<number> => {
-          const refs = removed.flatMap(({ sessionId, n }) => (['before', 'after'] as const).map(phase => `delete ${checkpointRef(sessionId, n, phase)}\n`))
-          if (refs.length > 0) await this.shadow(store, null, ['update-ref', '--stdin'], { stdin: refs.join('') })
-          // The newest tree stays reusable only while a kept turn still points at its commit.
-          const kept = new Set(Object.values(meta.sessions).flatMap(session => session.turns.flatMap(turn => [turn.before?.commit, turn.after?.commit])))
-          if (!meta.lastCommit || !kept.has(meta.lastCommit)) { meta.lastTree = null; meta.lastCommit = null }
-          await this.writeMeta(store, meta)
-          const hasShadow = await stat(hostPath.join(this.gitDirectory(store), 'HEAD')).then(() => true, () => false)
-          if (hasShadow) await this.shadow(store, null, ['gc', '--prune=now', '--quiet'], { timeoutMs: 300_000 })
-          return folderBytes(store)
-        }
-        let bytes = await reclaim()
-        for (let round = 0; bytes > this.limits.maxStoreBytes && count() > 0 && round < 8; round++) {
-          dropOldest(Math.max(1, Math.ceil(count() / 2)))
-          bytes = await reclaim()
-        }
-        report.removedTurns += removed.length
-        if (count() === 0 || bytes > this.limits.maxStoreBytes) { await this.removeStore(name); report.deletedStores++; return }
-        report.bytesAfter += bytes
-      })
+      await this.queued(store, () => this.pruneStore(name, store, options, report, true))
     }
     return report
   }
+
+  /**
+   * One store, inside its queue. The `full` pass (at startup and on a timer) also deletes a store whose folder is
+   * gone, and always reclaims space. The other pass runs after every turn: it enforces the turn caps at once, and
+   * reclaims space and checks the size cap once enough turns were dropped or have ended since the last time.
+   */
+  private async pruneStore(name: string, store: string, options: PruneOptions, report: PruneReport, full: boolean): Promise<void> {
+    report.stores++
+    if (full) report.bytesBefore += await folderBytes(store)
+    const meta = await this.readMeta(store, null)
+    if (full) {
+      const worktreeThere = meta.worktree !== '' && await stat(meta.worktree).then(entry => entry.isDirectory(), () => false)
+      if (!worktreeThere) { await this.removeStore(name); report.deletedStores++; return }
+    }
+    const removed: Array<{ sessionId: string; n: number }> = []
+    let forgotten = 0
+    const drop = (sessionId: string, turns: CheckpointTurn[]): void => { for (const turn of turns) removed.push({ sessionId, n: turn.n }) }
+    const cutoff = this.now() - this.limits.maxAgeMs
+    for (const [sessionId, session] of Object.entries(meta.sessions)) {
+      if (!(await options.sessionExists(sessionId))) { drop(sessionId, session.turns); delete meta.sessions[sessionId]; continue }
+      const keep = session.turns.filter(turn => turn.state === 'open' || turn.startedAt >= cutoff).slice(-this.limits.maxTurnsPerSession)
+      drop(sessionId, session.turns.filter(turn => !keep.includes(turn)))
+      session.turns = keep
+      if (keep.length === 0) delete meta.sessions[sessionId]
+    }
+    const dropOldest = (count: number): void => {
+      const all = Object.entries(meta.sessions).flatMap(([sessionId, session]) => session.turns.filter(turn => turn.state !== 'open').map(turn => ({ sessionId, turn })))
+        .sort((left, right) => left.turn.startedAt - right.turn.startedAt).slice(0, Math.max(0, count))
+      for (const { sessionId, turn } of all) {
+        const session = meta.sessions[sessionId]!
+        session.turns = session.turns.filter(candidate => candidate !== turn)
+        if (session.turns.length === 0) delete meta.sessions[sessionId]
+        removed.push({ sessionId, n: turn.n })
+      }
+    }
+    const count = (): number => Object.values(meta.sessions).reduce((sum, session) => sum + session.turns.length, 0)
+    dropOldest(count() - this.limits.maxTurnsPerStore)
+    const hasShadow = await stat(hostPath.join(this.gitDirectory(store), 'HEAD')).then(() => true, () => false)
+    /** Dropped turns stop being reachable. Their bytes stay until the next reclaim. */
+    const forget = async (): Promise<void> => {
+      const fresh = removed.slice(forgotten)
+      forgotten = removed.length
+      meta.unreclaimed = (meta.unreclaimed ?? 0) + fresh.length
+      const refs = fresh.flatMap(({ sessionId, n }) => (['before', 'after'] as const).map(phase => `delete ${checkpointRef(sessionId, n, phase)}\n`))
+      if (refs.length > 0 && hasShadow) await this.shadow(store, null, ['update-ref', '--stdin'], { stdin: refs.join('') })
+      // The newest tree stays reusable only while a kept turn still points at its commit.
+      const kept = new Set(Object.values(meta.sessions).flatMap(session => session.turns.flatMap(turn => [turn.before?.commit, turn.after?.commit])))
+      if (!meta.lastCommit || !kept.has(meta.lastCommit)) { meta.lastTree = null; meta.lastCommit = null }
+      await this.writeMeta(store, meta)
+    }
+    const reclaim = async (): Promise<number> => {
+      await forget()
+      if (hasShadow) await this.shadow(store, null, ['gc', '--prune=now', '--quiet'], { timeoutMs: 300_000 })
+      meta.unreclaimed = 0
+      meta.turnsSinceReclaim = 0
+      await this.writeMeta(store, meta)
+      return folderBytes(store)
+    }
+    if (!full) {
+      meta.turnsSinceReclaim = (meta.turnsSinceReclaim ?? 0) + 1
+      await forget()
+      if ((meta.unreclaimed ?? 0) < RECLAIM_AFTER_DROPPED_TURNS && meta.turnsSinceReclaim < RECLAIM_AFTER_TURNS) { report.removedTurns += removed.length; return }
+    }
+    let bytes = await reclaim()
+    for (let round = 0; bytes > this.limits.maxStoreBytes && count() > 0 && round < 8; round++) {
+      dropOldest(Math.max(1, Math.ceil(count() / 2)))
+      bytes = await reclaim()
+    }
+    report.removedTurns += removed.length
+    if (count() === 0 || bytes > this.limits.maxStoreBytes) { await this.removeStore(name); report.deletedStores++; return }
+    report.bytesAfter += bytes
+  }
+}
+
+/**
+ * Delete every checkpoint store under the app's checkpoint folder. It needs no Git, so turning the feature off works
+ * when Git is gone. Throws when a store could not be removed.
+ */
+export async function clearCheckpointFolder(root: string, remove: (folder: string) => Promise<void> = folder => rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })): Promise<void> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
+  const failed: string[] = []
+  for (const entry of entries) {
+    // Only ever a folder named as a store is, directly under the checkpoint folder.
+    if (!entry.isDirectory() || !STORE_NAME.test(entry.name)) continue
+    await remove(hostPath.join(root, entry.name)).catch(() => { failed.push(entry.name) })
+  }
+  if (failed.length > 0) throw new Error(`${failed.length} checkpoint ${failed.length === 1 ? 'store' : 'stores'} could not be deleted`)
 }
 
 export async function folderBytes(folder: string): Promise<number> {

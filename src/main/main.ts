@@ -122,7 +122,7 @@ import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
-import { CheckpointStore } from './checkpoint-store.js'
+import { CheckpointStore, clearCheckpointFolder } from './checkpoint-store.js'
 import { TurnCheckpoints } from './turn-checkpoints.js'
 import { resolveCheckpointTarget } from './turn-checkpoint-target.js'
 import { GitTrustStore } from './git-trust.js'
@@ -6634,7 +6634,17 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   }
   // Only once the change is saved: a save that failed was rolled back, and the tabs keep what they show.
   if (outsideFilesChanged) await revalidateFileTabs()
-  if (checkpointsTurnedOff) void turnCheckpointRuntime().then((runtime) => runtime?.store.clear()).catch((error) => writeAppLog(`Could not delete turn checkpoints: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {}))
+  if (checkpointsTurnedOff) {
+    // Deleting needs only the app's own folder, so it works when Git is gone. The store's queue is used when there is one.
+    const runtime = checkpointRuntime ? await checkpointRuntime : null
+    try {
+      if (runtime) await runtime.store.clear()
+      else await clearCheckpointFolder(join(app.getPath('userData'), 'checkpoints'))
+    } catch (error) {
+      void writeAppLog(`Could not delete turn checkpoints: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {})
+      throw new Error('Turn checkpoints are now off, but the saved snapshots could not all be deleted. Turn the setting on and off again to retry.')
+    }
+  }
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })
@@ -7080,6 +7090,8 @@ if (!app.requestSingleInstanceLock()) {
       .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
     await pruneMeetingFolders(meetingRoot(), Date.now())
     setTimeout(pruneTurnCheckpoints, 60_000).unref()
+    // The turn caps hold after every turn; the rules that need the clock or a look at Copilot's sessions run again here.
+    setInterval(pruneTurnCheckpoints, 6 * 60 * 60 * 1000).unref()
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(

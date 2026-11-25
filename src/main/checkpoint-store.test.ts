@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { CheckpointStore, checkpointRef, folderBytes, sessionRefKey, storeNameFor, turnLabel, type CheckpointLimits } from './checkpoint-store.js'
+import { CheckpointStore, checkpointRef, clearCheckpointFolder, folderBytes, sessionRefKey, storeNameFor, turnLabel, type CheckpointLimits } from './checkpoint-store.js'
 import { createGitFixture, folderLink, shellPath, type GitFixture } from './fixtures/git-fixture.js'
 
 async function setup(t: test.TestContext, limits: Partial<CheckpointLimits> = {}): Promise<{ fixture: GitFixture; store: CheckpointStore; root: string } | null> {
@@ -231,19 +231,21 @@ test('prune drops sessions Copilot no longer has, old turns and turns over the c
   if (!made) return
   const { fixture, root } = made
   let now = 1_000_000_000_000
+  // Taken with roomy caps, as by an older run; pruned by a store with a cap of two turns.
+  const roomy = new CheckpointStore({ root, runner: fixture.runner, now: () => now })
   const store = new CheckpointStore({ root, runner: fixture.runner, limits: { maxTurnsPerSession: 2 }, now: () => now })
   const repo = fixture.repo('prune')
   for (let index = 0; index < 4; index++) {
     writeFileSync(join(repo, 'blob.bin'), randomBytes(300_000))
-    const turn = await store.beginTurn(repo, 'kept', `turn ${index}`)
-    await store.capture(repo, 'kept', turn, 'before')
-    await store.capture(repo, 'kept', turn, 'after')
+    const turn = await roomy.beginTurn(repo, 'kept', `turn ${index}`)
+    await roomy.capture(repo, 'kept', turn, 'before')
+    await roomy.capture(repo, 'kept', turn, 'after')
     now += 1_000
   }
   writeFileSync(join(repo, 'blob.bin'), randomBytes(300_000))
-  const gone = await store.beginTurn(repo, 'gone', 'from a deleted session')
-  await store.capture(repo, 'gone', gone, 'before')
-  await store.capture(repo, 'gone', gone, 'after')
+  const gone = await roomy.beginTurn(repo, 'gone', 'from a deleted session')
+  await roomy.capture(repo, 'gone', gone, 'before')
+  await roomy.capture(repo, 'gone', gone, 'after')
   const directory = store.storeDirectory(repo)
   const bytesBefore = await folderBytes(directory)
   assert.ok(bytesBefore > 1_400_000, 'five different 300 kB files are stored')
@@ -294,4 +296,73 @@ test('prune enforces the size cap, deletes a store whose folder is gone, and cle
   await store.clear()
   assert.equal(existsSync(store.storeDirectory(other)), false)
   assert.equal(statSync(join(root, 'not-a-store', 'keep.txt')).size, 4)
+})
+
+test('a snapshot can be discarded until its last file has been read, and nothing of it is recorded', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, root } = made
+  let listed = 0
+  class Watched extends CheckpointStore {
+    override async eligiblePaths(worktreeRoot: string, signal?: AbortSignal) { const found = await super.eligiblePaths(worktreeRoot, signal); listed++; return found }
+  }
+  const store = new Watched({ root, runner: fixture.runner })
+  const repo = fixture.repo('discard')
+  const turn = await store.beginTurn(repo, 's', 'p')
+  await store.capture(repo, 's', turn, 'before')
+  writeFileSync(join(repo, 'late.txt'), 'belongs to the next turn\n')
+  // Wanted when the capture starts, unwanted by the time Git has listed the files.
+  const asked: number[] = []
+  const taken = await store.capture(repo, 's', turn, 'after', { skip: () => { asked.push(listed); return listed === 2 } })
+  assert.equal(taken, null)
+  assert.deepEqual(asked, [1, 2], 'asked before the capture and again after the files were read')
+  const [record] = (await store.turns(repo)).s!
+  assert.equal(record!.after, null)
+  assert.equal(record!.state, 'open')
+  const refs = fixture.plain(join(store.storeDirectory(repo), 'empty'), `--git-dir=${join(store.storeDirectory(repo), 'git')}`, 'for-each-ref', '--format=%(refname)').trim().split('\n')
+  assert.equal(refs.length, 1, 'only the start snapshot has a ref')
+  // A later capture is not confused by the discarded one.
+  const next = await store.capture(repo, 's', turn, 'after')
+  assert.equal((await store.fileAt(repo, next!.commit!, 'late.txt'))?.toString(), 'belongs to the next turn\n')
+})
+
+test('the turn caps hold after every turn, and space comes back while the app stays open', async (t) => {
+  const made = await setup(t, { maxTurnsPerSession: 2 })
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('open')
+  const sizes: number[] = []
+  for (let index = 0; index < 12; index++) {
+    writeFileSync(join(repo, 'blob.bin'), randomBytes(300_000))
+    const turn = await store.beginTurn(repo, 's', `turn ${index}`)
+    await store.capture(repo, 's', turn, 'before')
+    await store.capture(repo, 's', turn, 'after')
+    // No prune call: the end snapshot enforces the caps by itself.
+    assert.ok((await store.turns(repo)).s!.length <= 2, `after turn ${index + 1}`)
+    sizes.push(await folderBytes(store.storeDirectory(repo)))
+  }
+  assert.deepEqual((await store.turns(repo)).s!.map(turn => turn.n), [11, 12])
+  const peak = Math.max(...sizes)
+  assert.ok(peak < 12 * 300_000, `never all twelve files at once (peak ${peak})`)
+  // Space is reclaimed once ten turns have ended: the store shrinks then, with no restart and no prune call.
+  assert.ok(sizes[9]! < sizes[8]! - 1_500_000, `space was reclaimed without a restart (${sizes.join(', ')})`)
+  assert.ok((await store.fileAt(repo, (await store.turns(repo)).s![1]!.after!.commit!, 'blob.bin'))?.length === 300_000)
+})
+
+test('deleting the checkpoint folder needs no Git, leaves other folders, and reports a store it could not delete', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { root } = made
+  const first = join(root, 'a'.repeat(24))
+  const second = join(root, 'b'.repeat(24))
+  for (const folder of [first, second, join(root, 'not-a-store')]) { mkdirSync(join(folder, 'git'), { recursive: true }); writeFileSync(join(folder, 'git', 'x'), 'x') }
+  writeFileSync(join(root, 'c'.repeat(24)), 'a file, not a store')
+  await assert.rejects(() => clearCheckpointFolder(root, async folder => { if (folder === first) throw new Error('busy'); rmSync(folder, { recursive: true }) }), /1 checkpoint store could not be deleted/)
+  assert.equal(existsSync(first), true)
+  assert.equal(existsSync(second), false, 'the others are still deleted')
+  await clearCheckpointFolder(root)
+  assert.equal(existsSync(first), false)
+  assert.equal(existsSync(join(root, 'not-a-store', 'git', 'x')), true)
+  assert.equal(existsSync(join(root, 'c'.repeat(24))), true)
+  await clearCheckpointFolder(join(root, 'missing'))
 })
