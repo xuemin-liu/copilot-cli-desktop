@@ -695,7 +695,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -956,6 +956,24 @@ export function SettingsApp(): JSX.Element | null {
           A file path you click in a session terminal, a File tab or the Git panel opens in a File tab only when it is inside
           that workspace or one of its worktrees. Turn this on to open any file on this computer the same way, read only. Turning
           it off again also stops File tabs already showing such files from reading them. Off by default.
+        </p>
+      </section>
+
+      <section>
+        <h2>Turn checkpoints</h2>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.turnCheckpoints}
+            onChange={(event) => updatePreference({ turnCheckpoints: event.target.checked })}
+          />
+          Snapshot the working folder at each turn
+        </label>
+        <p className="settings-disclaimer">
+          When you send a prompt in a Copilot session, and again when Copilot finishes, the files in its Git repository are
+          snapshotted so that the changes of each turn can be shown. Snapshots are kept in this app's data folder: nothing is
+          written to your repository. Ignored files, links, files over 25 MB and submodules are left out, and old snapshots
+          are removed by themselves. Turning this off deletes every snapshot. On by default.
         </p>
       </section>
 

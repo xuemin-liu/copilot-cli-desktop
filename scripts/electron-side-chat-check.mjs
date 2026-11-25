@@ -47,10 +47,11 @@ if (process.versions.electron) {
   if (recordingPath) await writeFile(recordingPath, '')
   const activityMode = mode?.flag === '--activity'
   const meetingMode = mode?.flag === '--meeting'
+  const checkpointsMode = mode?.flag === '--turn-checkpoints'
   // The activity check makes the model read one workspace file so the real CLI writes a tool record to its event log.
   // The meeting check scripts the model: it runs the meeting helper as the host, and reviews and votes as the reviewer.
   const reply = meetingMode ? (await import('./meeting-check-model.mjs')).meetingModelReply : undefined
-  const modelServer = createCheckModelServer({ recordingPath, delayMs: activityMode ? 7_000 : 0, toolCall: activityMode ? { name: 'view', arguments: { path: 'marker.txt' } } : undefined, reply })
+  const modelServer = createCheckModelServer({ recordingPath, delayMs: activityMode ? 7_000 : checkpointsMode ? 6_000 : 0, toolCall: activityMode ? { name: 'view', arguments: { path: 'marker.txt' } } : undefined, reply })
   let rpc
   try {
     await Promise.all([workspace, appData, copilotHome].map((path) => mkdir(path)))
@@ -113,6 +114,19 @@ if (process.versions.electron) {
       profile.launch = { ...profile.launch, worktree: true }
       // Copilot asks to trust the worktree folder; it lives beside the workspace, inside the disposable directory.
       await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace, directory] }))
+      env.GIT_CONFIG_NOSYSTEM = '1'
+      env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
+    }
+    if (checkpointsMode) {
+      // The resumed session works in a Git project with one commit; the check edits it while a turn runs.
+      const { execFileSync } = await import('node:child_process')
+      const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') }
+      await writeFile(join(directory, 'gitconfig'), '[user]\n\tname = Check\n\temail = check@example.com\n[init]\n\tdefaultBranch = main\n[core]\n\tautocrlf = false\n')
+      const git = (...gitArgs) => execFileSync('git', gitArgs, { cwd: workspace, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      git('init', '-q')
+      await writeFile(join(workspace, 'a.txt'), 'one\n')
+      git('add', '.')
+      git('commit', '-q', '-m', 'init')
       env.GIT_CONFIG_NOSYSTEM = '1'
       env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
     }

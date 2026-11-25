@@ -4,6 +4,7 @@ export const checkModes = [
   { flag: '--stopped-notice', env: 'DESKTOP_UI_STOPPED_NOTICE_CHECK', module: './session-stopped-notice-check.mjs', run: 'runStoppedNoticeCheck', artifacts: 'session-stopped-notice', label: 'stopped session notice' },
   { flag: '--browser-certificate', env: 'DESKTOP_UI_BROWSER_CERTIFICATE_CHECK', module: './browser-certificate-app-check.mjs', run: 'runBrowserCertificateCheck', artifacts: 'browser-certificate-app', label: 'browser certificate warning' },
   { flag: '--activity', env: 'DESKTOP_UI_ACTIVITY_CHECK', module: './session-activity-check.mjs', run: 'runActivityCheck', artifacts: 'session-activity', label: 'session activity' },
+  { flag: '--turn-checkpoints', env: 'DESKTOP_UI_TURN_CHECKPOINTS_CHECK', module: './turn-checkpoints-check.mjs', run: 'runTurnCheckpointsCheck', artifacts: 'turn-checkpoints', label: 'turn checkpoints' },
   { flag: '--permissions', env: 'DESKTOP_UI_PERMISSION_CHECK', module: './session-permission-check.mjs', run: 'runPermissionCheck', artifacts: 'permissions', label: 'session permission' },
   { flag: '--worktree', env: 'DESKTOP_UI_WORKTREE_CHECK', module: './session-worktree-check.mjs', run: 'runWorktreeCheck', artifacts: 'session-worktree', label: 'worktree session launch' },
   { flag: '--session-name', env: 'DESKTOP_UI_SESSION_NAME_CHECK', module: './session-name-sync-check.mjs', run: 'runSessionNameCheck', artifacts: 'session-name', label: 'session name sync' },

@@ -55,6 +55,14 @@ test('readDesktopConfig returns defaults when the file does not exist', async ()
   })
 })
 
+test('turn checkpoints are on by default and turn off only for an explicit false', () => {
+  assert.equal(DEFAULT_DESKTOP_CONFIG.turnCheckpoints, true)
+  assert.equal(normalizeDesktopConfig({}).turnCheckpoints, true)
+  for (const value of ['false', 0, 'no', null, {}]) assert.equal(normalizeDesktopConfig({ turnCheckpoints: value }).turnCheckpoints, true, String(value))
+  assert.equal(normalizeDesktopConfig({ turnCheckpoints: false }).turnCheckpoints, false)
+  assert.equal(normalizeDesktopConfig(JSON.parse(JSON.stringify(normalizeDesktopConfig({ turnCheckpoints: false })))).turnCheckpoints, false, 'kept across a save and reload')
+})
+
 test('opening files outside the workspace is off by default and turns on only for an explicit true', () => {
   assert.equal(DEFAULT_DESKTOP_CONFIG.openFilesOutsideWorkspace, false)
   assert.equal(normalizeDesktopConfig({}).openFilesOutsideWorkspace, false)
@@ -421,6 +429,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     maxSessionTabs: config.maxSessionTabs,
     desktopControl: config.desktopControl,
     openFilesOutsideWorkspace: config.openFilesOutsideWorkspace,
+    turnCheckpoints: config.turnCheckpoints,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
   // Turning the tray off also moved close behavior back to asking.

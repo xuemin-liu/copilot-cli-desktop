@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -1657,6 +1657,34 @@ test('the Settings page turns opening files outside the workspace on and off, sa
   await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false })
   await harness.flushConfig()
   assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).openFilesOutsideWorkspace, false)
+}))
+
+test('the Settings page turns turn checkpoints off and on, saved, and turning them off deletes the snapshots', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory, 'default')
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  const get = async (): Promise<boolean> => (await harness.requestSettings('desktop-settings:get') as { turnCheckpoints: boolean }).turnCheckpoints
+  assert.equal(await get(), true, 'on by default')
+  for (const value of ['false', 0, null]) {
+    await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { turnCheckpoints: value }), /Invalid desktop preferences/)
+  }
+  // A store as the app names one, and a neighbour that is not a store.
+  const store = join(directory, 'checkpoints', 'a'.repeat(24))
+  const other = join(directory, 'checkpoints', 'not-a-store')
+  await mkdir(store, { recursive: true })
+  await mkdir(other, { recursive: true })
+  await writeFile(join(store, 'meta.json'), '{}')
+  await harness.requestSettings('desktop-settings:update-preferences', { turnCheckpoints: true })
+  assert.equal((await stat(store)).isDirectory(), true, 'saving the same value deletes nothing')
+  await harness.requestSettings('desktop-settings:update-preferences', { turnCheckpoints: false })
+  assert.equal(await get(), false)
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).turnCheckpoints, false)
+  for (let attempt = 0; attempt < 200 && await stat(store).then(() => true, () => false); attempt++) await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(await stat(store).then(() => true, () => false), false, 'the snapshots are deleted')
+  assert.equal((await stat(other)).isDirectory(), true, 'and nothing else')
+  await harness.requestSettings('desktop-settings:update-preferences', { turnCheckpoints: true })
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).turnCheckpoints, true)
 }))
 
 test('outside files: a link back into the workspace uses its tab, turning the setting off stops watching outside folders, and a link to a share is refused', async () => fixture(async (harness, directory) => {

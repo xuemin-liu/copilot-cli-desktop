@@ -122,6 +122,9 @@ import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
+import { CheckpointStore } from './checkpoint-store.js'
+import { TurnCheckpoints } from './turn-checkpoints.js'
+import { resolveCheckpointTarget } from './turn-checkpoint-target.js'
 import { GitTrustStore } from './git-trust.js'
 import { registerGitIpc } from './git-ipc.js'
 import type { GitIpcEvent } from './git-ipc.js'
@@ -449,6 +452,55 @@ function meetingGitRunner(): Promise<GitRunner | null> {
   // Git installed later is found on the next try.
   void meetingRunner.then((runner) => { if (!runner) meetingRunner = null })
   return meetingRunner
+}
+
+/**
+ * Turn checkpoints: snapshots of a session's working folder at the start and end of each turn, kept under the app's
+ * data folder and never in the person's repository. Null without a usable Git; found again on the next try.
+ */
+interface CheckpointRuntime { store: CheckpointStore; turns: TurnCheckpoints }
+let checkpointRuntime: Promise<CheckpointRuntime | null> | null = null
+function turnCheckpointRuntime(): Promise<CheckpointRuntime | null> {
+  checkpointRuntime ??= (async (): Promise<CheckpointRuntime | null> => {
+    const executable = await resolveGitExecutable()
+    if (!executable) return null
+    const runner = new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') })
+    const store = new CheckpointStore({ root: join(app.getPath('userData'), 'checkpoints'), runner })
+    // A turn left open by the last run of the app never got its end snapshot.
+    await store.closeOpenTurns()
+    const turns = new TurnCheckpoints({
+      store,
+      enabled: () => desktopConfig.turnCheckpoints && !shuttingDown(),
+      resolve: async (tabId) => {
+        const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+        const session = managedTabs.get(tabId)?.session
+        // Another CLI's tab has no event log to mark its turns, a remote session's files are elsewhere, and a side chat cannot edit.
+        if (!tab || !session || tab.cli || tab.remote || tab.sideChat || !tab.lastSessionId || !session.sessionCwd) return null
+        const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+        if (!profile) return null
+        return resolveCheckpointTarget({ sessionId: tab.lastSessionId, cwd: session.sessionCwd, projectPath: profile.path }, { executable, runner, trust: gitTrustStore() })
+      },
+      onError: (error) => { void writeAppLog(`Turn checkpoint failed: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {}) },
+    })
+    return { store, turns }
+  })().catch(() => null)
+  void checkpointRuntime.then((runtime) => { if (!runtime) checkpointRuntime = null })
+  return checkpointRuntime
+}
+/** Tell the turn tracker something happened in a tab. Calls keep their order; nothing waits for a snapshot. */
+function noteTurn(event: (turns: TurnCheckpoints) => void): void {
+  if (!desktopConfig.turnCheckpoints && !checkpointRuntime) return
+  void turnCheckpointRuntime().then((runtime) => { if (runtime) event(runtime.turns) }).catch(() => {})
+}
+/** Old snapshots go, and their disk space comes back, a while after the app starts. */
+function pruneTurnCheckpoints(): void {
+  if (!desktopConfig.turnCheckpoints || shuttingDown()) return
+  const root = copilotSessionRoot(process.env)
+  void turnCheckpointRuntime().then(async (runtime) => {
+    // Without the session folder nothing can be told apart, so nothing is taken for deleted.
+    const readable = await access(root).then(() => true, () => false)
+    await runtime?.store.prune({ sessionExists: (sessionId) => !readable || access(join(root, sessionId)).then(() => true, () => false) })
+  }).catch((error) => writeAppLog(`Could not prune turn checkpoints: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {}))
 }
 
 function gitServiceInstance(): GitService | null {
@@ -2046,6 +2098,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (profileId) gitService?.requestRefresh(profileId)
     if (session.activity === 'idle') observe(refreshSessionNames(), 'Could not read session names')
     if (session.activity === 'idle') onMeetingIdle(id)
+    if (session.activity === 'idle') noteTurn((turns) => turns.idle(id))
   })
   session.on('session-record', (line: string, live: boolean) => {
     if (managedTabs.get(id)?.session !== session) return
@@ -2112,6 +2165,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
     if (managedTabs.get(id)?.session === session) {
+      // Not for a session a restart already replaced: the tab's open turn would be the new session's.
+      noteTurn((turns) => turns.tabClosed(id))
       void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
       void desktopControl?.unregister(id, 'Turned off: the session ended.').catch(error => logBrowserError(String(error)))
     }
@@ -2942,13 +2997,15 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   }
   const paste = taskPasteSequence(text,hooks?.maximumChars)
   draft.note(paste)
+  // The turn's start is snapshotted from before the task is pasted.
+  noteTurn((turns) => turns.preSend(tabId))
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
   scheduleHeldInput(held,() => {
     if (holding() && sameSessionRecipient(tabId,session,recipientId)) {
       if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r'); promptDrafts.get(tabId)?.commandOpensNoDialog()}
-      else {session.write('\x03');draft.note('\x03');hooks.aborted()}
-    } else {if(holding())cancelHeldInput(tabId,true);hooks?.aborted()}
+      else {session.write('\x03');draft.note('\x03');hooks.aborted();noteTurn((turns) => turns.sendAborted(tabId))}
+    } else {if(holding())cancelHeldInput(tabId,true);hooks?.aborted();noteTurn((turns) => turns.sendAborted(tabId))}
     release()
   },300,scheduleTaskEnter)
   return decision
@@ -3805,6 +3862,8 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (usage) meetingHub.usage(tabId, usage)
   // A live user.message proves the submitted prompt started a conversation turn rather than opening a slash-command dialog.
   if (prompt) promptDrafts.get(tabId)?.commandOpensNoDialog()
+  // Every live prompt starts a turn, the desktop's and a meeting's too: any of them can end in edited files.
+  if (prompt) noteTurn((turns) => turns.promptStarted(tabId, prompt.content))
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   endAutomatic(tabId,false)
   const journalRun=meetingJournalTurns.get(tabId)
@@ -3960,6 +4019,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
 
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
   cancelHeldInput(tabId)
+  noteTurn((turns) => turns.tabClosed(tabId))
   // Share the queue with restartSessionTab: closing a tab while its restart
   // is still in flight could otherwise stop the very session the restart is
   // about to replace, then delete the tab from tabsState — after which the
@@ -5356,6 +5416,7 @@ function settingsPreferences(): DesktopPreferences {
     maxSessionTabs: desktopConfig.maxSessionTabs,
     desktopControl: desktopConfig.desktopControl,
     openFilesOutsideWorkspace: desktopConfig.openFilesOutsideWorkspace,
+    turnCheckpoints: desktopConfig.turnCheckpoints,
   }
 }
 
@@ -6470,6 +6531,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'maxSessionTabs',
     'desktopControl',
     'openFilesOutsideWorkspace',
+    'turnCheckpoints',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -6491,6 +6553,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('maxSessionTabs' in values && !isMaxSessionTabs(values.maxSessionTabs))
     || ('desktopControl' in values && typeof values.desktopControl !== 'boolean')
     || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
+    || ('turnCheckpoints' in values && typeof values.turnCheckpoints !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -6503,6 +6566,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let desktopControlChanged = false
   let outsideFilesChanged = false
   let maxTabsChanged = false
+  let checkpointsTurnedOff = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
@@ -6540,6 +6604,9 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
     outsideFilesChanged = typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace
     if (typeof values.openFilesOutsideWorkspace === 'boolean') desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
+    // New turns follow it at once. Turning it off also deletes every snapshot taken so far.
+    checkpointsTurnedOff = values.turnCheckpoints === false && desktopConfig.turnCheckpoints
+    if (typeof values.turnCheckpoints === 'boolean') desktopConfig.turnCheckpoints = values.turnCheckpoints
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -6567,6 +6634,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   }
   // Only once the change is saved: a save that failed was rolled back, and the tabs keep what they show.
   if (outsideFilesChanged) await revalidateFileTabs()
+  if (checkpointsTurnedOff) void turnCheckpointRuntime().then((runtime) => runtime?.store.clear()).catch((error) => writeAppLog(`Could not delete turn checkpoints: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {}))
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })
@@ -7011,6 +7079,7 @@ if (!app.requestSingleInstanceLock()) {
     await pruneBrowserLaunches(app.getPath('userData'), launchId)
       .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
     await pruneMeetingFolders(meetingRoot(), Date.now())
+    setTimeout(pruneTurnCheckpoints, 60_000).unref()
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(

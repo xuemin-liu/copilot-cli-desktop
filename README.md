@@ -31,6 +31,11 @@ handle, only input/output/resize events.
   one ZIP, with conflict previews, workspace mapping, and recovery backups.
   Windows-to-Windows; history migration is not yet supported. See
   [migration and recovery](docs/migration.md).
+- **Turn checkpoints** snapshot a Copilot session's Git project when you send a prompt and again when Copilot
+  finishes, so the changes of each turn can be told apart. Snapshots are kept in the app's data folder: nothing is
+  written to your repository. Ignored files, links, files over 25 MB and submodules are left out, and old
+  snapshots are removed by themselves. Turn it off in Settings → Turn checkpoints, which also deletes them. The
+  list of turns in the Git panel is not built yet. See the [plan](docs/turn-checkpoints-plan.md).
 - **Monthly token usage** in Settings counts local request tokens and saves collected
   totals in the app-data directory, independently of session history and software updates.
   Updates and quit commit collected usage with a bounded wait; verified backups and
