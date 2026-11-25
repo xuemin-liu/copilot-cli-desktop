@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { helpListsFlag } from './agent-cli-settings.js'
+import type { GitRunner } from './git-runner.js'
 import type { PostReceipt, PrLoopGrantTarget } from './pr-loop-posts.js'
 import { DEFAULT_PR_MARKER, isMarked } from './pr-loop-rules.js'
 import type { ReviewerArea, ReviewerPolicy } from './pr-review-launch.js'
@@ -75,16 +78,46 @@ export function prReviewAndFixRequest(text: string): PrReviewAndFixRequest | nul
   return { repository: null, number }
 }
 
-/** Deterministic signature of all unmarked review feedback and review states on a PR snapshot. */
-export function prFeedbackSignature(snapshot: Pick<GithubSnapshot, 'feedback' | 'reviews'>, marker = DEFAULT_PR_MARKER): string {
+const RECEIPT_TAG_RE = /<!-- copilot-desktop-receipt:([a-f0-9-]{36}) -->/
+
+function extractReceiptId(body: string): string | null {
+  return RECEIPT_TAG_RE.exec(body)?.[1] ?? null
+}
+
+/**
+ * Deterministic signature of unmarked review feedback and review states on a PR snapshot, excluding receipt IDs in
+ * `ignoredReceiptIds` (used to exclude this group's own approval / held-approval posts while still hashing any new
+ * findings or external comments).
+ */
+export function materialFeedbackSignature(
+  snapshot: Pick<GithubSnapshot, 'feedback' | 'reviews'>,
+  ignoredReceiptIds: ReadonlySet<string> = new Set(),
+  marker = DEFAULT_PR_MARKER,
+): string {
   const feedbackItems = snapshot.feedback
-    .filter((item) => item.kind === 'review' && !isMarked(item.body, marker))
+    .filter((item) => {
+      if (item.kind !== 'review' || isMarked(item.body, marker)) return false
+      const receiptId = extractReceiptId(item.body)
+      return !(receiptId && ignoredReceiptIds.has(receiptId))
+    })
     .map((item) => [item.source, item.version] as const)
     .sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]))
   const reviewItems = [...(snapshot.reviews ?? [])]
+    .filter((r) => {
+      if (r.body && isMarked(r.body, marker)) return false
+      const receiptId = r.body ? extractReceiptId(r.body) : null
+      // Exclude bodyless COMMENTED container reviews whose inline comment was our own approval, or tagged reviews
+      if (receiptId && ignoredReceiptIds.has(receiptId)) return false
+      return Boolean(r.body?.trim()) || r.state !== 'COMMENTED'
+    })
     .sort((a, b) => a.id - b.id)
     .map((r) => [r.id, r.state, r.commitId ?? '', r.submittedAt, r.body] as const)
   return createHash('sha256').update(JSON.stringify({ feedbackItems, reviewItems })).digest('hex')
+}
+
+/** Deterministic signature of all unmarked review feedback and review states on a PR snapshot. */
+export function prFeedbackSignature(snapshot: Pick<GithubSnapshot, 'feedback' | 'reviews'>, marker = DEFAULT_PR_MARKER): string {
+  return materialFeedbackSignature(snapshot, new Set(), marker)
 }
 
 /** Signature of only marked author replies (`🤖 `), used to wake reviewer seats when the author answers a thread. */
@@ -203,12 +236,38 @@ export function buildClaudeMcpConfigJson(mcpUrl: string, bearerToken: string): s
   }, null, 2)
 }
 
+/**
+ * Creates an isolated per-seat `CODEX_HOME` inside `areaHome` so a Codex temporary reviewer never inherits user-configured
+ * MCP servers (`copilot-meeting`, `node_repl`, computer-use, etc.), hooks, or profiles from `~/.codex/config.toml`.
+ * Copies only `auth.json` when it is a regular file, and writes a minimal `config.toml` trusting `checkoutPath`.
+ */
+export async function prepareCodexReviewerHome(options: {
+  areaHome: string
+  realCodexHome: string
+  checkoutPath: string
+}): Promise<string> {
+  const codexHome = join(resolve(options.areaHome), 'codex-home')
+  await mkdir(codexHome, { recursive: true, mode: 0o700 })
+  const authSource = join(resolve(options.realCodexHome), 'auth.json')
+  const authInfo = await lstat(authSource).catch(() => null)
+  if (authInfo?.isFile()) {
+    const authDest = join(codexHome, 'auth.json')
+    await writeFile(authDest, await readFile(authSource), { mode: 0o600 })
+    await chmod(authDest, 0o600).catch(() => {})
+  }
+  const escapedCheckout = resolve(options.checkoutPath).replaceAll('\\', '\\\\').replaceAll('"', '\\"')
+  const configPath = join(codexHome, 'config.toml')
+  await writeFile(configPath, `[projects."${escapedCheckout}"]\ntrust_level = "trusted"\n`, { encoding: 'utf8', mode: 0o600 })
+  await chmod(configPath, 0o600).catch(() => {})
+  return codexHome
+}
+
 export function buildCodexReviewerLaunch(options: {
   help: string | null
   mcpUrl: string
   bearerToken: string
+  codexHome: string
   prompt: string
-  checkoutPath?: string
   model?: string
 }): { args: string[]; envAdditions: Record<string, string> } {
   const required = ['--sandbox', '--ask-for-approval', '--config']
@@ -220,14 +279,13 @@ export function buildCodexReviewerLaunch(options: {
   if (options.model && !helpListsFlag(options.help, '--model')) {
     throw new Error('Installed Codex CLI does not support --model')
   }
-  const trustArgs = options.checkoutPath
-    ? ['-c', `projects."${options.checkoutPath.replaceAll('\\', '\\\\')}".trust_level="trusted"`]
-    : []
+  if (!options.codexHome.trim()) {
+    throw new Error('Codex reviewer launch requires an isolated codexHome directory')
+  }
   const args = [
     ...(helpListsFlag(options.help, '--no-daemon') ? ['--no-daemon'] : []),
     '--sandbox', 'read-only',
     '--ask-for-approval', 'never',
-    ...trustArgs,
     '-c', `mcp_servers.${PR_REVIEWER_MCP_SERVER_NAME}.url="${options.mcpUrl}"`,
     '-c', `mcp_servers.${PR_REVIEWER_MCP_SERVER_NAME}.bearer_token_env_var="${PR_REVIEWER_TOKEN_ENV}"`,
     '-c', `mcp_servers.${PR_REVIEWER_MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
@@ -237,7 +295,117 @@ export function buildCodexReviewerLaunch(options: {
   ]
   return {
     args,
-    envAdditions: { [PR_REVIEWER_TOKEN_ENV]: options.bearerToken },
+    envAdditions: {
+      CODEX_HOME: resolve(options.codexHome),
+      [PR_REVIEWER_TOKEN_ENV]: options.bearerToken,
+    },
+  }
+}
+
+const DEFAULT_DIFF_PAGE_CHARS = 20_000
+const MAX_DIFF_STREAM_CHARS = 256 * 1024 * 1024
+
+/**
+ * Streams `git diff base...head` in constant memory (`O(pageChars)`), advancing to `offset` and stopping Git as soon
+ * as `pageChars + 1` characters past `offset` arrive so patches well over 4 MiB remain fully pageable without mistaking
+ * truncated or failed Git runs for end-of-diff.
+ */
+export async function readReviewerDiffPage(
+  runner: GitRunner,
+  area: Pick<ReviewerArea, 'root' | 'gitdir' | 'checkout'>,
+  base: string,
+  head: string,
+  options: { path?: string | undefined; offset?: number | undefined; pageChars?: number | undefined } = {},
+): Promise<{ ok: boolean; text: string }> {
+  const offset = options.offset ?? 0
+  const pageChars = options.pageChars ?? DEFAULT_DIFF_PAGE_CHARS
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return { ok: false, text: 'offset must be a non-negative integer.' }
+  }
+  let cleanPath: string | undefined
+  if (options.path !== undefined) {
+    cleanPath = options.path.trim().replaceAll('\\', '/')
+    if (!cleanPath || cleanPath.startsWith('/') || cleanPath.startsWith('-') || cleanPath.split('/').includes('..')) {
+      return { ok: false, text: 'Invalid repository-relative path.' }
+    }
+  }
+  const stopEarly = new AbortController()
+  const chunks: string[] = []
+  let seenChars = 0
+  let collectedChars = 0
+  let hasMore = false
+  let streamOverflow = false
+
+  const args = [
+    '--git-dir', area.gitdir,
+    '--work-tree', area.checkout,
+    'diff', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/',
+    `${base}...${head}`,
+    ...(cleanPath ? ['--', cleanPath] : []),
+  ]
+  const res = await runner.run({
+    cwd: area.root,
+    args,
+    kind: 'read',
+    disableHooks: true,
+    captureStdout: false,
+    timeoutMs: 120_000,
+    signal: stopEarly.signal,
+    onOutput: (stream, text) => {
+      if (stream !== 'stdout' || hasMore || streamOverflow) return
+      const chunkStart = seenChars
+      const chunkEnd = chunkStart + text.length
+      seenChars = chunkEnd
+      if (seenChars > MAX_DIFF_STREAM_CHARS && chunkStart >= offset + pageChars) {
+        hasMore = true
+        stopEarly.abort()
+        return
+      }
+      if (seenChars > MAX_DIFF_STREAM_CHARS && collectedChars === 0) {
+        streamOverflow = true
+        stopEarly.abort()
+        return
+      }
+      if (chunkEnd <= offset) return
+      const startInText = Math.max(0, offset - chunkStart)
+      const remainingNeeded = pageChars - collectedChars
+      const available = text.length - startInText
+      if (available > remainingNeeded) {
+        if (remainingNeeded > 0) {
+          chunks.push(text.slice(startInText, startInText + remainingNeeded))
+          collectedChars += remainingNeeded
+        }
+        hasMore = true
+        stopEarly.abort()
+      } else {
+        chunks.push(text.slice(startInText))
+        collectedChars += available
+      }
+    },
+  }).catch(() => null)
+
+  if (streamOverflow) {
+    return { ok: false, text: 'Diff exceeds maximum streamable size; pass a repository-relative path to inspect individual files.' }
+  }
+  if (!res) {
+    return { ok: false, text: 'Git diff failed in reviewer checkout.' }
+  }
+  if (!hasMore && (res.exitCode !== 0 || res.timedOut || res.cancelled || res.stdoutTruncated)) {
+    return { ok: false, text: 'Git diff ended abnormally before reaching end of diff; retry or pass path to inspect individual files.' }
+  }
+  const slice = chunks.join('')
+  const nextOffset = hasMore ? offset + slice.length : null
+  return {
+    ok: true,
+    text: JSON.stringify({
+      head,
+      base,
+      offset,
+      nextOffset,
+      complete: !hasMore,
+      ...(hasMore ? {} : { totalChars: seenChars }),
+      diff: slice,
+    }),
   }
 }
 
@@ -258,6 +426,7 @@ export interface TempReviewerSeat {
   lastSeenHead: string
   lastSeenBase: string
   lastSeenAuthorReplies: string
+  lastSeenMaterialFeedback: string
   needsAttention: boolean
   error: string | null
   keptCheckoutPath: string | null
@@ -276,6 +445,7 @@ export interface TempReviewerGroup {
   head: string
   base: string
   feedbackSignature: string
+  materialFeedbackSignature: string
   authorReplySignature: string
   stage: 'starting' | 'active' | 'ended'
   outcome: 'confirmed' | 'merged' | 'closed' | 'stopped' | null
@@ -284,10 +454,23 @@ export interface TempReviewerGroup {
   requiredSeats: Map<ReviewerCli, TempReviewerSeat>
 }
 
+export function groupApprovalReceiptIds(group: Pick<TempReviewerGroup, 'requiredSeats'>, receipts: ReceiptReader | null): Set<string> {
+  const ids = new Set<string>()
+  if (!receipts) return ids
+  for (const seat of group.requiredSeats.values()) {
+    for (const receipt of receipts.list(seat.grantId)) {
+      if (receipt.kind === 'approval' || receipt.heldApproval === true) {
+        ids.add(receipt.id)
+      }
+    }
+  }
+  return ids
+}
+
 export function seatGrantTarget(group: TempReviewerGroup, seat: TempReviewerSeat, sessionIdOverride?: string): PrLoopGrantTarget {
   return {
     id: seat.grantId,
-    enabled: group.stage === 'active' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting'),
+    enabled: group.stage !== 'ended' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting'),
     role: 'reviewer',
     sessionId: sessionIdOverride ?? seat.generation,
     accountId: group.accountId,
@@ -302,7 +485,7 @@ export function seatGrantTarget(group: TempReviewerGroup, seat: TempReviewerSeat
 export function hostAuthorGrantTarget(group: TempReviewerGroup, sessionId: string): PrLoopGrantTarget {
   return {
     id: `temp-host:${group.id}`,
-    enabled: group.stage === 'active' && (group.hostSessionId === null || group.hostSessionId === sessionId),
+    enabled: group.stage !== 'ended' && (group.hostSessionId === null || group.hostSessionId === sessionId),
     role: 'author',
     sessionId,
     accountId: group.accountId,
@@ -316,6 +499,7 @@ export function deriveSeatStatus(
   seat: TempReviewerSeat,
   groupHead: string,
   groupBase: string,
+  groupMaterialFeedbackSignature: string,
   receipts: readonly PostReceipt[],
   settled: boolean,
 ): Pick<TempReviewerSeatView, 'verdict' | 'ranChecks' | 'missingChecks'> {
@@ -331,8 +515,19 @@ export function deriveSeatStatus(
   if (latest) {
     const ranChecks = latest.checks?.ran ?? []
     const missingChecks = latest.checks?.missing ?? []
-    if (latest.kind === 'approval') return { verdict: 'approved', ranChecks, missingChecks }
-    if (latest.heldApproval) return { verdict: 'held-approval', ranChecks, missingChecks }
+    const coversCurrentFeedback = latest.feedbackSignature === groupMaterialFeedbackSignature
+    if (latest.kind === 'approval') {
+      if (coversCurrentFeedback) return { verdict: 'approved', ranChecks, missingChecks }
+      if (seat.lifecycle === 'failed') return { verdict: 'failed', ranChecks: [], missingChecks: [] }
+      if (seat.lifecycle === 'stopped') return { verdict: 'stopped', ranChecks: [], missingChecks: [] }
+      return { verdict: 'reviewing', ranChecks: [], missingChecks: [] }
+    }
+    if (latest.heldApproval) {
+      if (coversCurrentFeedback) return { verdict: 'held-approval', ranChecks, missingChecks }
+      if (seat.lifecycle === 'failed') return { verdict: 'failed', ranChecks: [], missingChecks: [] }
+      if (seat.lifecycle === 'stopped') return { verdict: 'stopped', ranChecks: [], missingChecks: [] }
+      return { verdict: 'reviewing', ranChecks: [], missingChecks: [] }
+    }
     if (seat.lifecycle === 'failed') return { verdict: 'failed', ranChecks, missingChecks }
     if (seat.lifecycle === 'stopped') return { verdict: 'stopped', ranChecks, missingChecks }
     return { verdict: 'changes-requested', ranChecks, missingChecks }
@@ -426,6 +621,7 @@ export class TempReviewerRegistry {
     head: string
     base: string
     feedbackSignature: string
+    materialFeedbackSignature?: string
     authorReplySignature: string
     clis: readonly ReviewerCli[]
     origin: string
@@ -442,6 +638,7 @@ export class TempReviewerRegistry {
       throw new Error(`Pull request ${init.repository} #${init.prNumber} already has temporary reviewers running.`)
     }
     const id = randomUUID()
+    const initialMaterialSig = init.materialFeedbackSignature ?? init.feedbackSignature
     const requiredSeats = new Map<ReviewerCli, TempReviewerSeat>()
     for (const cli of SUPPORTED_REVIEWER_CLIS.filter((c) => init.clis.includes(c))) {
       requiredSeats.set(cli, {
@@ -461,6 +658,7 @@ export class TempReviewerRegistry {
         lastSeenHead: init.head,
         lastSeenBase: init.base,
         lastSeenAuthorReplies: init.authorReplySignature,
+        lastSeenMaterialFeedback: initialMaterialSig,
         needsAttention: false,
         error: null,
         keptCheckoutPath: null,
@@ -479,6 +677,7 @@ export class TempReviewerRegistry {
       head: init.head,
       base: init.base,
       feedbackSignature: init.feedbackSignature,
+      materialFeedbackSignature: initialMaterialSig,
       authorReplySignature: init.authorReplySignature,
       stage: 'starting',
       outcome: null,
@@ -506,6 +705,7 @@ export class TempReviewerRegistry {
     seat.lastSeenHead = group.head
     seat.lastSeenBase = group.base
     seat.lastSeenAuthorReplies = group.authorReplySignature
+    seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
     seat.needsAttention = false
     seat.error = null
     this.wakeAll()
@@ -556,7 +756,7 @@ export class TempReviewerRegistry {
     if (group?.stage === 'ended') this.groups.delete(groupId)
   }
 
-  applySnapshot(groupId: string, snapshot: GithubSnapshot): { ended: boolean; changed: boolean } {
+  applySnapshot(groupId: string, snapshot: GithubSnapshot, receipts: ReceiptReader | null = null): { ended: boolean; changed: boolean } {
     const group = this.groups.get(groupId)
     if (!group || group.stage === 'ended') return { ended: true, changed: false }
     if (!snapshot.open) {
@@ -565,14 +765,17 @@ export class TempReviewerRegistry {
       return { ended: true, changed: true }
     }
     const nextFeedback = prFeedbackSignature(snapshot, group.marker)
+    const nextMaterialFeedback = materialFeedbackSignature(snapshot, groupApprovalReceiptIds(group, receipts), group.marker)
     const nextAuthorReplies = authorReplySignature(snapshot, group.marker)
     const changed = group.head !== snapshot.head
       || group.base !== snapshot.base
       || group.feedbackSignature !== nextFeedback
+      || group.materialFeedbackSignature !== nextMaterialFeedback
       || group.authorReplySignature !== nextAuthorReplies
     group.head = snapshot.head
     group.base = snapshot.base
     group.feedbackSignature = nextFeedback
+    group.materialFeedbackSignature = nextMaterialFeedback
     group.authorReplySignature = nextAuthorReplies
     if (changed) this.wakeAll()
     return { ended: false, changed }
@@ -582,7 +785,7 @@ export class TempReviewerRegistry {
     const seats: TempReviewerSeatView[] = [...group.requiredSeats.values()].map((seat) => {
       const list = receipts ? receipts.list(seat.grantId) : []
       const settled = receipts ? receipts.settled(seat.grantId) : true
-      const derived = deriveSeatStatus(seat, group.head, group.base, list, settled)
+      const derived = deriveSeatStatus(seat, group.head, group.base, group.materialFeedbackSignature, list, settled)
       return {
         cli: seat.cli,
         tabId: seat.tabId,
@@ -609,7 +812,7 @@ export class TempReviewerRegistry {
           head: group.head,
           base: group.base,
           rosterKey: rosterKeyOf(group),
-          feedbackSignature: group.feedbackSignature,
+          feedbackSignature: group.materialFeedbackSignature,
           approveAnyway: seats.some((seat) => seat.verdict === 'held-approval'),
           missingChecks: missingByCli,
         }
@@ -648,7 +851,7 @@ export class TempReviewerRegistry {
   ): { outcome: 'confirmed' | 'merged' | 'closed'; seats: TempReviewerSeat[] } {
     const group = this.groups.get(groupId)
     if (!group || group.stage !== 'active') throw new Error('This temporary review group is no longer active.')
-    const applied = this.applySnapshot(groupId, freshSnapshot)
+    const applied = this.applySnapshot(groupId, freshSnapshot, receipts)
     if (applied.ended) {
       return {
         outcome: freshSnapshot.merged ? 'merged' : 'closed',
@@ -658,7 +861,7 @@ export class TempReviewerRegistry {
     const currentView = this.view(group, receipts)
     const currentTarget = currentView.confirmTarget
     if (!currentTarget) {
-      throw new Error('All required reviewers have not settled an approval for the current PR revision yet.')
+      throw new Error('The pull request revision or review comments changed since this confirmation was shown; wait for reviewers to assess the latest feedback before confirming.')
     }
     if (
       currentTarget.head !== shown.head

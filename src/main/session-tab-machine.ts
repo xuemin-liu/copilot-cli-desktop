@@ -249,6 +249,27 @@ export function canOpenAnotherTab(state: TabsState, maxTabs = MAX_SESSION_TABS):
   return regularTabCount(state) < maxTabs
 }
 
+export function fanOutAvailableSlots(state: Pick<TabsState, 'tabs'>, maxTabs = MAX_SESSION_TABS): number {
+  return Math.max(0, maxTabs - regularTabCount(state))
+}
+
+/**
+ * Resolves the host tab ID and active peek reviewer tab ID regardless of whether focus is currently on the host tab,
+ * its side chat, or the peeked reviewer terminal itself.
+ */
+export function resolvePeekHostAndTab(
+  state: TabsState,
+  peekByHost: Readonly<Record<string, string | null>>,
+): { hostTabId: string | null; peekTabId: string | null } {
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const hostTabId = active?.tempReviewer?.hostTabId ?? active?.sideParentTabId ?? state.activeTabId
+  const candidate = hostTabId ? peekByHost[hostTabId] ?? null : null
+  const peekTabId = hostTabId && candidate && state.tabs.some((tab) => tab.id === candidate && tab.tempReviewer?.hostTabId === hostTabId)
+    ? candidate
+    : null
+  return { hostTabId, peekTabId }
+}
+
 /**
  * `activeTabId` is keyboard focus; a linked pair stays visible for either focus. When `peekTabId` names a live
  * temporary reviewer belonging to `main`, it temporarily occupies the right split pane without mutating `sideParentTabId`,
@@ -261,7 +282,10 @@ export function visibleSessionTabs(
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
   if (active?.tempReviewer) {
     const host = state.tabs.find((tab) => tab.id === active.tempReviewer!.hostTabId) ?? null
-    if (host && peekTabId === active.id) return { main: host, side: active }
+    const peek = host && peekTabId
+      ? state.tabs.find((tab) => tab.id === peekTabId && tab.tempReviewer?.hostTabId === host.id) ?? null
+      : null
+    if (host && peek) return { main: host, side: peek }
     return { main: active, side: null }
   }
   const main = state.tabs.find((tab) => tab.id === active?.sideParentTabId) ?? active

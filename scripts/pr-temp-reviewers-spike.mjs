@@ -18,6 +18,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const { resolveAgentCli, agentCliHelp } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/agent-cli.js')).href)
 const { withCopilotPathAdditions } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/resolve-copilot.js')).href)
 const { reviewerEnvironment } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/pr-reviewer-sandbox.js')).href)
+const { prepareCodexReviewerHome, buildCodexReviewerLaunch } = await import(pathToFileURL(join(repoRoot, 'dist/src/main/pr-temp-reviewers.js')).href)
 
 const outIndex = process.argv.indexOf('--out')
 const baseDir = outIndex >= 0 && process.argv[outIndex + 1]
@@ -245,31 +246,30 @@ try {
   if (codexRes.version !== null) {
     const help = await agentCliHelp(codexRes)
     const hasSandbox = Boolean(help && help.includes('--sandbox') && help.includes('--ask-for-approval'))
-    const codexHome = join(baseDir, 'codex-home')
-    mkdirSync(codexHome, { recursive: true })
-    // Copy only auth.json if signed in so we don't mutate the user's real CODEX_HOME when testing project trust + permissive config:
     const realCodexHome = process.env.CODEX_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.codex')
-    if (existsSync(join(realCodexHome, 'auth.json'))) {
-      writeFileSync(join(codexHome, 'auth.json'), readFileSync(join(realCodexHome, 'auth.json')))
+    const codexHome = await prepareCodexReviewerHome({
+      areaHome: dummyHome,
+      realCodexHome,
+      checkoutPath: checkout,
+    })
+    const codexBuilt = buildCodexReviewerLaunch({
+      help,
+      mcpUrl: mcp.url,
+      bearerToken: tokens.codex,
+      codexHome,
+      prompt: 'unused-in-exec-probe',
+    })
+    const env = {
+      ...reviewerEnvironment(
+        withCopilotPathAdditions({
+          ...process.env,
+          GH_TOKEN: 'ghp_should_be_stripped',
+        }, codexRes.pathAdditions),
+        dummyHome,
+        emptyGhDir,
+      ),
+      ...codexBuilt.envAdditions,
     }
-    // Permissive user config.toml trying to set danger-full-access: CLI --sandbox read-only must win!
-    const escapedCwd = checkout.replaceAll('\\', '\\\\')
-    writeFileSync(join(codexHome, 'config.toml'), [
-      'sandbox_mode = "danger-full-access"',
-      `[projects."${escapedCwd}"]`,
-      'trust_level = "trusted"',
-      '',
-    ].join('\n'))
-    const env = reviewerEnvironment(
-      withCopilotPathAdditions({
-        ...process.env,
-        CODEX_HOME: codexHome,
-        GH_TOKEN: 'ghp_should_be_stripped',
-        COPILOT_DESKTOP_REVIEWER_TOKEN: tokens.codex,
-      }, codexRes.pathAdditions),
-      dummyHome,
-      emptyGhDir,
-    )
     delete env.COPILOT_HOME
 
     const mcpOverrides = [
@@ -277,6 +277,9 @@ try {
       '-c', 'mcp_servers.copilot-pr-reviewer.bearer_token_env_var="COPILOT_DESKTOP_REVIEWER_TOKEN"',
       '-c', 'mcp_servers.copilot-pr-reviewer.default_tools_approval_mode="approve"',
     ]
+    const mcpList = spawnSync(codexRes.command, [...codexRes.prefixArgs, ...mcpOverrides, 'mcp', 'list'], {
+      cwd: checkout, env, encoding: 'utf8', timeout: 15_000, windowsHide: true,
+    })
     const mcpGet = spawnSync(codexRes.command, [...codexRes.prefixArgs, ...mcpOverrides, 'mcp', 'get', 'copilot-pr-reviewer'], {
       cwd: checkout, env, encoding: 'utf8', timeout: 15_000, windowsHide: true,
     })
@@ -305,6 +308,7 @@ try {
       hasSandbox,
       mcpGetExit: mcpGet.status,
       mcpGetOut: (mcpGet.stdout ?? '').trim().slice(0, 300),
+      mcpListOut: (mcpList.stdout ?? '').trim(),
       exitCode: run.status,
       mcpCalls: codexCalls.map((c) => c.tool ?? c.rpcMethod),
       calledPrRead: codexCalls.some((c) => c.tool === 'pr_read'),
@@ -335,6 +339,7 @@ try {
     assert.equal(report.codex.calledPrRead, true, 'Codex must call pr_read via MCP')
     assert.equal(report.codex.calledPrReview, true, 'Codex must call pr_review via MCP')
     assert.equal(report.codex.wroteFile, false, 'Codex must not write files under --sandbox read-only')
+    assert.doesNotMatch(report.codex.mcpListOut, /copilot-meeting|node_repl|cua_repl/, 'Codex isolated CODEX_HOME must not load user MCP servers')
   }
 } finally {
   await mcp.close()

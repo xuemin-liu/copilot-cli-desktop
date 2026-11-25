@@ -93,7 +93,7 @@ export function ReviewerBar({ groups, activeTabId, peekTabId, onPeek, onError }:
             <ul className="reviewer-bar-seats" aria-label={`Reviewer seats for PR #${group.prNumber}`}>
               {group.seats.map((seat) => {
                 const peeking = seat.tabId !== null && peekTabId === seat.tabId
-                const canPeek = seat.tabId !== null && activeTabId === group.hostTabId
+                const canPeek = seat.tabId !== null
                 const canRecover = !ended && (seat.verdict === 'failed' || seat.verdict === 'stopped')
                 return (
                   <li

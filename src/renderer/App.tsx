@@ -14,7 +14,7 @@ import { readToolDockPreferences } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { ReviewerBar } from './components/ReviewerBar.js'
-import { regularTabCount } from '../main/session-tab-machine.js'
+import { regularTabCount, resolvePeekHostAndTab } from '../main/session-tab-machine.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -84,10 +84,18 @@ export function App(): JSX.Element {
   const [peekReviewerByHost, setPeekReviewerByHost] = useState<Readonly<Record<string, string | null>>>({})
   const openRegularTabCount = regularTabCount(state)
   const canOpenTab = canOpenSessionTab(state.resolution, openRegularTabCount, state.maxSessionTabs)
-  const rawPeekTabId = state.activeTabId ? peekReviewerByHost[state.activeTabId] ?? null : null
-  const activePeekTabId = rawPeekTabId && state.tabs.some((tab) => tab.id === rawPeekTabId && tab.tempReviewer?.hostTabId === state.activeTabId)
-    ? rawPeekTabId
-    : null
+  const { hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost)
+  const updatePeekReviewer = useCallback((nextPeekTabId: string | null): void => {
+    if (!peekHostTabId) return
+    setPeekReviewerByHost((prev) => ({ ...prev, [peekHostTabId]: nextPeekTabId }))
+    const activeTabObj = state.tabs.find((tab) => tab.id === state.activeTabId)
+    if (activeTabObj?.tempReviewer?.hostTabId === peekHostTabId) {
+      const targetTabId = nextPeekTabId ?? peekHostTabId
+      if (targetTabId !== state.activeTabId) {
+        void window.copilotDesktop.activateTab(targetTabId).catch((error: unknown) => setOperationError(errorMessage(error)))
+      }
+    }
+  }, [peekHostTabId, state.activeTabId, state.tabs])
   const newSessionProfile = inputDialog?.kind === 'new-session'
     ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
     : null
@@ -512,22 +520,14 @@ export function App(): JSX.Element {
             groups={state.tempReviewerGroups ?? []}
             activeTabId={state.activeTabId}
             peekTabId={activePeekTabId}
-            onPeek={(tabId) => {
-              const hostId = state.activeTabId
-              if (!hostId) return
-              setPeekReviewerByHost((prev) => ({ ...prev, [hostId]: tabId }))
-            }}
+            onPeek={updatePeekReviewer}
             onError={setOperationError}
           />
           <ToolPanelWorkspace desktop={state} tools={tools} act={actOnTools}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             peekTabId={activePeekTabId}
-            onClearPeek={() => {
-              const hostId = state.activeTabId
-              if (!hostId) return
-              setPeekReviewerByHost((prev) => ({ ...prev, [hostId]: null }))
-            }}
+            onClearPeek={() => updatePeekReviewer(null)}
             toolsControl={<button type="button" className="session-tools-toggle" aria-label={panelButtonLabel(projectPanel)} aria-expanded={dockOpen}
               onClick={() => {
                 if (!state.activeProfileId) return

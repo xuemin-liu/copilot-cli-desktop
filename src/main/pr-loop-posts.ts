@@ -40,13 +40,16 @@ export interface PostReceipt {
   checks?: PostChecks
   /** For temporary reviewer seats: binds the receipt to a specific seat launch generation. */
   seatGeneration?: string
+  /** For temporary reviewer seats: binds an approval to the material PR feedback signature assessed by the reviewer. */
+  feedbackSignature?: string
 }
 export interface ReviewComment { path: string; line: number; body: string }
 export interface ReviewRequest { body: string; comments: ReviewComment[]; approve: boolean
   /** Set by the desktop, never by the reviewer: this comment stands in for an approval held for missing checks. */
   heldApproval?: boolean
   checks?: PostChecks
-  seatGeneration?: string }
+  seatGeneration?: string
+  feedbackSignature?: string }
 export interface PostHost { api: GithubApi; write: GithubWrite; now?: () => number }
 export interface ReplyRequest { to: string; body: string }
 
@@ -250,7 +253,8 @@ export class PrLoopPosts {
         kind: request.approve ? 'approval' : 'review', target: null, bodyHash: '', state: 'intent', githubId: null, url: null, createdAt: this.now(), head, base,
         ...(!request.approve && request.heldApproval === true && !comments.length ? { heldApproval: true } : {}),
         ...(request.checks ? { checks: { ran: [...request.checks.ran], missing: [...request.checks.missing] } } : {}),
-        ...(request.seatGeneration ? { seatGeneration: request.seatGeneration } : {}) }
+        ...(request.seatGeneration ? { seatGeneration: request.seatGeneration } : {}),
+        ...(request.feedbackSignature ? { feedbackSignature: request.feedbackSignature } : {}) }
       const posted = `${body}\n\n${receiptTag(receipt.id)}`
       receipt.bodyHash = sha256(posted)
       this.save(receipt)

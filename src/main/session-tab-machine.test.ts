@@ -10,7 +10,9 @@ import {
   closeTab,
   createBackgroundTab,
   createTab as createTabState,
+  fanOutAvailableSlots,
   renameTab,
+  resolvePeekHostAndTab,
   setTabLaunchConfig,
   setTabProcessId,
   setTabSessionId,
@@ -262,4 +264,30 @@ test('visibleSessionTabs supports non-destructive peekTabId without clobbering a
     { main: visibleSessionTabs(afterRevGone, 'rev-codex').main?.id, side: visibleSessionTabs(afterRevGone, 'rev-codex').side?.id },
     { main: 'host', side: 'side' },
   )
+
+  // Moving focus into the peeked reviewer terminal keeps peek anchored to its host (host + rev-codex):
+  const focusedReviewer = activateTab(state, 'rev-codex')
+  const peekMap = { host: 'rev-codex' }
+  const resolved = resolvePeekHostAndTab(focusedReviewer, peekMap)
+  assert.deepEqual(resolved, { hostTabId: 'host', peekTabId: 'rev-codex' })
+  assert.deepEqual(
+    { main: visibleSessionTabs(focusedReviewer, resolved.peekTabId).main?.id, side: visibleSessionTabs(focusedReviewer, resolved.peekTabId).side?.id },
+    { main: 'host', side: 'rev-codex' },
+  )
+})
+
+test('fanOutAvailableSlots ignores hidden temporary reviewer tabs when computing available regular tab slots', () => {
+  let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Host', workspaceProfileId: 'ws-1' }, 3)
+  state = createBackgroundTab(state, {
+    id: 'rev-1',
+    title: 'Review #12 · Claude Code',
+    cli: 'claude',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: { groupId: 'g-1', hostTabId: 'host', cli: 'claude', repository: 'o/r', prNumber: 12, prUrl: 'https://github.com/o/r/pull/12' },
+  })
+  assert.equal(fanOutAvailableSlots(state, 3), 2, '1 regular host + 1 hidden reviewer under cap 3 leaves 2 fan-out slots')
 })

@@ -117,6 +117,13 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
   )
   assert.match(readyHtml, /Approve anyway/)
 
+  // When focus moves into the peeked reviewer terminal (activeTabId === 'tab-2'), Hide and Peek remain available:
+  const focusedOnReviewerHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[readyGroup]} activeTabId="tab-2" peekTabId="tab-2" onPeek={() => {}} onError={() => {}} />,
+  )
+  assert.match(focusedOnReviewerHtml, /Hide/)
+  assert.match(focusedOnReviewerHtml, /Peek/)
+
   const unrelatedHtml = renderToStaticMarkup(
     <ReviewerBar groups={[readyGroup]} activeTabId="tab-99" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
   )

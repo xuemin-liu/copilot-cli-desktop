@@ -152,8 +152,11 @@ import {
   buildCodexReviewerLaunch,
   buildReviewerBrief,
   hostAuthorGrantTarget,
+  materialFeedbackSignature,
+  prepareCodexReviewerHome,
   prFeedbackSignature,
   prReviewAndFixRequest,
+  readReviewerDiffPage,
   reviewerPromptLine,
   seatGrantTarget,
   TempReviewerRegistry,
@@ -218,6 +221,7 @@ import {
   closeTab,
   createBackgroundTab,
   createTab,
+  fanOutAvailableSlots,
   regularTabCount,
   renameTab,
   setTabLaunchConfig,
@@ -2068,7 +2072,8 @@ let fanOutRunning = false
 async function fanOutSessions(profile: WorkspaceProfile, label: string, count: number): Promise<FanOutResult> {
   if (fanOutRunning) throw new Error('A fan-out is already starting sessions; wait for it to finish')
   if (!Number.isInteger(count) || count < 2 || count > FAN_OUT_MAX) throw new Error(`Fan out into 2 to ${FAN_OUT_MAX} sessions`)
-  if (desktopConfig.maxSessionTabs - tabsState.tabs.length < count) throw new Error(`Only ${Math.max(0, desktopConfig.maxSessionTabs - tabsState.tabs.length)} more session tabs can be open`)
+  const availableSlots = fanOutAvailableSlots(tabsState, desktopConfig.maxSessionTabs)
+  if (availableSlots < count) throw new Error(`Only ${availableSlots} more session tabs can be open`)
   if (!copilotCapabilities.supportedOptions.includes('--worktree')) throw new Error('This Copilot CLI version does not support worktrees, which a fan-out needs; update it from Settings')
   fanOutRunning = true
   const tabIds: string[] = []
@@ -3572,7 +3577,7 @@ async function refreshTempGroupFromGithub(group: TempReviewerGroup, force = fals
     const api = await githubCliApi(app.getPath('userData'))
     const fresh = await readGithubPull(api, group.repository, group.prNumber, { checks: false })
     state.at = Date.now()
-    const applied = tempReviewers.applySnapshot(group.id, fresh)
+    const applied = tempReviewers.applySnapshot(group.id, fresh, tempReviewerReceiptReader())
     if (applied.ended) {
       await teardownTempReviewerSeats([...group.requiredSeats.values()])
     }
@@ -3623,28 +3628,11 @@ async function readTempSeatDiff(seat: TempReviewerSeat, relPath?: string, offset
   if (!runner || !seat.area || !seat.checkedOut || !seat.checkedOutBase) {
     return { ok: false, text: 'Reviewer checkout diff is unavailable.' }
   }
-  if (relPath !== undefined) {
-    const clean = relPath.trim().replaceAll('\\', '/')
-    if (!clean || clean.startsWith('/') || clean.startsWith('-') || clean.split('/').includes('..')) {
-      return { ok: false, text: 'Invalid repository-relative path.' }
-    }
-  }
-  const args = [
-    '--git-dir', seat.area.gitdir,
-    '--work-tree', seat.area.checkout,
-    'diff', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/',
-    `${seat.checkedOutBase}...${seat.checkedOut}`,
-    ...(relPath ? ['--', relPath.trim().replaceAll('\\', '/')] : []),
-  ]
-  const res = await runner.run({ cwd: seat.area.root, args, kind: 'read', disableHooks: true, timeoutMs: 60_000, maxStdoutBytes: 4 * 1024 * 1024 }).catch(() => null)
-  if (!res || res.exitCode !== 0) return { ok: false, text: 'Git diff failed in reviewer checkout.' }
-  const full = res.stdout.toString('utf8')
-  const slice = full.slice(offset, offset + PR_REVIEWER_PAGE_CHARS)
-  const nextOffset = offset + PR_REVIEWER_PAGE_CHARS < full.length ? offset + PR_REVIEWER_PAGE_CHARS : null
-  return {
-    ok: true,
-    text: JSON.stringify({ head: seat.checkedOut, base: seat.checkedOutBase, totalChars: full.length, offset, nextOffset, diff: slice }),
-  }
+  return readReviewerDiffPage(runner, seat.area, seat.checkedOutBase, seat.checkedOut, {
+    ...(relPath !== undefined ? { path: relPath } : {}),
+    offset,
+    pageChars: PR_REVIEWER_PAGE_CHARS,
+  })
 }
 
 async function readTempSeatFile(seat: TempReviewerSeat, relPath: string, offset = 0): Promise<{ ok: boolean; text: string }> {
@@ -3668,11 +3656,16 @@ async function submitTempSeatReview(
   callerSessionId: string,
   fields: { body: string; approve: boolean; comments: Array<{ path: string; line: number; body: string }>; checks?: { ran: string[]; missing: string[] } },
 ): Promise<{ ok: boolean; text: string }> {
-  if (group.stage !== 'active' || (seat.lifecycle !== 'running' && seat.lifecycle !== 'starting')) {
+  const isGroupLive = (): boolean => group.stage !== 'ended' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting')
+  if (!isGroupLive()) {
     return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
   }
   const posts = await ensurePrLoopPosts().catch(() => null)
   if (!posts) return { ok: false, text: prPostsError ?? 'PR loops are unavailable.' }
+  await refreshTempGroupFromGithub(group, true).catch(() => null)
+  if (!isGroupLive()) {
+    return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
+  }
   const list = (value: unknown): string[] | null =>
     Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && item.trim() && item.length <= 200)
       ? value.map((item) => (item as string).trim())
@@ -3699,6 +3692,7 @@ async function submitTempSeatReview(
     return { ok: false, text: 'Reviewer checkout has local changes or is no longer at the prepared head.' }
   }
   const target = seatGrantTarget(group, seat, callerSessionId)
+  const assessedFeedbackSignature = group.materialFeedbackSignature
   try {
     const held = fields.approve && !approve
     const receipt = await posts.review(
@@ -3711,10 +3705,12 @@ async function submitTempSeatReview(
         heldApproval: held,
         ...(normalizedChecks ? { checks: normalizedChecks } : {}),
         seatGeneration: seat.generation,
+        feedbackSignature: assessedFeedbackSignature,
       },
       () => {},
-      () => group.stage === 'active' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting'),
+      isGroupLive,
     )
+    seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
     tempReviewers.wakeAll()
     broadcastState()
     if (held) {
@@ -3735,7 +3731,8 @@ async function submitTempSeatReply(
   to: string,
   text: string,
 ): Promise<{ ok: boolean; text: string }> {
-  if (group.stage !== 'active' || (seat.lifecycle !== 'running' && seat.lifecycle !== 'starting')) {
+  const isGroupLive = (): boolean => group.stage !== 'ended' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting')
+  if (!isGroupLive()) {
     return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
   }
   const posts = await ensurePrLoopPosts().catch(() => null)
@@ -3746,7 +3743,7 @@ async function submitTempSeatReply(
       target,
       callerSessionId,
       { to, body: text },
-      () => group.stage === 'active' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting'),
+      isGroupLive,
     )
     tempReviewers.wakeAll()
     broadcastState()
@@ -3778,6 +3775,7 @@ async function waitTempReviewerSeat(
       group.head !== seat.lastSeenHead
       || group.base !== seat.lastSeenBase
       || group.authorReplySignature !== seat.lastSeenAuthorReplies
+      || group.materialFeedbackSignature !== seat.lastSeenMaterialFeedback
     ) {
       const runner = await meetingGitRunner()
       if (!runner || !seat.area) return { ok: false, text: 'Reviewer checkout is unavailable.' }
@@ -3789,6 +3787,7 @@ async function waitTempReviewerSeat(
         seat.lastSeenHead = head
         seat.lastSeenBase = group.base
         seat.lastSeenAuthorReplies = group.authorReplySignature
+        seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
         const helperCmd = process.platform === 'win32'
           ? 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
           : 'sh "$COPILOT_DESKTOP_MEETING_HELPER"'
@@ -4016,12 +4015,18 @@ async function launchTempReviewerSeat(
         ...(model ? { model } : {}),
       }).args
     } else {
+      const realCodexHome = process.env.CODEX_HOME || join(app.getPath('home'), '.codex')
+      const codexHome = await prepareCodexReviewerHome({
+        areaHome: area.home,
+        realCodexHome,
+        checkoutPath: area.checkout,
+      })
       const codexLaunch = buildCodexReviewerLaunch({
         help,
         mcpUrl,
         bearerToken: seat.bearerToken,
+        codexHome,
         prompt,
-        checkoutPath: area.checkout,
         ...(model ? { model } : {}),
       })
       cliArgs = codexLaunch.args
@@ -4229,10 +4234,6 @@ async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: stri
   }
 
   const clis = profile.reviewerClis ?? desktopConfig.reviewerClis
-  if (!await askTempReviewerConsent(repository, prNumber, clis, Boolean(tab.cli))) {
-    return { ok: false, message: 'Temporary PR reviewers were cancelled by the user.' }
-  }
-  await ensurePrLoopPosts()
   const prUrl = `https://github.com/${repository}/pull/${prNumber}`
   let group: TempReviewerGroup
   try {
@@ -4248,6 +4249,7 @@ async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: stri
       head: snapshotData.head,
       base: snapshotData.base,
       feedbackSignature: prFeedbackSignature(snapshotData, DEFAULT_PR_MARKER),
+      materialFeedbackSignature: materialFeedbackSignature(snapshotData, new Set(), DEFAULT_PR_MARKER),
       authorReplySignature: authorReplySignature(snapshotData, DEFAULT_PR_MARKER),
       clis,
       origin,
@@ -4257,20 +4259,46 @@ async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: stri
   }
   tempGroupSnapshots.set(group.id, { at: Date.now() })
   broadcastState()
-  for (const seat of group.requiredSeats.values()) {
-    if (group.stage === 'ended') break
+
+  // Run interactive consent and sequential CLI startup asynchronously so `pr-reviewers -Action start` returns
+  // promptly (`stage: "starting"`) without timing out if the user takes >30s on the consent dialog or prompt startup.
+  const nonCopilotHost = Boolean(tab.cli)
+  void (async () => {
+    const isEnded = (): boolean => group.stage === 'ended'
     try {
-      await launchTempReviewerSeat(group, seat, profile, snapshotData)
+      const approved = await askTempReviewerConsent(repository!, prNumber!, clis, nonCopilotHost)
+      if (!approved) {
+        if (!isEnded()) {
+          const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
+          await teardownTempReviewerSeats(seats)
+          broadcastState()
+        }
+        return
+      }
+      await ensurePrLoopPosts()
+      for (const seat of group.requiredSeats.values()) {
+        if (isEnded()) break
+        try {
+          await launchTempReviewerSeat(group, seat, profile, snapshotData)
+        } catch (error) {
+          tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
+          broadcastState()
+        }
+      }
+      if (group.stage === 'starting') {
+        group.stage = 'active'
+        tempReviewers.wakeAll()
+        broadcastState()
+      }
     } catch (error) {
-      tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
-      broadcastState()
+      if (!isEnded()) {
+        const seats = tempReviewers.endGroup(group.id, 'stopped', error instanceof Error ? error.message : 'Temporary PR reviewers failed to start.')
+        await teardownTempReviewerSeats(seats)
+        broadcastState()
+      }
     }
-  }
-  if (group.stage === 'starting') {
-    group.stage = 'active'
-    tempReviewers.wakeAll()
-    broadcastState()
-  }
+  })()
+
   return { ok: true, message: tempGroupStatusPayload(group) }
 }
 
@@ -4552,7 +4580,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
             }
           }
           const group = tempSeat ? tempSeat.group : tempHost!
-          if (group.stage !== 'active') return { ok: false, message: 'This temporary review group is no longer active.' }
+          if (group.stage === 'ended') return { ok: false, message: 'This temporary review group is no longer active.' }
           try {
             return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), group.repository, group.prNumber, request.page) }
           } catch {
@@ -4668,7 +4696,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           if (!posts) return { ok: false, message: prPostsError ?? 'PR loops are not running in the desktop.' }
           try {
             const target = hostAuthorGrantTarget(tempHost, callerId)
-            const receipt = await posts.reply(target, callerId, { to: request.to ?? '', body: request.text }, () => tempHost.stage === 'active')
+            const receipt = await posts.reply(target, callerId, { to: request.to ?? '', body: request.text }, () => tempHost.stage !== 'ended')
             await refreshTempGroupFromGithub(tempHost, true).catch(() => null)
             tempReviewers.wakeAll()
             broadcastState()
@@ -7025,7 +7053,7 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     await cleanupTempReviewerSeat(previous)
     const api = await githubCliApi(app.getPath('userData'))
     const freshSnapshot = await readGithubPull(api, group.repository, group.prNumber, { checks: false })
-    const applied = tempReviewers.applySnapshot(groupId, freshSnapshot)
+    const applied = tempReviewers.applySnapshot(groupId, freshSnapshot, tempReviewerReceiptReader())
     if (applied.ended) {
       await teardownTempReviewerSeats([...group.requiredSeats.values()])
       broadcastState()
