@@ -321,14 +321,19 @@ export class CheckpointStore {
     }
     if (candidates.size > this.limits.maxPaths) throw new CheckpointRefused(`This folder has more than ${this.limits.maxPaths.toLocaleString('en-US')} files to snapshot`)
 
-    // A folder that is a link or a junction: Git would walk through it and read files outside the repository.
-    const folders = new Map<string, Promise<boolean>>()
-    const plainFolder = (relative: string): Promise<boolean> => {
-      if (relative === '') return Promise.resolve(true)
+    // A folder that is a link or a junction: Git would walk through it and read files outside the repository. A
+    // folder that is simply gone is another matter: what was in it was deleted, and is absent from the snapshot.
+    type FolderState = 'plain' | 'gone' | 'unsafe'
+    const folders = new Map<string, Promise<FolderState>>()
+    const folderState = (relative: string): Promise<FolderState> => {
+      if (relative === '') return Promise.resolve('plain')
       let known = folders.get(relative)
       if (!known) {
-        const above = plainFolder(relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '')
-        known = above.then(async fine => fine && await lstat(hostPath.join(worktreeRoot, ...relative.split('/'))).then(entry => entry.isDirectory() && !entry.isSymbolicLink(), () => false))
+        const above = folderState(relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '')
+        known = above.then(async (parent): Promise<FolderState> => parent !== 'plain' ? parent : lstat(hostPath.join(worktreeRoot, ...relative.split('/'))).then(
+          (entry): FolderState => entry.isDirectory() && !entry.isSymbolicLink() ? 'plain' : 'unsafe',
+          // Only a confirmed absence counts as gone; a folder that cannot be read is not walked.
+          (error: NodeJS.ErrnoException): FolderState => error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? 'gone' : 'unsafe'))
         folders.set(relative, known)
       }
       return known
@@ -341,10 +346,14 @@ export class CheckpointStore {
       await Promise.all(list.slice(start, start + 64).map(async path => {
         const segments = safeRepoSegments(path)
         if (!segments || segments.some(segment => segment.toLowerCase() === '.git')) { notCaptured.push(path); return }
-        if (!(await plainFolder(segments.slice(0, -1).join('/')))) { notCaptured.push(path); return }
-        const entry = await lstat(hostPath.join(worktreeRoot, ...segments)).catch(() => null)
+        const folder = await folderState(segments.slice(0, -1).join('/'))
+        // Its folder was deleted with it: absent from the snapshot, like any deleted file.
+        if (folder === 'gone') return
+        if (folder === 'unsafe') { notCaptured.push(path); return }
+        const entry = await lstat(hostPath.join(worktreeRoot, ...segments)).then(found => found, (error: NodeJS.ErrnoException) => error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? null : 'unreadable' as const)
         // Gone from disk: a deleted file is simply absent from the snapshot.
         if (!entry) return
+        if (entry === 'unreadable') { notCaptured.push(path); return }
         if (!entry.isFile() || entry.size > this.limits.maxFileBytes) { notCaptured.push(path); return }
         totalBytes += entry.size
         paths.push(path)

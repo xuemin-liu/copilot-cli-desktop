@@ -542,3 +542,50 @@ test('a patch is read only up to what is shown', async (t) => {
   assert.equal(read.length, 1)
   assert.ok(read[0]! <= 512 * 1024 + 64 * 1024, `Git was stopped near the cap (read ${read[0]} bytes of a 3.8 MB patch)`)
 })
+
+test('a tracked folder that is removed or renamed during a turn shows as deleted files, not as left out', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('folders', (directory) => {
+    for (const folder of ['nested', join('deep', 'er'), 'renamed-from']) mkdirSync(join(directory, folder), { recursive: true })
+    writeFileSync(join(directory, 'nested', 'file.txt'), 'in a folder\n')
+    writeFileSync(join(directory, 'deep', 'er', 'file.txt'), 'two levels down\n')
+    writeFileSync(join(directory, 'renamed-from', 'file.txt'), 'moves\n')
+    fixture.plain(directory, 'add', '.')
+    fixture.plain(directory, 'commit', '-q', '-m', 'folders')
+  })
+  const turn = await store.beginTurn(repo, 's', 'remove folders')
+  await store.capture(repo, 's', turn, 'before')
+  // Removed without staging: the project's Git still lists the paths, and nothing is on disk.
+  rmSync(join(repo, 'nested'), { recursive: true })
+  rmSync(join(repo, 'deep'), { recursive: true })
+  renameSync(join(repo, 'renamed-from'), join(repo, 'renamed-to'))
+  assert.match(fixture.plain(repo, 'status', '--porcelain=v1'), / D nested\/file\.txt/)
+  const after = await store.capture(repo, 's', turn, 'after')
+  assert.equal(after!.notCaptured, 0, 'a deleted folder leaves nothing out')
+
+  const files = await store.turnFiles(repo, 's', turn)
+  assert.equal(files.uncertain, false)
+  assert.deepEqual(files.files, [
+    { path: 'deep/er/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'nested/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'renamed-from/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'renamed-to/file.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+  ])
+  const patch = await store.turnDiff(repo, 's', turn, 'nested/file.txt')
+  assert.equal(patch.leftOut, false)
+  assert.match(patch.text, /deleted file mode/)
+
+  // A folder replaced by a link is still not walked, and its files are left out, not called deleted.
+  const outside = join(fixture.root, 'elsewhere')
+  mkdirSync(outside)
+  writeFileSync(join(outside, 'file.txt'), 'outside the repository\n')
+  const next = await store.beginTurn(repo, 's', 'swap a folder for a link')
+  await store.capture(repo, 's', next, 'before')
+  rmSync(join(repo, 'renamed-to'), { recursive: true })
+  folderLink(join(repo, 'renamed-to'), outside)
+  const linked = await store.capture(repo, 's', next, 'after')
+  assert.ok(linked!.notCapturedSample.includes('renamed-to/file.txt'))
+  assert.deepEqual((await store.turnFiles(repo, 's', next)).files, [{ path: 'renamed-to/file.txt', added: null, deleted: null, binary: false, leftOut: true }])
+})
