@@ -983,13 +983,16 @@ async function sweepReviewerAreas():Promise<void>{
   try{
     for(const record of store.list()){
       // A kept worktree is the person's until they remove it; then its ref and folder go, and the PR can be reviewed again.
-      if(reviewLaunches.has(record.launchId)||(record.kept&&existsSync(record.checkout)))continue
+      // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
+      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&existsSync(record.checkout)))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
       const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&sameRealPath(session.sessionCwd,record.checkout))
       if(open)continue
-      await recoverSweptReviewerCredentials(record, store)
+      const credOutcome = await recoverSweptReviewerCredentials(record, store)
+      if (credOutcome === 'retry-sync') continue
+      if (record.kept && existsSync(record.checkout)) continue
       const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(outcome==='removed')await store.release(record.launchId)
@@ -2181,11 +2184,13 @@ function wireSessionEvents(id: string, session: PtySession): void {
       else if (status === 'running') { tempSeat.seat.needsAttention = false }
       else if (!shuttingDown() && (status === 'crashed' || status === 'completed') && (tempSeat.seat.lifecycle === 'starting' || tempSeat.seat.lifecycle === 'running')) {
         const sync = tempSeat.seat.codexAuthSync
-        tempSeat.seat.codexAuthSync = null
         tempReviewers.revokeSeat(tempSeat.seat, status === 'crashed' ? 'failed' : 'stopped',
           status === 'crashed' ? 'Reviewer session exited unexpectedly.' : 'Reviewer session ended; retry if another review round is needed.')
-        void cleanupReviewerSeatCredentials(tempSeat.seat.area, sync).then(() => {
-          if (tempSeat.seat.launchId) return reviewReservations()?.setCodexAuthSync(tempSeat.seat.launchId, null)
+        void cleanupReviewerSeatCredentials(tempSeat.seat.area, sync).then((credOutcome) => {
+          if (credOutcome === 'clean') {
+            if (tempSeat.seat.codexAuthSync === sync) tempSeat.seat.codexAuthSync = null
+            if (tempSeat.seat.launchId) return reviewReservations()?.setCodexAuthSync(tempSeat.seat.launchId, null)
+          }
         }).catch(() => {})
       }
     }
@@ -3613,11 +3618,17 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
   }
   const area = seat.area
   const authSync = seat.codexAuthSync
-  seat.codexAuthSync = null
   const store = reviewReservations()
-  await cleanupReviewerSeatCredentials(area, authSync)
-  if (seat.launchId) await store?.setCodexAuthSync(seat.launchId, null).catch(() => {})
+  const credOutcome = await cleanupReviewerSeatCredentials(area, authSync)
+  if (credOutcome === 'clean') {
+    seat.codexAuthSync = null
+    if (seat.launchId) await store?.setCodexAuthSync(seat.launchId, null).catch(() => {})
+  }
   if (!area) return
+  if (credOutcome === 'retry-sync') {
+    // Keep the reviewer area on disk without marking `kept: true` so `sweepReviewerAreas` retries syncing and removing it.
+    return
+  }
   const runner = await meetingGitRunner().catch(() => null)
   const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
   if (outcome === 'removed') {
@@ -4127,13 +4138,17 @@ async function launchTempReviewerSeat(
       await managedTabs.get(tabId)?.session.stop().catch(() => {})
     }
     const sync = seat.codexAuthSync
-    seat.codexAuthSync = null
-    await cleanupReviewerSeatCredentials(area, sync)
-    await store.setCodexAuthSync(launchId, null).catch(() => {})
-    if (!tabId) {
-      const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
-      if (outcome === 'removed') await store.release(launchId).catch(() => {})
-      else await store.keep(launchId).catch(() => {})
+    const credOutcome = await cleanupReviewerSeatCredentials(area, sync)
+    if (credOutcome === 'clean') {
+      seat.codexAuthSync = null
+      await store.setCodexAuthSync(launchId, null).catch(() => {})
+      if (!tabId) {
+        const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
+        if (outcome === 'removed') await store.release(launchId).catch(() => {})
+        else await store.keep(launchId).catch(() => {})
+        seat.area = null
+      }
+    } else if (!tabId) {
       seat.area = null
     }
     throw error
@@ -5108,12 +5123,14 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
         if (seat && seat.tabId === tabId) {
           seat.tabId = null
           const sync = seat.codexAuthSync
-          seat.codexAuthSync = null
           if (seat.lifecycle === 'starting' || seat.lifecycle === 'running') {
             tempReviewers.revokeSeat(seat, 'stopped', 'Reviewer tab was closed.')
           }
-          await cleanupReviewerSeatCredentials(seat.area, sync)
-          if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
+          const credOutcome = await cleanupReviewerSeatCredentials(seat.area, sync)
+          if (credOutcome === 'clean') {
+            seat.codexAuthSync = null
+            if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
+          }
         }
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)

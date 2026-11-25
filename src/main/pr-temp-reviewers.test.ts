@@ -611,6 +611,58 @@ test('quitting Desktop or recovering after a crash preserves a rotated Codex sig
     assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedBeforeCrash, 'crash recovery syncs rotated token before deleting seat home')
     assert.equal(existsSync(join(crashCodexHome, 'auth.json')), false, 'crash recovery deletes seat credential')
     assert.equal(restartedReservations.list().find((r) => r.launchId === launchIdCrash)?.codexAuthSync, undefined)
+
+    // 3. I/O failure while saving rotated credential keeps recovery pending (retains copy + reservation) until retry succeeds:
+    const areaIoFail = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    const launchIdIo = resolve(areaIoFail.root).split(/[\\/]/).at(-1)!
+    mkdirSync(areaIoFail.checkout, { recursive: true })
+    await restartedReservations.reserve({
+      launchId: launchIdIo,
+      repository: 'owner/repo',
+      number: 79,
+      reviewer: '42:temp:codex-io',
+      project: join(dir, 'project'),
+      root: areaIoFail.root,
+      checkout: areaIoFail.checkout,
+      ref: areaIoFail.ref,
+    })
+    const { codexHome: ioCodexHome, authSync: ioAuthSync } = await prepareCodexReviewerHome({
+      areaHome: areaIoFail.home,
+      realCodexHome: fakeRealCodex,
+      checkoutPath: areaIoFail.checkout,
+    })
+    writeFileSync(join(areaIoFail.helper, 'claude-reviewer-mcp.json'), '{"secret":"tok"}')
+    assert.ok(ioAuthSync)
+    await restartedReservations.setCodexAuthSync(launchIdIo, ioAuthSync)
+
+    const rotatedRetryToken = JSON.stringify({ tokens: { refresh_token: 'rt_v4_retry', access_token: 'at_v4_retry' } })
+    writeFileSync(join(ioCodexHome, 'auth.json'), rotatedRetryToken)
+
+    // First recovery attempt fails with a transient write error (e.g. ENOSPC / EBUSY):
+    const recordAttempt1 = restartedReservations.list().find((r) => r.launchId === launchIdIo)!
+    const firstAttempt = await recoverSweptReviewerCredentials(recordAttempt1, restartedReservations, {
+      writeRealAuth: async () => {
+        const err = new Error('Simulated file lock / disk full') as NodeJS.ErrnoException
+        err.code = 'EBUSY'
+        throw err
+      },
+    })
+    assert.equal(firstAttempt, 'retry-sync', 'failed write reports retryable outcome')
+    assert.equal(existsSync(join(ioCodexHome, 'auth.json')), true, 'rotated seat copy retained for retry')
+    assert.equal(existsSync(join(ioCodexHome, 'config.toml')), false, 'non-auth config removed')
+    assert.equal(existsSync(areaIoFail.helper), false, 'helper secrets still removed')
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedBeforeCrash, 'real auth untouched during failed write')
+    assert.ok(restartedReservations.list().find((r) => r.launchId === launchIdIo)?.codexAuthSync, 'reservation keeps codexAuthSync pending')
+
+    // Second recovery attempt (next sweep / restart) succeeds, syncs rotated token, deletes copy, and clears reservation:
+    const reopenedReservations = new ReviewReservations(reservationsFile)
+    const recordAttempt2 = reopenedReservations.list().find((r) => r.launchId === launchIdIo)!
+    assert.ok(recordAttempt2.codexAuthSync, 'pending codexAuthSync survives across restart')
+    const secondAttempt = await recoverSweptReviewerCredentials(recordAttempt2, reopenedReservations)
+    assert.equal(secondAttempt, 'clean')
+    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedRetryToken, 'retry saves rotated token')
+    assert.equal(existsSync(join(ioCodexHome, 'auth.json')), false, 'seat copy deleted once sync succeeds')
+    assert.equal(reopenedReservations.list().find((r) => r.launchId === launchIdIo)?.codexAuthSync, undefined, 'codexAuthSync cleared after successful retry')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

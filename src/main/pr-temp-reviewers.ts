@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { helpListsFlag } from './agent-cli-settings.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -281,21 +281,47 @@ export async function prepareCodexReviewerHome(options: {
   return { codexHome, authSync }
 }
 
+export type CredentialCleanupOutcome = 'clean' | 'retry-sync'
+
+export interface CredentialCleanupOptions {
+  writeRealAuth?: (path: string, content: string) => Promise<void>
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
+}
+
 /**
  * Syncs a single-use OAuth refresh rotation from the seat's isolated `CODEX_HOME/auth.json` back to the user's real
  * `~/.codex/auth.json` (only if the seat copy is a valid regular JSON object file that changed AND the user's real file
- * is still byte-identical to what was copied), then unconditionally removes the seat's credential/home/helper folders
- * even when `removeReviewerArea` preserves `area.checkout`.
+ * is still byte-identical to what was copied), then removes the seat's credential/home/helper folders even when
+ * `removeReviewerArea` preserves `area.checkout`.
+ *
+ * If writing the rotated credential fails due to an I/O error (e.g. disk full or file lock), returns `'retry-sync'` and
+ * retains ONLY `seatAuthPath` with `0o600` permissions so shutdown/sweep callers keep the reservation pending for retry.
  */
 export async function cleanupReviewerSeatCredentials(
   area: Pick<ReviewerArea, 'home' | 'helper' | 'github'> | null | undefined,
   authSync: CodexAuthSync | null = null,
-): Promise<void> {
+  options: CredentialCleanupOptions = {},
+): Promise<CredentialCleanupOutcome> {
+  const writeRealAuth = options.writeRealAuth ?? writeFileAtomic
+  let retainSeatAuth = false
   try {
     if (authSync) {
-      const seatInfo = await lstat(authSync.seatAuthPath).catch(() => null)
+      let seatInfo: Awaited<ReturnType<typeof lstat>> | null = null
+      try {
+        seatInfo = await lstat(authSync.seatAuthPath)
+      } catch (error) {
+        if (!isMissingFileError(error)) retainSeatAuth = true
+      }
       if (seatInfo?.isFile() && seatInfo.size > 0 && seatInfo.size <= 65_536) {
-        const seatBytes = await readFile(authSync.seatAuthPath).catch(() => null)
+        let seatBytes: Buffer | null = null
+        try {
+          seatBytes = await readFile(authSync.seatAuthPath)
+        } catch (error) {
+          if (!isMissingFileError(error)) retainSeatAuth = true
+        }
         if (seatBytes && sha256Buffer(seatBytes) !== authSync.initialSha256) {
           let validJsonObject = false
           try {
@@ -305,12 +331,26 @@ export async function cleanupReviewerSeatCredentials(
             validJsonObject = false
           }
           if (validJsonObject) {
-            const realInfo = await lstat(authSync.realAuthPath).catch(() => null)
+            let realInfo: Awaited<ReturnType<typeof lstat>> | null = null
+            try {
+              realInfo = await lstat(authSync.realAuthPath)
+            } catch (error) {
+              if (!isMissingFileError(error)) retainSeatAuth = true
+            }
             if (realInfo?.isFile()) {
-              const realBytes = await readFile(authSync.realAuthPath).catch(() => null)
+              let realBytes: Buffer | null = null
+              try {
+                realBytes = await readFile(authSync.realAuthPath)
+              } catch (error) {
+                if (!isMissingFileError(error)) retainSeatAuth = true
+              }
               if (realBytes && sha256Buffer(realBytes) === authSync.initialSha256) {
-                await writeFileAtomic(authSync.realAuthPath, seatBytes.toString('utf8')).catch(() => {})
-                await chmod(authSync.realAuthPath, 0o600).catch(() => {})
+                try {
+                  await writeRealAuth(authSync.realAuthPath, seatBytes.toString('utf8'))
+                  await chmod(authSync.realAuthPath, 0o600).catch(() => {})
+                } catch {
+                  retainSeatAuth = true
+                }
               }
             }
           }
@@ -319,30 +359,50 @@ export async function cleanupReviewerSeatCredentials(
     }
   } finally {
     const removals: Promise<unknown>[] = []
-    if (authSync) {
-      removals.push(rm(authSync.seatAuthPath, { force: true, maxRetries: 3 }).catch(() => {}))
-    }
-    if (area) {
+    if (retainSeatAuth && authSync) {
+      const codexHomeDir = dirname(resolve(authSync.seatAuthPath))
       removals.push(
-        rm(join(resolve(area.home), 'codex-home'), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
-        rm(resolve(area.home), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
-        rm(resolve(area.helper), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
-        rm(resolve(area.github), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        chmod(codexHomeDir, 0o700).catch(() => {}),
+        chmod(authSync.seatAuthPath, 0o600).catch(() => {}),
+        rm(join(codexHomeDir, 'config.toml'), { force: true, maxRetries: 3 }).catch(() => {}),
       )
+      if (area) {
+        removals.push(
+          chmod(resolve(area.home), 0o700).catch(() => {}),
+          rm(join(resolve(area.home), 'settings.json'), { force: true, maxRetries: 3 }).catch(() => {}),
+          rm(resolve(area.helper), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+          rm(resolve(area.github), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        )
+      }
+    } else {
+      if (authSync) {
+        removals.push(rm(authSync.seatAuthPath, { force: true, maxRetries: 3 }).catch(() => {}))
+      }
+      if (area) {
+        removals.push(
+          rm(join(resolve(area.home), 'codex-home'), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+          rm(resolve(area.home), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+          rm(resolve(area.helper), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+          rm(resolve(area.github), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+        )
+      }
     }
     await Promise.all(removals)
   }
+  return retainSeatAuth ? 'retry-sync' : 'clean'
 }
 
 /**
  * Normal Desktop quit / update-install cleanup for active or starting temporary reviewer seats:
  * stops any live seat process first, syncs any rotated Codex OAuth refresh token back to the user's real
- * `~/.codex/auth.json`, deletes the seat's copied credentials, and clears the persisted `codexAuthSync` record.
+ * `~/.codex/auth.json`, deletes the seat's copied credentials, and clears the persisted `codexAuthSync` record
+ * only when credential sync succeeded (`'clean'`).
  */
 export async function shutdownActiveReviewerSeats(
   groups: Iterable<Pick<TempReviewerGroup, 'requiredSeats'>>,
   reservations: Pick<ReviewReservations, 'setCodexAuthSync'> | null | undefined,
   stopSeatProcess?: (seat: TempReviewerSeat) => Promise<void>,
+  options: CredentialCleanupOptions = {},
 ): Promise<void> {
   for (const group of groups) {
     for (const seat of group.requiredSeats.values()) {
@@ -351,12 +411,15 @@ export async function shutdownActiveReviewerSeats(
         await stopSeatProcess(seat).catch(() => {})
       }
       const sync = seat.codexAuthSync
-      seat.codexAuthSync = null
+      let outcome: CredentialCleanupOutcome = 'clean'
       if (seat.area || sync) {
-        await cleanupReviewerSeatCredentials(seat.area, sync)
+        outcome = await cleanupReviewerSeatCredentials(seat.area, sync, options)
       }
-      if (seat.launchId && reservations) {
-        await reservations.setCodexAuthSync(seat.launchId, null).catch(() => {})
+      if (outcome === 'clean') {
+        seat.codexAuthSync = null
+        if (seat.launchId && reservations) {
+          await reservations.setCodexAuthSync(seat.launchId, null).catch(() => {})
+        }
       }
     }
   }
@@ -364,23 +427,27 @@ export async function shutdownActiveReviewerSeats(
 
 /**
  * Next-launch restart recovery for an abandoned reviewer area: recovers any pending rotated Codex OAuth sign-in
- * recorded in `ReviewReservations` BEFORE deleting `record.root/home/codex-home/auth.json`.
+ * recorded in `ReviewReservations` BEFORE deleting `record.root/home/codex-home/auth.json`. Returns `'retry-sync'`
+ * when writing the rotated credential failed so the sweep leaves the reservation and retained `auth.json` for retry.
  */
 export async function recoverSweptReviewerCredentials(
   record: Pick<ReviewReservation, 'launchId' | 'root' | 'codexAuthSync'>,
   reservations: Pick<ReviewReservations, 'setCodexAuthSync'> | null | undefined,
-): Promise<void> {
-  await cleanupReviewerSeatCredentials(
+  options: CredentialCleanupOptions = {},
+): Promise<CredentialCleanupOutcome> {
+  const outcome = await cleanupReviewerSeatCredentials(
     {
       home: join(record.root, 'home'),
       helper: join(record.root, 'helper'),
       github: join(record.root, 'gh'),
     },
     record.codexAuthSync ?? null,
+    options,
   )
-  if (record.codexAuthSync && reservations) {
+  if (outcome === 'clean' && record.codexAuthSync && reservations) {
     await reservations.setCodexAuthSync(record.launchId, null).catch(() => {})
   }
+  return outcome
 }
 
 export function buildCodexReviewerLaunch(options: {
