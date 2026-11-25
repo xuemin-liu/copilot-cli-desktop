@@ -454,18 +454,19 @@ test('the Turns list: newest first, with the files and the patch of a turn, read
 
   const files = await store.turnFiles(repo, 'one', first)
   assert.equal(files.truncated, false)
+  assert.equal(files.uncertain, false)
   assert.deepEqual(files.files, [
-    { path: 'a.txt', added: 1, deleted: 0, binary: false },
-    { path: 'gone.txt', added: 0, deleted: 1, binary: false },
-    { path: 'new file.txt', added: 1, deleted: 0, binary: false },
-    { path: 'picture.bin', added: null, deleted: null, binary: true },
+    { path: 'a.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'gone.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'new file.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'picture.bin', added: null, deleted: null, binary: true, leftOut: false },
   ])
   const patch = await store.turnDiff(repo, 'one', first, 'a.txt')
   assert.match(patch.text, /^diff --git a\/a\.txt b\/a\.txt/)
   assert.match(patch.text, /\n one\n\+two\n$/)
   assert.match((await store.turnDiff(repo, 'one', first, 'new file.txt')).text, /\+added/)
   assert.equal((await store.turnDiff(repo, 'one', first, 'not-changed.txt')).text, '')
-  assert.deepEqual(await store.turnFiles(repo, 'two', quiet), { files: [], truncated: false })
+  assert.deepEqual(await store.turnFiles(repo, 'two', quiet), { files: [], truncated: false, uncertain: false })
   for (const [session, turn] of [['two', refused], ['one', running], ['one', 99], ['nobody', 1]] as const) {
     await assert.rejects(() => store.turnFiles(repo, session, turn), /no snapshots to compare/)
   }
@@ -476,4 +477,61 @@ test('the Turns list: newest first, with the files and the patch of a turn, read
   await assert.rejects(() => store.turnFiles(repo, 'one', first), /no longer available/)
   await assert.rejects(() => store.turnDiff(repo, 'one', first, 'a.txt'), /no longer available/)
   assert.equal((await store.listTurns(repo)).length, 4, 'the list itself still reads')
+})
+
+test('a file left out of one snapshot of a turn is not shown as added or deleted', async (t) => {
+  const made = await setup(t, { maxFileBytes: 1_000 })
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('grown')
+  writeFileSync(join(repo, 'shrinks.txt'), 'x'.repeat(2_000))
+  // a.txt is small at the start of the turn and over the per-file limit at its end; shrinks.txt is the other way round.
+  const turn = await store.beginTurn(repo, 's', 'grow a file')
+  await store.capture(repo, 's', turn, 'before')
+  writeFileSync(join(repo, 'a.txt'), 'one\n' + 'y'.repeat(2_000))
+  writeFileSync(join(repo, 'shrinks.txt'), 'small now\n')
+  writeFileSync(join(repo, 'real.txt'), 'really added\n')
+  await store.capture(repo, 's', turn, 'after')
+  assert.equal(existsSync(join(repo, 'a.txt')), true, 'the file was never deleted')
+
+  const files = await store.turnFiles(repo, 's', turn)
+  assert.deepEqual(files.files, [
+    { path: 'a.txt', added: null, deleted: null, binary: false, leftOut: true },
+    { path: 'real.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'shrinks.txt', added: null, deleted: null, binary: false, leftOut: true },
+  ])
+  assert.equal(files.uncertain, false)
+  for (const path of ['a.txt', 'shrinks.txt']) assert.deepEqual(await store.turnDiff(repo, 's', turn, path), { text: '', truncated: false, leftOut: true }, 'no "deleted file" or "new file" patch')
+  assert.match((await store.turnDiff(repo, 's', turn, 'real.txt')).text, /new file mode/)
+
+  // A snapshot from before the full list was kept: when more paths were left out than are on record, the turn says so.
+  const metaFile = join(store.storeDirectory(repo), 'meta.json')
+  const meta = JSON.parse(readFileSync(metaFile, 'utf8'))
+  const record = meta.sessions.s.turns[0]
+  delete record.before.notCapturedPaths
+  delete record.after.notCapturedPaths
+  record.after.notCaptured = 40
+  writeFileSync(metaFile, JSON.stringify(meta))
+  const older = await store.turnFiles(repo, 's', turn)
+  assert.equal(older.uncertain, true)
+  assert.equal(older.files.find(file => file.path === 'a.txt')?.leftOut, true, 'a path in the sample is still known')
+})
+
+test('a patch is read only up to what is shown', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, root } = made
+  const read: number[] = []
+  const counting = { run: async (options: Parameters<typeof fixture.runner.run>[0]) => { const result = await fixture.runner.run(options); if (options.args.includes('--patch')) read.push(result.stdout.length); return result } }
+  const store = new CheckpointStore({ root, runner: counting as unknown as typeof fixture.runner })
+  const repo = fixture.repo('large-patch')
+  const turn = await store.beginTurn(repo, 's', 'write a large file')
+  await store.capture(repo, 's', turn, 'before')
+  writeFileSync(join(repo, 'big.txt'), Array.from({ length: 60_000 }, (_, index) => `line ${index} ${'z'.repeat(50)}`).join('\n') + '\n')
+  await store.capture(repo, 's', turn, 'after')
+  const patch = await store.turnDiff(repo, 's', turn, 'big.txt')
+  assert.equal(patch.truncated, true)
+  assert.ok(Buffer.byteLength(patch.text) <= 512 * 1024)
+  assert.equal(read.length, 1)
+  assert.ok(read[0]! <= 512 * 1024 + 64 * 1024, `Git was stopped near the cap (read ${read[0]} bytes of a 3.8 MB patch)`)
 })

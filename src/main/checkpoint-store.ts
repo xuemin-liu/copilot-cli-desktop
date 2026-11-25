@@ -59,6 +59,11 @@ export interface CheckpointCapture {
   notCaptured: number
   /** Up to twenty of them, for display. */
   notCapturedSample: string[]
+  /**
+   * All of them, up to a few thousand. A path left out of one snapshot of a turn and present in the other would look
+   * added or deleted in the turn's diff, so the diff needs to know them. Absent in snapshots taken before this was kept.
+   */
+  notCapturedPaths?: string[]
   at: number
 }
 
@@ -107,8 +112,11 @@ export interface TurnSummary {
 }
 
 export interface TurnFiles {
-  files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean }>
+  /** `leftOut`: the path was left out of one of the two snapshots, so whether it changed is not known. */
+  files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean; leftOut: boolean }>
   truncated: boolean
+  /** Some left-out paths are not on record, so a file shown as added or deleted may have been left out instead. */
+  uncertain: boolean
 }
 
 export interface CheckpointStoreOptions {
@@ -145,6 +153,23 @@ const SAMPLE = 20
 const MAX_LISTED_TURNS = 200
 const MAX_TURN_FILES = 5_000
 const MAX_TURN_DIFF_BYTES = 512 * 1024
+const MAX_TURN_FILES_BYTES = 4 * 1024 * 1024
+const MAX_RECORDED_NOT_CAPTURED = 5_000
+
+/** Which paths of a turn's diff cannot be compared, because one of its snapshots left them out. */
+function leftOutOf(record: CheckpointTurn): { has(path: string): boolean; complete: boolean } {
+  const captures = [record.before, record.after].filter((capture): capture is CheckpointCapture => capture !== null)
+  const exact = new Set<string>()
+  const folders: string[] = []
+  for (const capture of captures) for (const path of capture.notCapturedPaths ?? capture.notCapturedSample) {
+    // An embedded repository is recorded as its folder, with a trailing slash.
+    if (path.endsWith('/')) folders.push(path); else exact.add(path)
+  }
+  return {
+    has: path => exact.has(path) || folders.some(folder => path.startsWith(folder)),
+    complete: captures.every(capture => (capture.notCapturedPaths ?? capture.notCapturedSample).length >= capture.notCaptured),
+  }
+}
 /** Space is reclaimed while the app runs once this many turns were dropped, or this many ended, since the last time. */
 const RECLAIM_AFTER_DROPPED_TURNS = 10
 const RECLAIM_AFTER_TURNS = 10
@@ -217,10 +242,10 @@ export class CheckpointStore {
     }
   }
 
-  private shadow(store: string, worktreeRoot: string | null, args: readonly string[], options: { stdin?: string; signal?: AbortSignal | undefined; timeoutMs?: number; write?: boolean } = {}): Promise<GitRunResult> {
+  private shadow(store: string, worktreeRoot: string | null, args: readonly string[], options: { stdin?: string; signal?: AbortSignal | undefined; timeoutMs?: number; write?: boolean; maxStdoutBytes?: number } = {}): Promise<GitRunResult> {
     return this.runner.run({
       cwd: worktreeRoot ?? hostPath.join(store, 'empty'), args, kind: options.write === false ? 'read' : 'write', disableHooks: true,
-      stdin: options.stdin, signal: options.signal, timeoutMs: options.timeoutMs ?? 60_000, maxStdoutBytes: LIST_MAX_BYTES,
+      stdin: options.stdin, signal: options.signal, timeoutMs: options.timeoutMs ?? 60_000, maxStdoutBytes: options.maxStdoutBytes ?? LIST_MAX_BYTES,
       environment: { extra: this.shadowEnvironment(store, worktreeRoot) },
     })
   }
@@ -413,7 +438,8 @@ export class CheckpointStore {
         if (!gitSucceeded(ref)) throw new CheckpointRefused(describe(ref, 'Saving the snapshot'))
         meta.lastTree = tree
         meta.lastCommit = commit
-        result = { commit, reason: null, notCaptured: eligible.notCaptured.length, notCapturedSample: eligible.notCaptured.slice(0, SAMPLE), at: this.now() }
+        result = { commit, reason: null, notCaptured: eligible.notCaptured.length, notCapturedSample: eligible.notCaptured.slice(0, SAMPLE),
+          notCapturedPaths: eligible.notCaptured.slice(0, MAX_RECORDED_NOT_CAPTURED), at: this.now() }
       } catch (error) {
         const reason = controller.signal.aborted ? 'The snapshot took too long' : error instanceof CheckpointRefused ? error.message : 'The snapshot failed'
         result = { commit: null, reason, notCaptured: 0, notCapturedSample: [], at: this.now() }
@@ -476,34 +502,44 @@ export class CheckpointStore {
   }
 
   /** Run a diff between a complete turn's two snapshots, inside the shadow. Git never runs in the project for this. */
-  private turnDiffTree(worktreeRoot: string, sessionId: string, turn: number, path?: string): Promise<GitRunResult> {
+  private turnDiffTree(worktreeRoot: string, sessionId: string, turn: number, path?: string): Promise<{ result: GitRunResult | null; leftOut: ReturnType<typeof leftOutOf> }> {
     const store = this.storeDirectory(worktreeRoot)
     return this.queued(store, async () => {
       const meta = await this.readMeta(store, worktreeRoot)
       const record = meta.sessions[sessionId]?.turns.find(candidate => candidate.n === turn)
       const before = record?.before?.commit, after = record?.after?.commit
       if (!record || record.state !== 'complete' || !before || !after) throw new CheckpointRefused('This turn has no snapshots to compare')
-      const result = await this.shadow(store, null, commitDiffTreeArgs(after, before, path), { write: false, timeoutMs: 30_000 })
+      const leftOut = leftOutOf(record)
+      // A file one snapshot left out is not compared: Git would call it added or deleted.
+      if (path !== undefined && leftOut.has(path)) return { result: null, leftOut }
+      // Read no more than is shown: Git is stopped once the output passes the cap.
+      const result = await this.shadow(store, null, commitDiffTreeArgs(after, before, path), {
+        write: false, timeoutMs: 30_000, maxStdoutBytes: path === undefined ? MAX_TURN_FILES_BYTES : MAX_TURN_DIFF_BYTES + 64 * 1024,
+      })
       // Space was reclaimed, or the store was damaged: said for this turn only.
       if (!gitSucceeded(result) && !result.stdoutTruncated) throw new CheckpointRefused('This checkpoint is no longer available')
-      return result
+      return { result, leftOut }
     })
   }
 
   /** The files a turn changed, with line counts. */
   async turnFiles(worktreeRoot: string, sessionId: string, turn: number): Promise<TurnFiles> {
-    const result = await this.turnDiffTree(worktreeRoot, sessionId, turn)
+    const { result, leftOut } = await this.turnDiffTree(worktreeRoot, sessionId, turn)
+    if (!result) throw new CheckpointRefused('This turn has no snapshots to compare')
     // Only complete NUL-terminated records can name a file.
     const files = parseNumstat(result.stdout.subarray(0, result.stdout.lastIndexOf(0) + 1).toString('utf8'))
-      .map(({ path, added, deleted, binary }) => ({ path, added, deleted, binary }))
-    return { files: files.slice(0, MAX_TURN_FILES), truncated: result.stdoutTruncated || files.length > MAX_TURN_FILES }
+      .map(({ path, added, deleted, binary }) => leftOut.has(path)
+        ? { path, added: null, deleted: null, binary: false, leftOut: true }
+        : { path, added, deleted, binary, leftOut: false })
+    return { files: files.slice(0, MAX_TURN_FILES), truncated: result.stdoutTruncated || files.length > MAX_TURN_FILES, uncertain: !leftOut.complete }
   }
 
-  /** One file's changes in a turn, as a patch. */
-  async turnDiff(worktreeRoot: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean }> {
-    const result = await this.turnDiffTree(worktreeRoot, sessionId, turn, path)
+  /** One file's changes in a turn, as a patch. `leftOut`: one snapshot left the file out, so there is no patch to show. */
+  async turnDiff(worktreeRoot: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean; leftOut: boolean }> {
+    const { result } = await this.turnDiffTree(worktreeRoot, sessionId, turn, path)
+    if (!result) return { text: '', truncated: false, leftOut: true }
     const bounded = boundText(result.stdout, MAX_TURN_DIFF_BYTES)
-    return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated }
+    return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated, leftOut: false }
   }
 
   private async storeNames(): Promise<string[]> {

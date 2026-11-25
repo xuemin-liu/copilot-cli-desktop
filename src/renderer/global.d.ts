@@ -79,7 +79,7 @@ export interface CopilotDesktopBridge {
   gitLog(profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]>
   gitTurns(profileId: string, repoId: string): Promise<import('../main/git-ipc.js').GitTurnsView>
   gitTurnFiles(profileId: string, repoId: string, sessionId: string, turn: number): Promise<import('../main/checkpoint-store.js').TurnFiles>
-  gitTurnDiff(profileId: string, repoId: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean }>
+  gitTurnDiff(profileId: string, repoId: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean; leftOut: boolean }>
   onGitToggle(listener: () => void): () => void
   onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void
   getState(): Promise<DesktopState>

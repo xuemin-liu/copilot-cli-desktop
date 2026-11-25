@@ -1025,6 +1025,15 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
           {feedbackAt('trust')}
           {repo.state === 'error' && <p className="git-message git-message-error" role="alert">{repo.error ?? 'This repository could not be read.'}</p>}
 
+          {/* Turns come from the app's own store, not from Git in the project, so they stay readable while the
+              repository's settings wait for review: the reason a new turn has no snapshot is shown there. */}
+          {repo.state === 'needs-review' && (
+            <section className="git-turns-held" aria-label="Turns">
+              <h3 className="git-section-title">Turns</h3>
+              <GitTurns key={JSON.stringify([profileId, repo.id])} profileId={profileId} repoId={repo.id} refreshKey={repo.generation} />
+            </section>
+          )}
+
           {ready && (
             <>
               <div className="git-tabs" role="tablist" aria-label="Repository views">

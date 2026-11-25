@@ -182,11 +182,16 @@ the files that changed between the start and the end of that turn, and open a fi
   between two turns belong to neither.
 - **What is in a snapshot.** Tracked files, and untracked files that are not ignored, as the bytes on disk (no
   line-ending conversion, and no filter program runs). Links, anything behind a linked folder, files over 25 MB,
-  submodules and embedded repositories are left out; a turn says how many paths were left out.
+  submodules and embedded repositories are left out; a turn says how many paths were left out. A file left out of
+  only one of a turn's two snapshots (it grew past 25 MB during the turn, say) is listed as **not compared**, never
+  as added or deleted.
 - **When a turn has no diff.** It is still running; the app closed or the session ended during it; another prompt
   started before its end was captured; or no snapshot could be taken. The reasons for the last one: the
   repository's Git settings need review (accept them in this panel first), it uses a sparse checkout, it has more
   than 60,000 files or 500 MB to snapshot, Git is older than 2.32, or the snapshot took over two minutes.
+- **While a repository needs review.** The other tabs wait for you to accept its Git settings; Turns stays in view
+  below the review card, because it reads the app's own store and not the repository. A turn taken meanwhile shows
+  why it has no snapshot.
 - **Which sessions.** Local Copilot sessions, including worktree sessions. Not side chats, remote sessions or other
   CLIs' tabs, and not a repository above the project folder.
 - **How long turns are kept.** The newest 50 turns of a session and 200 of a repository, for 30 days, within 1 GiB

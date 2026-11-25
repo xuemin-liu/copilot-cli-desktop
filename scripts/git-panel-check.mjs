@@ -547,6 +547,9 @@ ${point.missing}`)
     await chooseRepo('gamma')
     await until('!!document.querySelector(".git-review")', 'review card')
     assert.match(await text('.git-review'), /core\.sshcommand/)
+    // Turns are read from the app's own store, so they stay in reach while the repository waits for review.
+    await until('!!document.querySelector(".git-turns-held .git-turns") && !document.querySelector(".git-tabs")', 'Turns shown without the project-backed tabs')
+    assert.match(await text('.git-turns-held .git-section-title'), /^turns$/i)
     // Trust accepts the whole value, so the card shows the whole value: the command after the padding is on screen.
     const card = await ui('document.querySelector(".git-review").textContent')
     assert.match(card, /HIDDEN-COMMAND > review-marker\.txt/)

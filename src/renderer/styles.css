@@ -1662,6 +1662,8 @@ button:disabled {
 button.git-log-subject, .git-commit-file { min-width: 0; text-align: left; color: #a9c9ff; background: transparent; border: 0; padding: 3px 0; }
 button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underline; }
 .git-turn-observed { color: #8b98ad; font-size: 12px; margin: 2px 0 4px; }
+.git-turns-held { padding-top: 8px; }
+.git-turns-held > .git-section-title { padding: 0 10px; }
 .git-turns > button { margin: 0 10px 10px; align-self: flex-start; }
 .git-commit-details { min-width: 0; padding: 6px; background: #10151e; border-left: 2px solid #3a4a66; overflow-wrap: anywhere; }
 .git-commit-details p { margin: 4px 0; }

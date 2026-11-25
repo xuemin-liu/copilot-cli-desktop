@@ -14,11 +14,12 @@ function TurnPatch({ profileId, repoId, turn, file }: TurnProps & { file: Change
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let stale = false
-    if (!file.binary) window.copilotDesktop.gitTurnDiff(profileId, repoId, turn.sessionId, turn.n, file.path)
+    if (!file.binary && !file.leftOut) window.copilotDesktop.gitTurnDiff(profileId, repoId, turn.sessionId, turn.n, file.path)
       .then(value => { if (!stale) setPatch(value) })
       .catch((cause: unknown) => { if (!stale) setError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, repoId, turn.sessionId, turn.n, file])
+  if (file.leftOut) return <p role="status" className="git-turn-observed">This file was left out of the snapshot at the start or at the end of the turn (a link, or over 25 MB at that moment), so whether it changed is not known.</p>
   if (error) return <p role="alert" className="git-message git-message-error">{error}</p>
   if (!patch && !file.binary) return <p role="status">Loading diff…</p>
   return <GitDiffView diff={{ entryId: `${turnKey(turn)}\n${file.path}`, path: file.path, kind: file.binary ? 'binary' : patch?.text ? 'text' : 'empty',
@@ -46,10 +47,11 @@ function TurnDetails({ profileId, repoId, turn }: TurnProps): JSX.Element {
     {details && details.files.length === 0 && !details.truncated && <p>No files changed during this turn.</p>}
     {details && details.files.map(file => <div key={file.path}>
       <button type="button" className="git-commit-file" aria-expanded={path === file.path}
-        onClick={() => setPath(path === file.path ? null : file.path)}>{file.path}</button>
+        onClick={() => setPath(path === file.path ? null : file.path)}>{file.path}{file.leftOut ? ' (not compared)' : ''}</button>
       {path === file.path && <TurnPatch profileId={profileId} repoId={repoId} turn={turn} file={file} />}
     </div>)}
     {details?.truncated && <p role="status">The changed file list was cut short.</p>}
+    {details?.uncertain && <p role="status">Some paths were left out of this turn’s snapshots and the record of them is incomplete: a file shown here as added or deleted may have been left out instead.</p>}
     {turn.notCaptured > 0 && <p role="status" title={turn.notCapturedSample.join('\n')}>
       {turn.notCaptured === 1 ? '1 path was' : `${turn.notCaptured} paths were`} left out of the snapshot (links, files over 25 MB, submodules or embedded repositories).
     </p>}
