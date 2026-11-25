@@ -1,6 +1,8 @@
 import { commitOid } from './git-commands.js'
 import type { GitService } from './git-service.js'
 import type { GitCommitHead } from './git-types.js'
+import type { CheckpointStore, TurnFiles, TurnSummary } from './checkpoint-store.js'
+import { isValidSessionId } from './session-id.js'
 
 /** The few `webContents` members the Git IPC needs, so the handlers can be tested without Electron. */
 export interface GitIpcSender {
@@ -19,6 +21,15 @@ export interface GitIpcDeps {
   /** Throws unless the frame is the app shell and no exclusive operation (migration) is running. */
   assertTrustedSender(event: GitIpcEvent): void
   isMainWindowSender(event: GitIpcEvent): boolean
+  /** The turn checkpoint store, or null when the feature is off or Git is unavailable. */
+  checkpoints?(): Promise<CheckpointStore | null>
+}
+
+/** What the Turns tab shows for a repository. */
+export interface GitTurnsView {
+  /** False when turn checkpoints are off, Git is unavailable, or the repository is the one above the project folder. */
+  available: boolean
+  turns: TurnSummary[]
 }
 
 const PROFILE_ID = /^[0-9a-f]{16}$/
@@ -188,6 +199,33 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     const headOid = commitOid(revision)
     if (cursor !== null && (typeof cursor !== 'string' || !/^[0-9a-f]{64}$/.test(cursor))) throw new Error('Invalid history cursor')
     return service.getLogPage(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), boundedInteger(limit, 'limit', 1, 200), boundedInteger(skip, 'offset', 0, 100_000), headOid, cursor)
+  })
+  // Turn checkpoints live in the app's own store: these read that store and never run Git in the project.
+  const turnArgs = (sessionId: unknown, turn: unknown): [string, number] => {
+    if (typeof sessionId !== 'string' || !isValidSessionId(sessionId)) throw new Error('Invalid session')
+    return [sessionId, boundedInteger(turn, 'turn', 1, 1_000_000_000)]
+  }
+  const turnStore = async (service: GitService, event: GitIpcEvent, profileId: unknown, repoId: unknown): Promise<{ store: CheckpointStore; root: string } | null> => {
+    const root = service.repoRootFor(event.sender.id, profileIdArg(profileId), repoIdArg(repoId))
+    const store = root ? await deps.checkpoints?.() ?? null : null
+    return store && root ? { store, root } : null
+  }
+  handle('desktop:git-turns', async (service, event, profileId: unknown, repoId: unknown): Promise<GitTurnsView> => {
+    const found = await turnStore(service, event, profileId, repoId)
+    return found ? { available: true, turns: await found.store.listTurns(found.root) } : { available: false, turns: [] }
+  })
+  handle('desktop:git-turn-files', async (service, event, profileId: unknown, repoId: unknown, sessionId: unknown, turn: unknown): Promise<TurnFiles> => {
+    const args = turnArgs(sessionId, turn)
+    const found = await turnStore(service, event, profileId, repoId)
+    if (!found) throw new Error('Turn checkpoints are not available for this repository')
+    return found.store.turnFiles(found.root, ...args)
+  })
+  handle('desktop:git-turn-diff', async (service, event, profileId: unknown, repoId: unknown, sessionId: unknown, turn: unknown, path: unknown) => {
+    const args = turnArgs(sessionId, turn)
+    if (typeof path !== 'string' || !path || path.includes('\0') || path.length > 32_767) throw new Error('Invalid file path')
+    const found = await turnStore(service, event, profileId, repoId)
+    if (!found) throw new Error('Turn checkpoints are not available for this repository')
+    return found.store.turnDiff(found.root, ...args, path)
   })
   handle('desktop:git-log', (service, event, profileId: unknown, repoId: unknown, limit: unknown, skip: unknown) =>
     service.getLog(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), boundedInteger(limit, 'limit', 1, 200), boundedInteger(skip, 'offset', 0, 100_000)))

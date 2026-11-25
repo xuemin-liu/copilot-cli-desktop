@@ -1,4 +1,5 @@
 import { GitHistory } from './GitHistory.js'
+import { GitTurns } from './GitTurns.js'
 import { GitOutput } from './GitOutput.js'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { JSX, KeyboardEvent } from 'react'
@@ -69,7 +70,7 @@ async function sendOrPaste(profileId: string, repoId: string, tabId: string, tex
 /** A pull that failed in a way Copilot can finish, for the repository, branch and commit it was asked for. */
 interface PullFailure { repoId: string; branch: string; headOid: string; reason: 'diverged' | 'local-changes'; output: string }
 
-type Tab = 'changes' | 'history' | 'branches'
+type Tab = 'changes' | 'turns' | 'history' | 'branches'
 interface Selection { repoId: string; path: string; staged: boolean }
 interface RepoError { repoId: string; message: string }
 type FeedbackArea = 'sync' | 'files' | 'commit' | 'branch' | 'worktree' | 'diff' | 'trust'
@@ -1024,10 +1025,19 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
           {feedbackAt('trust')}
           {repo.state === 'error' && <p className="git-message git-message-error" role="alert">{repo.error ?? 'This repository could not be read.'}</p>}
 
+          {/* Turns come from the app's own store, not from Git in the project, so they stay readable while the
+              repository's settings wait for review: the reason a new turn has no snapshot is shown there. */}
+          {repo.state === 'needs-review' && (
+            <section className="git-turns-held" aria-label="Turns">
+              <h3 className="git-section-title">Turns</h3>
+              <GitTurns key={JSON.stringify([profileId, repo.id])} profileId={profileId} repoId={repo.id} refreshKey={repo.generation} />
+            </section>
+          )}
+
           {ready && (
             <>
               <div className="git-tabs" role="tablist" aria-label="Repository views">
-                {(['changes', 'history', 'branches'] as const).map((viewTab, index, tabs) => (
+                {(['changes', 'turns', 'history', 'branches'] as const).map((viewTab, index, tabs) => (
                   <button key={viewTab} type="button" role="tab" aria-selected={tab === viewTab} tabIndex={tab === viewTab ? 0 : -1}
                     onClick={() => setTab(viewTab)} onKeyDown={event => {
                       let next: number
@@ -1041,7 +1051,7 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
                       event.preventDefault()
                       event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
                       setTab(tabs[next]!)
-                    }}>{viewTab === 'changes' ? 'Changes' + (repo.changeCount ? ' (' + repo.changeCount + ')' : '') : viewTab === 'history' ? 'History' : 'Branches'}</button>
+                    }}>{viewTab === 'changes' ? 'Changes' + (repo.changeCount ? ' (' + repo.changeCount + ')' : '') : viewTab === 'turns' ? 'Turns' : viewTab === 'history' ? 'History' : 'Branches'}</button>
                 ))}
               </div>
 
@@ -1184,6 +1194,9 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
                     locked={writesLocked} onRemove={removeWorktree} />
                 </>
               )}
+
+              {/* The list is read again when the repository's files change: a turn that just ended shows up. */}
+              {tab === 'turns' && <GitTurns key={JSON.stringify([profileId, repo.id])} profileId={profileId} repoId={repo.id} refreshKey={`${repo.generation}:${repo.contentStamp ?? ""}`} />}
 
               {tab === 'history' && <GitHistory key={JSON.stringify([profileId, repo.id, repo.headOid])}
                 profileId={profileId} repoId={repo.id} headOid={repo.headOid} />}

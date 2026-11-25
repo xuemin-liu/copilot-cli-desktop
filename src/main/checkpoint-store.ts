@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { caseInsensitivePaths, hostPath, pathKey } from './host-path.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { splitNul } from './git-parse.js'
+import { commitDiffTreeArgs } from './git-commands.js'
+import { boundText, parseNumstat, splitNul } from './git-parse.js'
 import { gitSucceeded, type GitRunResult, type GitRunner } from './git-runner.js'
 import { safeRepoSegments } from './git-untracked.js'
 
@@ -58,6 +59,11 @@ export interface CheckpointCapture {
   notCaptured: number
   /** Up to twenty of them, for display. */
   notCapturedSample: string[]
+  /**
+   * All of them, up to a few thousand. A path left out of one snapshot of a turn and present in the other would look
+   * added or deleted in the turn's diff, so the diff needs to know them. Absent in snapshots taken before this was kept.
+   */
+  notCapturedPaths?: string[]
   at: number
 }
 
@@ -85,6 +91,32 @@ interface StoreMeta {
   unreclaimed?: number
   turnsSinceReclaim?: number
   sessions: Record<string, { turns: CheckpointTurn[] }>
+}
+
+/** A turn as the Git panel lists it. */
+export interface TurnSummary {
+  sessionId: string
+  n: number
+  label: string
+  startedAt: number
+  endedAt: number | null
+  state: TurnState
+  /** Why an incomplete turn has no diff. */
+  note: string | null
+  /** Both snapshots exist, so the turn's changes can be shown. */
+  diffable: boolean
+  /** Both snapshots are the same: nothing changed during the turn. */
+  unchanged: boolean
+  notCaptured: number
+  notCapturedSample: string[]
+}
+
+export interface TurnFiles {
+  /** `leftOut`: the path was left out of one of the two snapshots, so whether it changed is not known. */
+  files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean; leftOut: boolean }>
+  truncated: boolean
+  /** Some left-out paths are not on record, so a file shown as added or deleted may have been left out instead. */
+  uncertain: boolean
 }
 
 export interface CheckpointStoreOptions {
@@ -118,6 +150,27 @@ const LIST_MAX_BYTES = 64 * 1024 * 1024
 const OID = /^[0-9a-f]{40,64}$/
 const MAX_LABEL_CHARS = 120
 const SAMPLE = 20
+const MAX_LISTED_TURNS = 200
+const MAX_TURN_FILES = 5_000
+const MAX_TURN_DIFF_BYTES = 512 * 1024
+const MAX_TURN_FILES_BYTES = 4 * 1024 * 1024
+const MAX_RECORDED_NOT_CAPTURED = 5_000
+const UNAVAILABLE = 'This checkpoint is no longer available'
+
+/** Which paths of a turn's diff cannot be compared, because one of its snapshots left them out. */
+function leftOutOf(record: CheckpointTurn): { has(path: string): boolean; complete: boolean } {
+  const captures = [record.before, record.after].filter((capture): capture is CheckpointCapture => capture !== null)
+  const exact = new Set<string>()
+  const folders: string[] = []
+  for (const capture of captures) for (const path of capture.notCapturedPaths ?? capture.notCapturedSample) {
+    // An embedded repository is recorded as its folder, with a trailing slash.
+    if (path.endsWith('/')) folders.push(path); else exact.add(path)
+  }
+  return {
+    has: path => exact.has(path) || folders.some(folder => path.startsWith(folder)),
+    complete: captures.every(capture => (capture.notCapturedPaths ?? capture.notCapturedSample).length >= capture.notCaptured),
+  }
+}
 /** Space is reclaimed while the app runs once this many turns were dropped, or this many ended, since the last time. */
 const RECLAIM_AFTER_DROPPED_TURNS = 10
 const RECLAIM_AFTER_TURNS = 10
@@ -190,10 +243,10 @@ export class CheckpointStore {
     }
   }
 
-  private shadow(store: string, worktreeRoot: string | null, args: readonly string[], options: { stdin?: string; signal?: AbortSignal | undefined; timeoutMs?: number; write?: boolean } = {}): Promise<GitRunResult> {
+  private shadow(store: string, worktreeRoot: string | null, args: readonly string[], options: { stdin?: string; signal?: AbortSignal | undefined; timeoutMs?: number; write?: boolean; maxStdoutBytes?: number } = {}): Promise<GitRunResult> {
     return this.runner.run({
       cwd: worktreeRoot ?? hostPath.join(store, 'empty'), args, kind: options.write === false ? 'read' : 'write', disableHooks: true,
-      stdin: options.stdin, signal: options.signal, timeoutMs: options.timeoutMs ?? 60_000, maxStdoutBytes: LIST_MAX_BYTES,
+      stdin: options.stdin, signal: options.signal, timeoutMs: options.timeoutMs ?? 60_000, maxStdoutBytes: options.maxStdoutBytes ?? LIST_MAX_BYTES,
       environment: { extra: this.shadowEnvironment(store, worktreeRoot) },
     })
   }
@@ -268,14 +321,19 @@ export class CheckpointStore {
     }
     if (candidates.size > this.limits.maxPaths) throw new CheckpointRefused(`This folder has more than ${this.limits.maxPaths.toLocaleString('en-US')} files to snapshot`)
 
-    // A folder that is a link or a junction: Git would walk through it and read files outside the repository.
-    const folders = new Map<string, Promise<boolean>>()
-    const plainFolder = (relative: string): Promise<boolean> => {
-      if (relative === '') return Promise.resolve(true)
+    // A folder that is a link or a junction: Git would walk through it and read files outside the repository. A
+    // folder that is simply gone is another matter: what was in it was deleted, and is absent from the snapshot.
+    type FolderState = 'plain' | 'gone' | 'unsafe'
+    const folders = new Map<string, Promise<FolderState>>()
+    const folderState = (relative: string): Promise<FolderState> => {
+      if (relative === '') return Promise.resolve('plain')
       let known = folders.get(relative)
       if (!known) {
-        const above = plainFolder(relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '')
-        known = above.then(async fine => fine && await lstat(hostPath.join(worktreeRoot, ...relative.split('/'))).then(entry => entry.isDirectory() && !entry.isSymbolicLink(), () => false))
+        const above = folderState(relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '')
+        known = above.then(async (parent): Promise<FolderState> => parent !== 'plain' ? parent : lstat(hostPath.join(worktreeRoot, ...relative.split('/'))).then(
+          (entry): FolderState => entry.isDirectory() && !entry.isSymbolicLink() ? 'plain' : 'unsafe',
+          // Only a confirmed absence counts as gone; a folder that cannot be read is not walked.
+          (error: NodeJS.ErrnoException): FolderState => error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? 'gone' : 'unsafe'))
         folders.set(relative, known)
       }
       return known
@@ -288,10 +346,14 @@ export class CheckpointStore {
       await Promise.all(list.slice(start, start + 64).map(async path => {
         const segments = safeRepoSegments(path)
         if (!segments || segments.some(segment => segment.toLowerCase() === '.git')) { notCaptured.push(path); return }
-        if (!(await plainFolder(segments.slice(0, -1).join('/')))) { notCaptured.push(path); return }
-        const entry = await lstat(hostPath.join(worktreeRoot, ...segments)).catch(() => null)
+        const folder = await folderState(segments.slice(0, -1).join('/'))
+        // Its folder was deleted with it: absent from the snapshot, like any deleted file.
+        if (folder === 'gone') return
+        if (folder === 'unsafe') { notCaptured.push(path); return }
+        const entry = await lstat(hostPath.join(worktreeRoot, ...segments)).then(found => found, (error: NodeJS.ErrnoException) => error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? null : 'unreadable' as const)
         // Gone from disk: a deleted file is simply absent from the snapshot.
         if (!entry) return
+        if (entry === 'unreadable') { notCaptured.push(path); return }
         if (!entry.isFile() || entry.size > this.limits.maxFileBytes) { notCaptured.push(path); return }
         totalBytes += entry.size
         paths.push(path)
@@ -386,7 +448,8 @@ export class CheckpointStore {
         if (!gitSucceeded(ref)) throw new CheckpointRefused(describe(ref, 'Saving the snapshot'))
         meta.lastTree = tree
         meta.lastCommit = commit
-        result = { commit, reason: null, notCaptured: eligible.notCaptured.length, notCapturedSample: eligible.notCaptured.slice(0, SAMPLE), at: this.now() }
+        result = { commit, reason: null, notCaptured: eligible.notCaptured.length, notCapturedSample: eligible.notCaptured.slice(0, SAMPLE),
+          notCapturedPaths: eligible.notCaptured.slice(0, MAX_RECORDED_NOT_CAPTURED), at: this.now() }
       } catch (error) {
         const reason = controller.signal.aborted ? 'The snapshot took too long' : error instanceof CheckpointRefused ? error.message : 'The snapshot failed'
         result = { commit: null, reason, notCaptured: 0, notCapturedSample: [], at: this.now() }
@@ -427,6 +490,70 @@ export class CheckpointStore {
       const result = await this.shadow(store, null, ['cat-file', 'blob', `${commit}:${path}`], { write: false })
       return gitSucceeded(result) ? result.stdout : null
     })
+  }
+
+  /** The turns of a worktree, over all its sessions, newest first: what the Git panel lists. */
+  listTurns(worktreeRoot: string): Promise<TurnSummary[]> {
+    const store = this.storeDirectory(worktreeRoot)
+    return this.queued(store, async () => {
+      const meta = await this.readMeta(store, worktreeRoot)
+      return Object.entries(meta.sessions)
+        .flatMap(([sessionId, session]) => session.turns.map(turn => ({
+          sessionId, n: turn.n, label: turn.label, startedAt: turn.startedAt, endedAt: turn.endedAt, state: turn.state,
+          note: turn.state === 'incomplete' ? turn.note ?? turn.before?.reason ?? turn.after?.reason ?? null : null,
+          diffable: turn.state === 'complete' && Boolean(turn.before?.commit && turn.after?.commit),
+          unchanged: turn.state === 'complete' && Boolean(turn.before?.commit) && turn.before?.commit === turn.after?.commit,
+          notCaptured: Math.max(turn.before?.notCaptured ?? 0, turn.after?.notCaptured ?? 0),
+          notCapturedSample: (turn.after?.notCapturedSample.length ? turn.after.notCapturedSample : turn.before?.notCapturedSample ?? []).slice(0, SAMPLE),
+        })))
+        .sort((left, right) => right.startedAt - left.startedAt)
+        .slice(0, MAX_LISTED_TURNS)
+    })
+  }
+
+  /** Run a diff between a complete turn's two snapshots, inside the shadow. Git never runs in the project for this. */
+  private turnDiffTree(worktreeRoot: string, sessionId: string, turn: number, path?: string): Promise<{ result: GitRunResult | null; leftOut: ReturnType<typeof leftOutOf> }> {
+    const store = this.storeDirectory(worktreeRoot)
+    return this.queued(store, async () => {
+      const meta = await this.readMeta(store, worktreeRoot)
+      const record = meta.sessions[sessionId]?.turns.find(candidate => candidate.n === turn)
+      const before = record?.before?.commit, after = record?.after?.commit
+      if (!record || record.state !== 'complete' || !before || !after) throw new CheckpointRefused('This turn has no snapshots to compare')
+      const leftOut = leftOutOf(record)
+      // A file one snapshot left out is not compared: Git would call it added or deleted.
+      if (path !== undefined && leftOut.has(path)) return { result: null, leftOut }
+      // A store that lost its folders is a damaged store, not a missing Git: the command is never started there.
+      const whole = await Promise.all([stat(hostPath.join(store, 'empty')).then(entry => entry.isDirectory(), () => false), stat(hostPath.join(this.gitDirectory(store), 'HEAD')).then(entry => entry.isFile(), () => false)])
+      if (whole.includes(false)) throw new CheckpointRefused(UNAVAILABLE)
+      // Read no more than is shown: Git is stopped once the output passes the cap.
+      const result = await this.shadow(store, null, commitDiffTreeArgs(after, before, path), {
+        write: false, timeoutMs: 30_000, maxStdoutBytes: path === undefined ? MAX_TURN_FILES_BYTES : MAX_TURN_DIFF_BYTES + 64 * 1024,
+      })
+      if (result.timedOut) throw new CheckpointRefused('Reading this turn’s changes took too long')
+      // Space was reclaimed, or the store was damaged: said for this turn only.
+      if (!gitSucceeded(result) && !result.stdoutTruncated) throw new CheckpointRefused(UNAVAILABLE)
+      return { result, leftOut }
+    })
+  }
+
+  /** The files a turn changed, with line counts. */
+  async turnFiles(worktreeRoot: string, sessionId: string, turn: number): Promise<TurnFiles> {
+    const { result, leftOut } = await this.turnDiffTree(worktreeRoot, sessionId, turn)
+    if (!result) throw new CheckpointRefused('This turn has no snapshots to compare')
+    // Only complete NUL-terminated records can name a file.
+    const files = parseNumstat(result.stdout.subarray(0, result.stdout.lastIndexOf(0) + 1).toString('utf8'))
+      .map(({ path, added, deleted, binary }) => leftOut.has(path)
+        ? { path, added: null, deleted: null, binary: false, leftOut: true }
+        : { path, added, deleted, binary, leftOut: false })
+    return { files: files.slice(0, MAX_TURN_FILES), truncated: result.stdoutTruncated || files.length > MAX_TURN_FILES, uncertain: !leftOut.complete }
+  }
+
+  /** One file's changes in a turn, as a patch. `leftOut`: one snapshot left the file out, so there is no patch to show. */
+  async turnDiff(worktreeRoot: string, sessionId: string, turn: number, path: string): Promise<{ text: string; truncated: boolean; leftOut: boolean }> {
+    const { result } = await this.turnDiffTree(worktreeRoot, sessionId, turn, path)
+    if (!result) return { text: '', truncated: false, leftOut: true }
+    const bounded = boundText(result.stdout, MAX_TURN_DIFF_BYTES)
+    return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated, leftOut: false }
   }
 
   private async storeNames(): Promise<string[]> {

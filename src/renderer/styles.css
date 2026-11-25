@@ -1595,7 +1595,7 @@ button:disabled {
 .git-tabs button { padding: 4px 10px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: #929baa; }
 .git-tabs button[aria-selected="true"] { color: #a9c9ff; border-bottom-color: #4f88ff; }
 
-.git-changes, .git-history { display: flex; flex-direction: column; min-height: 0; }
+.git-changes, .git-history, .git-turns { display: flex; flex-direction: column; min-height: 0; }
 /* With a diff open, the Changes tab fills the panel: the list scrolls above the divider, the diff below it. The list gives
    way first, so its share never pushes the diff out of a short panel; the minimum is about what the list, divider and diff need. */
 .git-changes-split { flex: 1; min-height: 200px; }
@@ -1619,7 +1619,7 @@ button:disabled {
 .git-code { font-weight: 700; text-align: center; color: #ffb84d; }
 .git-code-A { color: #20c9a6; } .git-code-D { color: #ff6b7a; } .git-code-R, .git-code-C { color: #a9c9ff; } .git-code-U { color: #ff6b7a; } .git-code-untracked { color: #929baa; }
 .git-actions { padding: 8px 10px 0; }
-.git-actions button, .git-diff-head button, .git-history > button { padding: 4px 9px; font-size: 11px; }
+.git-actions button, .git-diff-head button, .git-history > button, .git-turns > button { padding: 4px 9px; font-size: 11px; }
 
 .git-diff-area { margin: 10px 6px 10px; border: 1px solid #252a33; border-radius: 6px; background: #0b0e14; min-width: 0; }
 .git-diff-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #252a33; }
@@ -1661,6 +1661,10 @@ button:disabled {
 .git-log-subject { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.git-log-subject, .git-commit-file { min-width: 0; text-align: left; color: #a9c9ff; background: transparent; border: 0; padding: 3px 0; }
 button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underline; }
+.git-turn-observed { color: #8b98ad; font-size: 12px; margin: 2px 0 4px; }
+.git-turns-held { padding-top: 8px; }
+.git-turns-held > .git-section-title { padding: 0 10px; }
+.git-turns > button { margin: 0 10px 10px; align-self: flex-start; }
 .git-commit-details { min-width: 0; padding: 6px; background: #10151e; border-left: 2px solid #3a4a66; overflow-wrap: anywhere; }
 .git-commit-details p { margin: 4px 0; }
 .git-commit-file, .git-commit-body { white-space: pre-wrap; overflow-wrap: anywhere; }

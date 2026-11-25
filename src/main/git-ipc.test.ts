@@ -41,7 +41,7 @@ test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
     'desktop:git-amend', 'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-commit-details', 'desktop:git-commit-diff', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-head-commit', 'desktop:git-log', 'desktop:git-log-page', 'desktop:git-open', 'desktop:git-rescan',
-    'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage', 'desktop:git-worktree-remove', 'desktop:git-worktrees',
+    'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-turn-diff', 'desktop:git-turn-files', 'desktop:git-turns', 'desktop:git-unstage', 'desktop:git-worktree-remove', 'desktop:git-worktrees',
   ])
 })
 
@@ -283,4 +283,53 @@ test('amend carries the message, the file list version, the hooks approval and t
   }
   assert.throws(() => call('desktop:git-head-commit', sender(), PROFILE, 'repo-0'), /Invalid repository/)
   assert.equal(calls.length, 0, 'nothing reached the service')
+})
+
+test('the Turns channels read the checkpoint store for the repository the service names, and validate what they are given', async () => {
+  const handlers = new Map<string, Handler>()
+  const asked: unknown[][] = []
+  let root: string | null = 'D:\\project'
+  let store: object | null = {
+    listTurns: async (...args: unknown[]) => { asked.push(['listTurns', ...args]); return [{ n: 1 }] },
+    turnFiles: async (...args: unknown[]) => { asked.push(['turnFiles', ...args]); return { files: [], truncated: false } },
+    turnDiff: async (...args: unknown[]) => { asked.push(['turnDiff', ...args]); return { text: 'patch', truncated: false } },
+  }
+  const service = { repoRootFor: (...args: unknown[]) => { asked.push(['repoRootFor', ...args]); return root } }
+  registerGitIpc({
+    ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener as unknown as Handler) } },
+    service: () => service as unknown as GitService,
+    assertTrustedSender: () => undefined,
+    isMainWindowSender: () => true,
+    checkpoints: async () => store as never,
+  })
+  const event: GitIpcEvent = { sender: { id: 7, on: () => undefined } }
+  const call = (channel: string, ...args: unknown[]): Promise<unknown> => Promise.resolve().then(() => handlers.get(channel)!(event, ...args))
+  const session = '123e4567-e89b-42d3-a456-426614174000'
+
+  assert.deepEqual(await call('desktop:git-turns', PROFILE, 'repo-1'), { available: true, turns: [{ n: 1 }] })
+  assert.deepEqual(await call('desktop:git-turn-files', PROFILE, 'repo-1', session, 3), { files: [], truncated: false })
+  assert.deepEqual(await call('desktop:git-turn-diff', PROFILE, 'repo-1', session, 3, 'src/a b.ts'), { text: 'patch', truncated: false })
+  assert.deepEqual(asked, [
+    ['repoRootFor', 7, PROFILE, 'repo-1'], ['listTurns', 'D:\\project'],
+    ['repoRootFor', 7, PROFILE, 'repo-1'], ['turnFiles', 'D:\\project', session, 3],
+    ['repoRootFor', 7, PROFILE, 'repo-1'], ['turnDiff', 'D:\\project', session, 3, 'src/a b.ts'],
+  ])
+
+  asked.length = 0
+  for (const bad of [
+    ['desktop:git-turns', 'nope', 'repo-1'], ['desktop:git-turns', PROFILE, 'repo-x'],
+    ['desktop:git-turn-files', PROFILE, 'repo-1', '../../etc', 1], ['desktop:git-turn-files', PROFILE, 'repo-1', session, 0],
+    ['desktop:git-turn-files', PROFILE, 'repo-1', session, 1.5], ['desktop:git-turn-files', PROFILE, 'repo-1', session, '1'],
+    ['desktop:git-turn-diff', PROFILE, 'repo-1', session, 1, ''], ['desktop:git-turn-diff', PROFILE, 'repo-1', session, 1, 'a\0b'], ['desktop:git-turn-diff', PROFILE, 'repo-1', session, 1, 7],
+  ] as const) await assert.rejects(() => call(bad[0], ...bad.slice(1)), /Invalid/, JSON.stringify(bad))
+  assert.deepEqual(asked, [], 'nothing reaches the service or the store')
+
+  // The repository above the project folder has no checkpoints, and neither has anything while the feature is off.
+  root = null
+  assert.deepEqual(await call('desktop:git-turns', PROFILE, 'repo-1'), { available: false, turns: [] })
+  await assert.rejects(() => call('desktop:git-turn-files', PROFILE, 'repo-1', session, 1), /not available/)
+  root = 'D:\\project'
+  store = null
+  assert.deepEqual(await call('desktop:git-turns', PROFILE, 'repo-1'), { available: false, turns: [] })
+  await assert.rejects(() => call('desktop:git-turn-diff', PROFILE, 'repo-1', session, 1, 'a.txt'), /not available/)
 })

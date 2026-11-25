@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { CheckpointStore, checkpointRef, clearCheckpointFolder, folderBytes, sessionRefKey, storeNameFor, turnLabel, type CheckpointLimits } from './checkpoint-store.js'
@@ -413,4 +413,179 @@ test('clear deletes each store inside its queue, a store whose first write is st
   // Work that was queued behind the delete finds no record and writes nothing back.
   assert.equal(await store.capture(fresh, 's', await begun, 'before'), null)
   assert.equal(existsSync(store.storeDirectory(fresh)), false)
+})
+
+test('the Turns list: newest first, with the files and the patch of a turn, read from the store alone', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('listed')
+  writeFileSync(join(repo, 'gone.txt'), 'to be deleted\n')
+  writeFileSync(join(repo, 'picture.bin'), Buffer.from([0, 1, 2, 3, 0, 255]))
+  assert.deepEqual(await store.listTurns(repo), [], 'nothing before the first turn, and nothing is created by asking')
+  assert.equal(existsSync(store.storeDirectory(repo)), false)
+
+  const first = await store.beginTurn(repo, 'one', 'edit three files\nand more')
+  await store.capture(repo, 'one', first, 'before')
+  writeFileSync(join(repo, 'a.txt'), 'one\ntwo\n')
+  writeFileSync(join(repo, 'new file.txt'), 'added\n')
+  rmSync(join(repo, 'gone.txt'))
+  writeFileSync(join(repo, 'picture.bin'), Buffer.from([0, 9, 9, 9, 0, 255]))
+  await store.capture(repo, 'one', first, 'after')
+  const quiet = await store.beginTurn(repo, 'two', 'just a question')
+  await store.capture(repo, 'two', quiet, 'before')
+  await store.capture(repo, 'two', quiet, 'after')
+  const refused = await store.beginTurn(repo, 'two', 'held')
+  await store.capture(repo, 'two', refused, 'before', { gate: async () => 'This repository needs review' })
+  await store.capture(repo, 'two', refused, 'after', { gate: async () => 'This repository needs review' })
+  const running = await store.beginTurn(repo, 'one', 'still going')
+  await store.capture(repo, 'one', running, 'before')
+
+  // The project's Git is not needed to read any of it.
+  renameSync(join(repo, '.git'), join(repo, 'git-hidden'))
+  const turns = await store.listTurns(repo)
+  assert.deepEqual(turns.map(turn => [turn.sessionId, turn.n, turn.label, turn.state, turn.diffable, turn.unchanged]), [
+    ['one', 2, 'still going', 'open', false, false],
+    ['two', 2, 'held', 'incomplete', false, false],
+    ['two', 1, 'just a question', 'complete', true, true],
+    ['one', 1, 'edit three files', 'complete', true, false],
+  ])
+  assert.equal(turns[1]!.note, 'This repository needs review')
+
+  const files = await store.turnFiles(repo, 'one', first)
+  assert.equal(files.truncated, false)
+  assert.equal(files.uncertain, false)
+  assert.deepEqual(files.files, [
+    { path: 'a.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'gone.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'new file.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'picture.bin', added: null, deleted: null, binary: true, leftOut: false },
+  ])
+  const patch = await store.turnDiff(repo, 'one', first, 'a.txt')
+  assert.match(patch.text, /^diff --git a\/a\.txt b\/a\.txt/)
+  assert.match(patch.text, /\n one\n\+two\n$/)
+  assert.match((await store.turnDiff(repo, 'one', first, 'new file.txt')).text, /\+added/)
+  assert.equal((await store.turnDiff(repo, 'one', first, 'not-changed.txt')).text, '')
+  assert.deepEqual(await store.turnFiles(repo, 'two', quiet), { files: [], truncated: false, uncertain: false })
+  for (const [session, turn] of [['two', refused], ['one', running], ['one', 99], ['nobody', 1]] as const) {
+    await assert.rejects(() => store.turnFiles(repo, session, turn), /no snapshots to compare/)
+  }
+
+  // Objects that are gone (space reclaimed, or a damaged store) are reported for that turn, not as a crash.
+  rmSync(join(store.storeDirectory(repo), 'git', 'objects'), { recursive: true, force: true })
+  mkdirSync(join(store.storeDirectory(repo), 'git', 'objects'))
+  await assert.rejects(() => store.turnFiles(repo, 'one', first), /no longer available/)
+  await assert.rejects(() => store.turnDiff(repo, 'one', first, 'a.txt'), /no longer available/)
+  assert.equal((await store.listTurns(repo)).length, 4, 'the list itself still reads')
+  // A store that lost a folder Git runs in is reported the same way, not as a missing Git.
+  for (const lost of ['empty', join('git', 'HEAD')]) {
+    const path = join(store.storeDirectory(repo), lost)
+    renameSync(path, path + '.lost')
+    await assert.rejects(() => store.turnFiles(repo, 'one', first), /no longer available/, lost)
+    renameSync(path + '.lost', path)
+  }
+})
+
+test('a file left out of one snapshot of a turn is not shown as added or deleted', async (t) => {
+  const made = await setup(t, { maxFileBytes: 1_000 })
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('grown')
+  writeFileSync(join(repo, 'shrinks.txt'), 'x'.repeat(2_000))
+  // a.txt is small at the start of the turn and over the per-file limit at its end; shrinks.txt is the other way round.
+  const turn = await store.beginTurn(repo, 's', 'grow a file')
+  await store.capture(repo, 's', turn, 'before')
+  writeFileSync(join(repo, 'a.txt'), 'one\n' + 'y'.repeat(2_000))
+  writeFileSync(join(repo, 'shrinks.txt'), 'small now\n')
+  writeFileSync(join(repo, 'real.txt'), 'really added\n')
+  await store.capture(repo, 's', turn, 'after')
+  assert.equal(existsSync(join(repo, 'a.txt')), true, 'the file was never deleted')
+
+  const files = await store.turnFiles(repo, 's', turn)
+  assert.deepEqual(files.files, [
+    { path: 'a.txt', added: null, deleted: null, binary: false, leftOut: true },
+    { path: 'real.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+    { path: 'shrinks.txt', added: null, deleted: null, binary: false, leftOut: true },
+  ])
+  assert.equal(files.uncertain, false)
+  for (const path of ['a.txt', 'shrinks.txt']) assert.deepEqual(await store.turnDiff(repo, 's', turn, path), { text: '', truncated: false, leftOut: true }, 'no "deleted file" or "new file" patch')
+  assert.match((await store.turnDiff(repo, 's', turn, 'real.txt')).text, /new file mode/)
+
+  // A snapshot from before the full list was kept: when more paths were left out than are on record, the turn says so.
+  const metaFile = join(store.storeDirectory(repo), 'meta.json')
+  const meta = JSON.parse(readFileSync(metaFile, 'utf8'))
+  const record = meta.sessions.s.turns[0]
+  delete record.before.notCapturedPaths
+  delete record.after.notCapturedPaths
+  record.after.notCaptured = 40
+  writeFileSync(metaFile, JSON.stringify(meta))
+  const older = await store.turnFiles(repo, 's', turn)
+  assert.equal(older.uncertain, true)
+  assert.equal(older.files.find(file => file.path === 'a.txt')?.leftOut, true, 'a path in the sample is still known')
+})
+
+test('a patch is read only up to what is shown', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, root } = made
+  const read: number[] = []
+  const counting = { run: async (options: Parameters<typeof fixture.runner.run>[0]) => { const result = await fixture.runner.run(options); if (options.args.includes('--patch')) read.push(result.stdout.length); return result } }
+  const store = new CheckpointStore({ root, runner: counting as unknown as typeof fixture.runner })
+  const repo = fixture.repo('large-patch')
+  const turn = await store.beginTurn(repo, 's', 'write a large file')
+  await store.capture(repo, 's', turn, 'before')
+  writeFileSync(join(repo, 'big.txt'), Array.from({ length: 60_000 }, (_, index) => `line ${index} ${'z'.repeat(50)}`).join('\n') + '\n')
+  await store.capture(repo, 's', turn, 'after')
+  const patch = await store.turnDiff(repo, 's', turn, 'big.txt')
+  assert.equal(patch.truncated, true)
+  assert.ok(Buffer.byteLength(patch.text) <= 512 * 1024)
+  assert.equal(read.length, 1)
+  assert.ok(read[0]! <= 512 * 1024 + 64 * 1024, `Git was stopped near the cap (read ${read[0]} bytes of a 3.8 MB patch)`)
+})
+
+test('a tracked folder that is removed or renamed during a turn shows as deleted files, not as left out', async (t) => {
+  const made = await setup(t)
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('folders', (directory) => {
+    for (const folder of ['nested', join('deep', 'er'), 'renamed-from']) mkdirSync(join(directory, folder), { recursive: true })
+    writeFileSync(join(directory, 'nested', 'file.txt'), 'in a folder\n')
+    writeFileSync(join(directory, 'deep', 'er', 'file.txt'), 'two levels down\n')
+    writeFileSync(join(directory, 'renamed-from', 'file.txt'), 'moves\n')
+    fixture.plain(directory, 'add', '.')
+    fixture.plain(directory, 'commit', '-q', '-m', 'folders')
+  })
+  const turn = await store.beginTurn(repo, 's', 'remove folders')
+  await store.capture(repo, 's', turn, 'before')
+  // Removed without staging: the project's Git still lists the paths, and nothing is on disk.
+  rmSync(join(repo, 'nested'), { recursive: true })
+  rmSync(join(repo, 'deep'), { recursive: true })
+  renameSync(join(repo, 'renamed-from'), join(repo, 'renamed-to'))
+  assert.match(fixture.plain(repo, 'status', '--porcelain=v1'), / D nested\/file\.txt/)
+  const after = await store.capture(repo, 's', turn, 'after')
+  assert.equal(after!.notCaptured, 0, 'a deleted folder leaves nothing out')
+
+  const files = await store.turnFiles(repo, 's', turn)
+  assert.equal(files.uncertain, false)
+  assert.deepEqual(files.files, [
+    { path: 'deep/er/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'nested/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'renamed-from/file.txt', added: 0, deleted: 1, binary: false, leftOut: false },
+    { path: 'renamed-to/file.txt', added: 1, deleted: 0, binary: false, leftOut: false },
+  ])
+  const patch = await store.turnDiff(repo, 's', turn, 'nested/file.txt')
+  assert.equal(patch.leftOut, false)
+  assert.match(patch.text, /deleted file mode/)
+
+  // A folder replaced by a link is still not walked, and its files are left out, not called deleted.
+  const outside = join(fixture.root, 'elsewhere')
+  mkdirSync(outside)
+  writeFileSync(join(outside, 'file.txt'), 'outside the repository\n')
+  const next = await store.beginTurn(repo, 's', 'swap a folder for a link')
+  await store.capture(repo, 's', next, 'before')
+  rmSync(join(repo, 'renamed-to'), { recursive: true })
+  folderLink(join(repo, 'renamed-to'), outside)
+  const linked = await store.capture(repo, 's', next, 'after')
+  assert.ok(linked!.notCapturedSample.includes('renamed-to/file.txt'))
+  assert.deepEqual((await store.turnFiles(repo, 's', next)).files, [{ path: 'renamed-to/file.txt', added: null, deleted: null, binary: false, leftOut: true }])
 })

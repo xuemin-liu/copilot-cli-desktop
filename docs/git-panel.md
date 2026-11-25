@@ -167,6 +167,39 @@ panel that destroys work, so it is built around three promises:
 - If one untracked item cannot be moved (it is in use, say), the others still are, and the message says which failed. If Git cannot
   restore a tracked file, the message says so and names the saved copy.
 
+## Turns
+
+The **Turns** tab lists the prompts sent in Copilot sessions that worked in the repository, newest first. Open one to see
+the files that changed between the start and the end of that turn, and open a file to see its diff.
+
+![The Turns tab with one turn open, its two changed files, and the diff of one](turn-checkpoints.png)
+
+- **Where the data comes from.** When a prompt reaches a session, and again when the session becomes idle, the files of
+  the repository are snapshotted into a folder in the app's data (`checkpoints`). Nothing is written to your
+  repository: no commits, refs, objects or index changes. Reading the Turns tab does not run Git in your project.
+- **What a diff means.** It is everything that changed in the folder between the two snapshots, so the tab says
+  "changes observed during this turn". Edits you or another session made at the same time are part of it. Edits made
+  between two turns belong to neither.
+- **What is in a snapshot.** Tracked files, and untracked files that are not ignored, as the bytes on disk (no
+  line-ending conversion, and no filter program runs). Links, anything behind a linked folder, files over 25 MB,
+  submodules and embedded repositories are left out; a turn says how many paths were left out. A file left out of
+  only one of a turn's two snapshots (it grew past 25 MB during the turn, say) is listed as **not compared**, never
+  as added or deleted.
+- **When a turn has no diff.** It is still running; the app closed or the session ended during it; another prompt
+  started before its end was captured; or no snapshot could be taken. The reasons for the last one: the
+  repository's Git settings need review (accept them in this panel first), it uses a sparse checkout, it has more
+  than 60,000 files or 500 MB to snapshot, Git is older than 2.32, or the snapshot took over two minutes.
+- **While a repository needs review.** The other tabs wait for you to accept its Git settings; Turns stays in view
+  below the review card, because it reads the app's own store and not the repository. A turn taken meanwhile shows
+  why it has no snapshot.
+- **Which sessions.** Local Copilot sessions, including worktree sessions. Not side chats, remote sessions or other
+  CLIs' tabs, and not a repository above the project folder.
+- **How long turns are kept.** The newest 50 turns of a session and 200 of a repository, for 30 days, within 1 GiB
+  for a repository. Turns of a session Copilot no longer stores are removed.
+- **Turning it off.** Settings → Turn checkpoints. Turning it off deletes every snapshot.
+- There is no restore: Copilot's conversation cannot be rewound, so putting files back would leave it believing its
+  edits still exist. Use the diff to copy what you need, or Git itself.
+
 ## Branches
 
 The **Branches** tab lists the local branches of the selected repository, newest commit first: the current one is marked, and each
