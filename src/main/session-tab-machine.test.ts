@@ -8,13 +8,17 @@ import {
   addDormantTab,
   canOpenAnotherTab,
   closeTab,
+  createBackgroundTab,
   createTab as createTabState,
+  fanOutAvailableSlots,
   renameTab,
+  resolvePeekHostAndTab,
   setTabLaunchConfig,
   setTabProcessId,
   setTabSessionId,
   setTabStatus,
   tabsForWorkspace,
+  visibleSessionTabs,
   type NewTabInput,
   type TabsState,
 } from './session-tab-machine.js'
@@ -197,4 +201,93 @@ test('tabsForWorkspace filters by workspace profile id', () => {
   state = createTab(state, { id: 'b', title: 'B', workspaceProfileId: 'ws-2' })
   assert.deepEqual(tabsForWorkspace(state, 'ws-1').map((tab) => tab.id), ['a'])
   assert.deepEqual(tabsForWorkspace(state, 'ws-2').map((tab) => tab.id), ['b'])
+})
+
+test('createBackgroundTab preserves activeTabId, uses its own cap, and closeTab skips hidden reviewers', () => {
+  let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Author', workspaceProfileId: 'ws-1' }, 1)
+  assert.equal(canOpenAnotherTab(state, 1), false, 'regular tab limit reached')
+  const meta = { groupId: 'g-1', hostTabId: 'host', cli: 'claude' as const, repository: 'o/r', prNumber: 7, prUrl: 'https://github.com/o/r/pull/7' }
+  state = createBackgroundTab(state, {
+    id: 'rev-claude',
+    title: 'Review #7 (Claude Code)',
+    cli: 'claude',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: meta,
+  })
+  assert.equal(state.activeTabId, 'host', 'background tab never steals focus')
+
+  // Add a second regular tab under higher limit and verify closing it focuses host, never rev-claude:
+  state = createTab(state, { id: 'other', title: 'Other', workspaceProfileId: 'ws-1' }, 5)
+  assert.equal(state.activeTabId, 'other')
+  const afterCloseOther = closeTab(state, 'other')
+  assert.equal(afterCloseOther.activeTabId, 'host')
+
+  // Directly focusing a tempReviewer and closing it returns focus to hostTabId:
+  const focusedRev = activateTab(afterCloseOther, 'rev-claude')
+  assert.equal(closeTab(focusedRev, 'rev-claude').activeTabId, 'host')
+})
+
+test('visibleSessionTabs supports non-destructive peekTabId without clobbering an existing sideChat', () => {
+  let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Host', workspaceProfileId: 'ws-1' })
+  state = createTab(state, { id: 'side', title: 'Side', workspaceProfileId: 'ws-1', sideChat: true, sideParentTabId: 'host' })
+  state = activateTab(state, 'host')
+  const meta = { groupId: 'g-1', hostTabId: 'host', cli: 'codex' as const, repository: 'o/r', prNumber: 9, prUrl: 'https://github.com/o/r/pull/9' }
+  state = createBackgroundTab(state, {
+    id: 'rev-codex',
+    title: 'Review #9 (Codex)',
+    cli: 'codex',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '0.172.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: meta,
+  })
+
+  // Without peek, host + sideChat remain visible:
+  assert.deepEqual(
+    { main: visibleSessionTabs(state).main?.id, side: visibleSessionTabs(state).side?.id },
+    { main: 'host', side: 'side' },
+  )
+  // Peeking rev-codex shows host + rev-codex in split without touching sideParentTabId:
+  assert.deepEqual(
+    { main: visibleSessionTabs(state, 'rev-codex').main?.id, side: visibleSessionTabs(state, 'rev-codex').side?.id },
+    { main: 'host', side: 'rev-codex' },
+  )
+  // Clearing peek or closing rev-codex restores sideChat automatically:
+  const afterRevGone = closeTab(state, 'rev-codex')
+  assert.deepEqual(
+    { main: visibleSessionTabs(afterRevGone, 'rev-codex').main?.id, side: visibleSessionTabs(afterRevGone, 'rev-codex').side?.id },
+    { main: 'host', side: 'side' },
+  )
+
+  // Moving focus into the peeked reviewer terminal keeps peek anchored to its host (host + rev-codex):
+  const focusedReviewer = activateTab(state, 'rev-codex')
+  const peekMap = { host: 'rev-codex' }
+  const resolved = resolvePeekHostAndTab(focusedReviewer, peekMap)
+  assert.deepEqual(resolved, { hostTabId: 'host', peekTabId: 'rev-codex' })
+  assert.deepEqual(
+    { main: visibleSessionTabs(focusedReviewer, resolved.peekTabId).main?.id, side: visibleSessionTabs(focusedReviewer, resolved.peekTabId).side?.id },
+    { main: 'host', side: 'rev-codex' },
+  )
+})
+
+test('fanOutAvailableSlots ignores hidden temporary reviewer tabs when computing available regular tab slots', () => {
+  let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Host', workspaceProfileId: 'ws-1' }, 3)
+  state = createBackgroundTab(state, {
+    id: 'rev-1',
+    title: 'Review #12 · Claude Code',
+    cli: 'claude',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: { groupId: 'g-1', hostTabId: 'host', cli: 'claude', repository: 'o/r', prNumber: 12, prUrl: 'https://github.com/o/r/pull/12' },
+  })
+  assert.equal(fanOutAvailableSlots(state, 3), 2, '1 regular host + 1 hidden reviewer under cap 3 leaves 2 fan-out slots')
 })

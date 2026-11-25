@@ -334,9 +334,10 @@ export function Sidebar({
     const timer = setInterval(() => setNow(Date.now()), 1_000)
     return () => clearInterval(timer)
   }, [ticking])
+  const regularTabs = tabs.filter((tab) => !tab.tempReviewer)
   const compactTabs = groupMode === 'workspace'
-    ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
-    : orderTabs(tabs)
+    ? profiles.flatMap((profile) => orderTabs(regularTabs.filter((tab) => tab.workspaceProfileId === profile.id)))
+    : orderTabs(regularTabs)
   const sessionButton = (tab: DesktopSessionTab, workspaceName?: string, compactIndex?: number): JSX.Element => {
     // Live detail (which tools run now) only while the process is running and no approval is pending.
     const detail = tab.status === 'running' && tab.activityDetail ? tab.activityDetail : null
@@ -408,6 +409,21 @@ export function Sidebar({
           onClick={() => { setOpenActionsTabId(null); onCloseTab(tab.id) }}>×</button>
       </div>}
     </div>
+  }
+  const renderSessionWithReviewers = (tab: DesktopSessionTab, wsName?: string): JSX.Element => {
+    const childReviewers = tabs.filter((candidate) => candidate.tempReviewer?.hostTabId === tab.id)
+    if (childReviewers.length === 0) return sessionButton(tab, wsName)
+    return (
+      <div key={tab.id} className="sidebar-session-with-reviewers">
+        {sessionButton(tab, wsName)}
+        <details className="sidebar-temp-reviewers" open={childReviewers.some((r) => r.id === activeTabId) ? true : undefined}>
+          <summary>Reviewers ({childReviewers.length})</summary>
+          <div className="sidebar-temp-reviewers-list">
+            {childReviewers.map((reviewer) => sessionButton(reviewer))}
+          </div>
+        </details>
+      </div>
+    )
   }
 
   return (
@@ -557,16 +573,16 @@ export function Sidebar({
         {!collapsed && groupMode === 'list' && profiles.length > 0 && (
           <section className="workspace-group">
             <div className="workspace-sessions workspace-sessions-flat" aria-label="All sessions">
-              {orderTabs(tabs.filter((tab) => {
+              {orderTabs(regularTabs.filter((tab) => {
                 if (!normalizedQuery) return true
                 const profile = profiles.find((item) => item.id === tab.workspaceProfileId)
                 return `${tab.title}\n${profile?.name ?? ''}\n${profile?.path ?? ''}`.toLowerCase().includes(normalizedQuery)
-              })).map((tab) => sessionButton(tab, workspaceName(tab)))}
+              })).map((tab) => renderSessionWithReviewers(tab, workspaceName(tab)))}
             </div>
           </section>
         )}
         {!collapsed && groupMode === 'workspace' && profiles.map((profile) => {
-          const allProfileTabs = tabs.filter((tab) => tab.workspaceProfileId === profile.id)
+          const allProfileTabs = regularTabs.filter((tab) => tab.workspaceProfileId === profile.id)
           const profileMatches = `${profile.name}\n${profile.path}`.toLowerCase().includes(normalizedQuery)
           const filteredProfileTabs = normalizedQuery && !profileMatches
             ? allProfileTabs.filter((tab) => tab.title.toLowerCase().includes(normalizedQuery))
@@ -578,7 +594,7 @@ export function Sidebar({
               {workspaceRow(profile)}
               {profileTabs.length > 0 && (
                 <div className="workspace-sessions" aria-label={`${profile.name} sessions`}>
-                  {profileTabs.map((tab) => sessionButton(tab))}
+                  {profileTabs.map((tab) => renderSessionWithReviewers(tab))}
                 </div>
               )}
             </section>

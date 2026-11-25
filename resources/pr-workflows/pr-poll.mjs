@@ -36,8 +36,8 @@ const argv = process.argv.slice(2)
 // CLI skill discovery can prefer a pre-existing personal copy. Return the packaged guide for plain chat commands.
 if (argv[0] === '--guide') {
   const role = argv[1]
-  if (argv.length !== 2 || !['review-pr', 'fix-pr'].includes(role)) {
-    console.error('usage: pr-poll.mjs --guide review-pr|fix-pr')
+  if (argv.length !== 2 || !['review-pr', 'fix-pr', 'review-and-fix-pr'].includes(role)) {
+    console.error('usage: pr-poll.mjs --guide review-pr|fix-pr|review-and-fix-pr')
     process.exit(2)
   }
   const guide = new URL('./skills/' + role + '/SKILL.md', import.meta.url)

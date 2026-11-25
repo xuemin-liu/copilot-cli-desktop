@@ -13,6 +13,8 @@ import { panelTabs, panelButtonLabel, type ToolsAction, type ToolsState } from '
 import { readToolDockPreferences } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
+import { ReviewerBar } from './components/ReviewerBar.js'
+import { regularTabCount, resolvePeekHostAndTab } from '../main/session-tab-machine.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -79,7 +81,21 @@ export function App(): JSX.Element {
   const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)
   const [fanOutNotice, setFanOutNotice] = useState<string | null>(null)
-  const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
+  const [peekReviewerByHost, setPeekReviewerByHost] = useState<Readonly<Record<string, string | null>>>({})
+  const openRegularTabCount = regularTabCount(state)
+  const canOpenTab = canOpenSessionTab(state.resolution, openRegularTabCount, state.maxSessionTabs)
+  const { hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost)
+  const updatePeekReviewer = useCallback((nextPeekTabId: string | null): void => {
+    if (!peekHostTabId) return
+    setPeekReviewerByHost((prev) => ({ ...prev, [peekHostTabId]: nextPeekTabId }))
+    const activeTabObj = state.tabs.find((tab) => tab.id === state.activeTabId)
+    if (activeTabObj?.tempReviewer?.hostTabId === peekHostTabId) {
+      const targetTabId = nextPeekTabId ?? peekHostTabId
+      if (targetTabId !== state.activeTabId) {
+        void window.copilotDesktop.activateTab(targetTabId).catch((error: unknown) => setOperationError(errorMessage(error)))
+      }
+    }
+  }, [peekHostTabId, state.activeTabId, state.tabs])
   const newSessionProfile = inputDialog?.kind === 'new-session'
     ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
     : null
@@ -500,9 +516,18 @@ export function App(): JSX.Element {
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} />
+          <ReviewerBar
+            groups={state.tempReviewerGroups ?? []}
+            activeTabId={state.activeTabId}
+            peekTabId={activePeekTabId}
+            onPeek={updatePeekReviewer}
+            onError={setOperationError}
+          />
           <ToolPanelWorkspace desktop={state} tools={tools} act={actOnTools}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            peekTabId={activePeekTabId}
+            onClearPeek={() => updatePeekReviewer(null)}
             toolsControl={<button type="button" className="session-tools-toggle" aria-label={panelButtonLabel(projectPanel)} aria-expanded={dockOpen}
               onClick={() => {
                 if (!state.activeProfileId) return
@@ -559,7 +584,7 @@ export function App(): JSX.Element {
                 <label htmlFor="fan-out-count">Sessions</label>
                 <select id="fan-out-count" value={inputDialog.count} disabled={inputDialog.pending}
                   onChange={(event) => setInputDialog({ ...inputDialog, count: Number(event.target.value), error: null })}>
-                  {[2, 3, 4, 5].map((n) => <option key={n} value={n} disabled={n > state.maxSessionTabs - state.tabs.length}>{n}</option>)}
+                  {[2, 3, 4, 5].map((n) => <option key={n} value={n} disabled={n > state.maxSessionTabs - openRegularTabCount}>{n}</option>)}
                 </select>
               </>
             )}

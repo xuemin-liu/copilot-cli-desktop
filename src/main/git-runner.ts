@@ -126,6 +126,8 @@ export interface GitRunOptions {
   environment?: GitEnvironmentOptions | undefined
   /** Run with `core.hooksPath` pointed at an empty folder, so no repository hook can run. Always on for reads. */
   disableHooks?: boolean | undefined
+  /** When false, stdout is streamed exclusively to `onOutput` instead of buffered into `result.stdout`. */
+  captureStdout?: boolean | undefined
   /** Called with output as it arrives (for example a commit hook's messages), decoded and never split mid-character. */
   onOutput?: ((stream: 'stdout' | 'stderr', text: string) => void) | undefined
 }
@@ -204,6 +206,12 @@ export class GitRunner {
         clearTimeout(graceTimer)
         options.signal?.removeEventListener('abort', onAbort)
         lease?.release()
+        if (options.onOutput) {
+          const tailOut = decoders.stdout.end()
+          if (tailOut) try { options.onOutput('stdout', tailOut) } catch { /* ignored */ }
+          const tailErr = decoders.stderr.end()
+          if (tailErr) try { options.onOutput('stderr', tailErr) } catch { /* ignored */ }
+        }
         child.stdout?.destroy()
         child.stderr?.destroy()
         resolve({
@@ -239,7 +247,7 @@ export class GitRunner {
       }
       child.stdout?.on('data', (chunk: Buffer) => {
         emit('stdout', chunk)
-        if (truncated) return
+        if (options.captureStdout === false || truncated) return
         const room = maxStdout - stdoutBytes
         if (chunk.length > room) {
           if (room > 0) stdout.push(chunk.subarray(0, room))

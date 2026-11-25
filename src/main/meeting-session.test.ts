@@ -253,7 +253,7 @@ test('ordinary local chats discover both packaged PR skills and preserve existin
     const env = await prepareMeetingSessionEnvironment(directory, control, {COPILOT_SKILLS_DIRS: 'existing'}, capability, {tools, state})
     assert.equal(env.COPILOT_SKILLS_DIRS, 'existing,' + join(tools, 'skills'))
     assert.equal(env.COPILOT_DESKTOP_PR_STATE, state)
-    for (const name of ['fix-pr', 'review-pr']) {
+    for (const name of ['fix-pr', 'review-pr', 'review-and-fix-pr']) {
       const guide = await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8')
       assert.match(guide, new RegExp('name: ' + name))
       assert.equal(execFileSync(process.execPath, [join(tools, 'pr-poll.mjs'), '--guide', name], {encoding: 'utf8'}), guide)
@@ -281,4 +281,43 @@ test('pr-start takes nothing but the person\'s message, and the instructions say
     assert.notEqual(await run('pr-start', '-File', join(directory, 'x.md')), 0, 'it takes no file: the desktop reads the person\'s own message')
     assert.deepEqual(calls, ['pr-start'])
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('pr-reviewers and pr-wait pass actions, PR targets, wait timeouts, and JSON payloads cleanly', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pr-reviewers-helper-'))
+  const calls: Array<{ command: MeetingCommand; request: MeetingRequest }> = []
+  const server = new MeetingControlServer((_tabId, command, request) => {
+    calls.push({ command, request })
+    return { ok: true, message: JSON.stringify({ done: false, command, action: request.action ?? null, pr: request.pr ?? null, wait: request.wait ?? null }) }
+  })
+  try {
+    const env = await prepareMeetingSessionEnvironment(
+      join(directory, 'helper'),
+      await server.register('tab-host'),
+      { ...process.env, COPILOT_AGENT_SESSION_ID: '11111111-1111-4111-8111-111111111111' },
+    )
+    const run = (...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => new Promise((resolveRun) => {
+      const [shell, ...shellArgs] = process.platform === 'win32' ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File'] : ['sh']
+      execFile(shell!, [...shellArgs, env.COPILOT_DESKTOP_MEETING_HELPER!, ...args], { cwd: directory, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 },
+        (error, stdout, stderr) => resolveRun({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr }))
+    })
+    const started = await run('pr-reviewers', '-Action', 'start', '-Pr', '42')
+    assert.equal(started.code, 0, started.stderr)
+    assert.deepEqual(JSON.parse(started.stdout.trim()), { done: false, command: 'pr-reviewers', action: 'start', pr: '42', wait: null })
+
+    const waited = await run('pr-reviewers', '-Action', 'wait', '-Wait', '15')
+    assert.equal(waited.code, 0, waited.stderr)
+    assert.deepEqual(JSON.parse(waited.stdout.trim()), { done: false, command: 'pr-reviewers', action: 'wait', pr: null, wait: 15 })
+
+    const seatWait = await run('pr-wait', '-Wait', '20')
+    assert.equal(seatWait.code, 0, seatWait.stderr)
+    assert.deepEqual(JSON.parse(seatWait.stdout.trim()), { done: false, command: 'pr-wait', action: null, pr: null, wait: 20 })
+
+    assert.notEqual((await run('pr-reviewers', '-Action', 'bogus')).code, 0)
+    assert.notEqual((await run('pr-wait', '-Wait', '999')).code, 0)
+    assert.equal(calls.length, 3)
+  } finally {
+    await server.close()
+    await rm(directory, { recursive: true, force: true })
+  }
 })

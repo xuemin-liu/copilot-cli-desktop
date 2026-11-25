@@ -7,6 +7,50 @@ export type OtherCli = typeof OTHER_CLIS[number]
 
 export const OTHER_CLIS = ['claude', 'codex', 'antigravity'] as const
 
+/**
+ * CLIs verified to act as temporary PR reviewers: Copilot (OS sandbox) plus Claude Code (`--restricted` + MCP)
+ * and Codex CLI (`--sandbox read-only` + MCP), proven in `scripts/pr-temp-reviewers-spike.mjs`.
+ * Antigravity is excluded in v1 because it shares a single global MCP config file without per-seat isolation.
+ */
+export const SUPPORTED_REVIEWER_CLIS = ['copilot', 'claude', 'codex'] as const
+export type ReviewerCli = typeof SUPPORTED_REVIEWER_CLIS[number]
+export const DEFAULT_REVIEWER_CLIS: readonly ReviewerCli[] = ['copilot']
+
+export function isReviewerCli(value: unknown): value is ReviewerCli {
+  return SUPPORTED_REVIEWER_CLIS.some((cli) => cli === value)
+}
+
+/**
+ * Normalize a persisted reviewer CLI list. Malformed or unsupported entries are dropped, order follows
+ * `SUPPORTED_REVIEWER_CLIS`, and an empty or missing value falls back to `fallback`.
+ */
+export function normalizeReviewerClis(
+  value: unknown,
+  fallback: readonly ReviewerCli[] = DEFAULT_REVIEWER_CLIS,
+): ReviewerCli[] {
+  if (!Array.isArray(value)) return [...fallback]
+  const wanted = new Set<ReviewerCli>()
+  for (const item of value) if (isReviewerCli(item)) wanted.add(item)
+  if (wanted.size === 0) return [...fallback]
+  return SUPPORTED_REVIEWER_CLIS.filter((cli) => wanted.has(cli))
+}
+
+/**
+ * Validate a reviewer CLI list submitted from Settings: rejects non-arrays, unknown CLIs, or an empty selection
+ * so a save never silently drops a user choice. `undefined` / `null` means "clear workspace override (inherit global)".
+ */
+export function validateReviewerClis(value: unknown, allowInherit = false): ReviewerCli[] | undefined {
+  if (allowInherit && (value === undefined || value === null)) return undefined
+  if (!Array.isArray(value)) throw new Error('Invalid PR reviewer CLIs')
+  const wanted = new Set<ReviewerCli>()
+  for (const item of value) {
+    if (!isReviewerCli(item)) throw new Error(`Unsupported PR reviewer CLI "${String(item)}"`)
+    wanted.add(item)
+  }
+  if (wanted.size === 0) throw new Error('Choose at least one CLI to act as a PR reviewer')
+  return SUPPORTED_REVIEWER_CLIS.filter((cli) => wanted.has(cli))
+}
+
 const LABELS: Record<SessionCli, string> = {
   copilot: 'Copilot CLI',
   claude: 'Claude Code',

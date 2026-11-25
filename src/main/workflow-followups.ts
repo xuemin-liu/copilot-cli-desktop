@@ -80,6 +80,10 @@ export interface FollowupHost {
   verifyRepository(task:WorkflowTask,snapshot:GithubSnapshot,role?:PrLoopRole): Promise<void>;
   /** PR loops: false while a post of this grant is not known to have landed or not (pr-loop-posts.ts). */
   postsSettled?(grantId:string):boolean;
+  /** True when a temporary reviewer group is already running on this repository and PR. */
+  externalReviewerActive?(repository:string,number:number):boolean;
+  /** Count of active external PR review groups counting toward the five-source limit. */
+  externalActiveSources?():number;
   send(delivery:WorkflowDelivery,grant:FollowupGrant): Promise<'sent'|'busy'>;
   interrupt(grant:FollowupGrant): void;
   changed(): void;
@@ -175,9 +179,10 @@ export class WorkflowFollowups {
     if(!task||terminal(task)||!permissionKey)throw new Error('Open the supported local task session before enrolling it')
     const previous=this.list().find(g=>g.taskId===taskId)
     if(previous?.enabled)throw new Error('Pause the existing enrollment before changing it')
-    if(this.list().filter(g=>g.enabled).length>=5)throw new Error('Pause an enrollment before adding another (five active sources maximum)')
+    if(this.list().filter(g=>g.enabled).length+(this.host.externalActiveSources?.()??0)>=5)throw new Error('Pause an enrollment before adding another (five active sources maximum)')
     const pull=parseGithubPullUrl(url)
     const taken=():boolean=>this.list().some(g=>g.enabled&&g.repository.toLowerCase()===pull.repository.toLowerCase()&&g.number===pull.number&&conflicts(roleOf(g),role))
+      ||((role==='reviewer'||role==='follow-up')&&this.host.externalReviewerActive?.(pull.repository,pull.number)===true)
     if(taken())throw new Error(role==='follow-up'?'This PR already belongs to an enrolled task':'This PR already has a loop of this kind')
     const reviewers:FollowupGrant['reviewers']=[]
     for(const login of new Set(reviewerLogins)) {

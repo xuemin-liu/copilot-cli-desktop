@@ -158,3 +158,41 @@ test('a reviewer can answer an existing thread only for its current revision', (
   await assert.rejects(h.posts.reply({...review,checkedOutBase:'d'.repeat(40)},'session',{to:'100',body:'Verified'}))
   assert.equal(h.writes.length,1)
 }))
+
+test('a seat review receipt preserves checks and seatGeneration across reconciliation', () => fixture(async h => {
+  const head = 'a'.repeat(40), base = 'b'.repeat(40)
+  const seat = { id: 'temp-seat:g1:claude', enabled: true, role: 'reviewer' as const, sessionId: 'seat-gen-1', accountId: 42,
+    repository: 'owner/repo', number: 5, marker: '🤖 ', checkedOut: head, checkedOutBase: base }
+  const api = h.host.api
+  h.host.api = async path => {
+    if (path.endsWith('/pulls/5')) return { state: 'open', head: { sha: head }, base: { sha: base } }
+    if (path.endsWith('/files?per_page=1')) return [{ filename: 'src/a.ts' }]
+    return api(path)
+  }
+  h.failWrites()
+  await assert.rejects(h.posts.review(seat, 'seat-gen-1', {
+    body: `Not approved yet at ${head.slice(0, 12)}: missing build`,
+    comments: [],
+    approve: false,
+    heldApproval: true,
+    checks: { ran: ['source-review'], missing: ['npm test'] },
+    seatGeneration: 'gen-1',
+  }, () => {}))
+  const [intent] = h.posts.list(seat.id)
+  assert.equal(intent?.state, 'intent')
+  assert.deepEqual(intent?.checks, { ran: ['source-review'], missing: ['npm test'] })
+  assert.equal(intent?.seatGeneration, 'gen-1')
+  assert.equal(intent?.heldApproval, true)
+  // Simulate GitHub returning the review body during reconciliation (not as an inline comment)
+  const postedBody = h.github[0]!.body
+  h.github.splice(0)
+  const reviewsPages = [[{ id: 9001, body: postedBody, html_url: 'https://github.com/owner/repo/pull/5#pullrequestreview-9001' }]]
+  h.host.api = async path => path.includes('/reviews?per_page=100') ? reviewsPages : api(path)
+  h.advance()
+  await h.posts.reconcile()
+  const [settled] = h.posts.list(seat.id)
+  assert.equal(settled?.state, 'posted')
+  assert.deepEqual(settled?.checks, { ran: ['source-review'], missing: ['npm test'] })
+  assert.equal(settled?.seatGeneration, 'gen-1')
+  assert.equal(settled?.heldApproval, true)
+}))

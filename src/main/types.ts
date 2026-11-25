@@ -5,7 +5,7 @@ import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import type { MeetingView } from './meeting.js'
-import type { OtherCli } from './session-cli.js'
+import type { OtherCli, ReviewerCli } from './session-cli.js'
 import type { IncompatibleField, OtherCliConfig, PerCliConfig } from './agent-cli-settings.js'
 
 export type RevealPathResult =
@@ -60,6 +60,8 @@ export interface WorkspaceProfile {
   launch: SessionLaunchConfig
   /** Per-CLI permission/model settings for non-Copilot sessions. Absent = each other CLI uses its own defaults. */
   otherCli?: OtherCliConfig
+  /** Optional per-workspace override of allowed temporary PR reviewer CLIs; absent inherits the global setting. */
+  reviewerClis?: ReviewerCli[]
   tabs: RestoredTab[]
   /** For work with no project behind it, in a folder the desktop made. Saved. */
   general?: true
@@ -122,6 +124,66 @@ export interface DesktopSessionTab {
   /** Renamed in the desktop; `/rename` is typed into the session at the next safe moment, until Copilot reports the
    * name. Saved, so a rename made just before quitting reaches Copilot after the next start. */
   renamePending?: true
+  /** Ephemeral PR reviewer session owned by `hostTabId`; hidden from the main sidebar list and never persisted. */
+  tempReviewer?: TempReviewerTabInfo
+}
+
+export interface TempReviewerTabInfo {
+  groupId: string
+  hostTabId: string
+  cli: ReviewerCli
+  repository: string
+  prNumber: number
+  prUrl: string
+}
+
+export type TempReviewerSeatVerdict =
+  | 'starting'
+  | 'reviewing'
+  | 'settling'
+  | 'uncertain'
+  | 'changes-requested'
+  | 'held-approval'
+  | 'approved'
+  | 'failed'
+  | 'stopped'
+
+export interface TempReviewerSeatView {
+  cli: ReviewerCli
+  tabId: string | null
+  verdict: TempReviewerSeatVerdict
+  checkedOut: string | null
+  missingChecks: string[]
+  ranChecks: string[]
+  needsAttention: boolean
+  error: string | null
+  keptCheckoutPath: string | null
+}
+
+export interface TempReviewerConfirmTarget {
+  groupId: string
+  head: string
+  base: string
+  rosterKey: string
+  feedbackSignature: string
+  approveAnyway: boolean
+  missingChecks: Array<{ cli: ReviewerCli; missing: string[] }>
+}
+
+export interface TempReviewerGroupView {
+  id: string
+  hostTabId: string
+  profileId: string
+  repository: string
+  prNumber: number
+  prUrl: string
+  head: string
+  base: string
+  stage: 'starting' | 'active' | 'ended'
+  outcome: 'confirmed' | 'merged' | 'closed' | 'stopped' | null
+  seats: TempReviewerSeatView[]
+  confirmTarget: TempReviewerConfirmTarget | null
+  notice: string | null
 }
 
 /** A session Copilot stored, as the History list shows it. Everything but the last two fields is data the CLI wrote. */
@@ -223,6 +285,8 @@ export interface DesktopState {
   newSessionPrivateOverrides?: boolean
   /** Review meetings between sessions, open ones and recently closed ones. Runtime-only. */
   meetings?: MeetingView[]
+  /** Temporary PR reviewer groups attached to host fix-pr sessions. Runtime-only. */
+  tempReviewerGroups?: TempReviewerGroupView[]
   /** Where outside agents reach the meeting tools over MCP; null when the port was taken. Runtime-only. */
   meetingToolsUrl?: string | null
   /** Desktop control is allowed in Settings on this platform. Runtime-only. */

@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
+
+export interface PersistedCodexAuthSync {
+  seatAuthPath: string
+  realAuthPath: string
+  initialSha256: string
+}
 
 /**
  * Which review owns which reviewer folder and worktree (docs/pr-loops-plan.md, decision 6). A start records its
@@ -19,10 +25,13 @@ export interface ReviewReservation {
   taskId: string | null
   createdAt: number
   kept: boolean
+  /** Trusted restart-recovery record for syncing a rotated Codex OAuth refresh token before deleting the seat home. */
+  codexAuthSync?: PersistedCodexAuthSync | null
 }
 
 const key = (r: Pick<ReviewReservation, 'repository' | 'number' | 'reviewer'>): string => `${r.repository.toLowerCase()}#${r.number}#${r.reviewer}`
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SHA256_HEX = /^[0-9a-f]{64}$/
 
 export class ReviewReservations {
   private records = new Map<string, ReviewReservation>()
@@ -40,7 +49,7 @@ export class ReviewReservations {
     return [...this.records.values()].find((r) => key(r) === wanted) ?? null
   }
   /** Records the review before anything is made. Throws if this review is already held. Atomic within the process. */
-  async reserve(record: Omit<ReviewReservation, 'taskId' | 'createdAt' | 'kept'>): Promise<void> {
+  async reserve(record: Omit<ReviewReservation, 'taskId' | 'createdAt' | 'kept' | 'codexAuthSync'>): Promise<void> {
     if (!UUID.test(record.launchId) || basename(record.root) !== record.launchId) throw new Error('Invalid reviewer folder')
     const held = this.holder(record.repository, record.number, record.reviewer)
     if (held) throw new Error(held.kept
@@ -52,6 +61,16 @@ export class ReviewReservations {
   async bind(launchId: string, taskId: string): Promise<void> {
     const r = this.records.get(launchId); if (!r) return
     this.records.set(launchId, { ...r, taskId }); await this.save()
+  }
+  async setCodexAuthSync(launchId: string, codexAuthSync: PersistedCodexAuthSync | null): Promise<void> {
+    const r = this.records.get(launchId); if (!r) return
+    if (codexAuthSync) {
+      this.records.set(launchId, { ...r, codexAuthSync })
+    } else {
+      const { codexAuthSync: _removed, ...rest } = r
+      this.records.set(launchId, rest)
+    }
+    await this.save()
   }
   async keep(launchId: string): Promise<void> {
     const r = this.records.get(launchId); if (!r || r.kept) return
@@ -68,10 +87,24 @@ export class ReviewReservations {
   }
 }
 
+function validCodexAuthSync(value: unknown, root: string): value is PersistedCodexAuthSync {
+  const c = value as PersistedCodexAuthSync
+  if (!c || typeof c !== 'object') return false
+  if (typeof c.seatAuthPath !== 'string' || !c.seatAuthPath.trim()) return false
+  if (typeof c.realAuthPath !== 'string' || !c.realAuthPath.trim()) return false
+  if (typeof c.initialSha256 !== 'string' || !SHA256_HEX.test(c.initialSha256)) return false
+  const expectedSeatAuth = join(resolve(root), 'home', 'codex-home', 'auth.json')
+  const sameSeat = process.platform === 'win32'
+    ? resolve(c.seatAuthPath).toLowerCase() === expectedSeatAuth.toLowerCase()
+    : resolve(c.seatAuthPath) === expectedSeatAuth
+  return sameSeat
+}
+
 function valid(value: unknown): value is ReviewReservation {
   const v = value as ReviewReservation
   return !!v && typeof v === 'object' && typeof v.launchId === 'string' && UUID.test(v.launchId) && typeof v.repository === 'string' && Number.isSafeInteger(v.number)
     && typeof v.reviewer === 'string' && typeof v.project === 'string' && typeof v.root === 'string' && basename(v.root) === v.launchId
     && typeof v.checkout === 'string' && typeof v.ref === 'string' && v.ref === `refs/desktop-review/${v.launchId}`
     && (v.taskId === null || typeof v.taskId === 'string') && Number.isFinite(v.createdAt) && typeof v.kept === 'boolean'
+    && (v.codexAuthSync === undefined || v.codexAuthSync === null || validCodexAuthSync(v.codexAuthSync, v.root))
 }

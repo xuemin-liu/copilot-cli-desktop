@@ -9,6 +9,7 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MEETING_HELPER_NOTE, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS } from './meeting-messages.js'
 import { MEETING_ID_PATTERN } from './meeting.js'
 import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
+import { handlePrReviewerMcpHttp, PR_REVIEWER_MCP_PATH, type PrReviewerMcpDeps } from './pr-reviewer-mcp.js'
 
 /**
  * What a session needs to host a meeting: a PowerShell helper (no Node or desktop CLI needed, like `browser.ps1`), the
@@ -17,17 +18,20 @@ import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
  * own permissions; the desktop only receives text and never opens a path a model chose.
  */
 
-export const MEETING_COMMANDS = ['start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start'] as const
+export const MEETING_COMMANDS = ['start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-wait', 'pr-reviewers'] as const
 export type MeetingCommand = typeof MEETING_COMMANDS[number]
 const MAX_REQUEST_BYTES = (MAX_MEETING_POST_CHARS + MAX_MEETING_PATCH_CHARS) * 3 + 64 * 1024
 
 const MEETING_HELPER = String.raw`[CmdletBinding(PositionalBinding=$false)]
 param(
-  [Parameter(Position=0)][ValidateSet('start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start')][string]$Command = 'status',
+  [Parameter(Position=0)][ValidateSet('start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-wait', 'pr-reviewers')][string]$Command = 'status',
   [string]$Topic = '',
   [string]$File,
   [string]$To = '',
   [string]$Page = '',
+  [string]$Action = '',
+  [string]$Pr = '',
+  [int]$Wait = 0,
   [switch]$Changes
 )
 $ErrorActionPreference = 'Stop'
@@ -66,6 +70,22 @@ try {
     if ($To -notmatch '^([0-9]{1,19}|conversation)$') { throw 'Usage: meeting.ps1 pr-reply -To <comment id>|conversation -File <reply.md>' }
     $meetingBody.to = $To
   } elseif ($To) { throw ('meeting.ps1 ' + $Command + ' takes no -To.') }
+  if ($Action) {
+    if ($Command -ne 'pr-reviewers' -or @('start', 'status', 'wait', 'stop') -notcontains $Action) { throw 'Usage: meeting.ps1 pr-reviewers -Action start|status|wait|stop [-Pr <number|url>] [-Wait <1..60>]' }
+    $meetingBody.action = $Action
+  } elseif ($Command -eq 'pr-reviewers') {
+    $meetingBody.action = 'status'
+  }
+  if ($Pr) {
+    if ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'start') { throw 'Only pr-reviewers -Action start takes -Pr.' }
+    $meetingBody.pr = $Pr
+  }
+  if ($Wait -ne 0) {
+    if (($Command -ne 'pr-wait' -and ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'wait')) -or $Wait -lt 1 -or $Wait -gt 60) {
+      throw 'Use -Wait <1..60> only with pr-wait or pr-reviewers -Action wait.'
+    }
+    $meetingBody.wait = [string]$Wait
+  }
   if ($Command -eq 'task-report') {
     $reportRoot = [IO.Path]::GetFullPath($env:COPILOT_DESKTOP_TASK_REPORT_DIR)
     $reportPath = [IO.Path]::GetFullPath($File)
@@ -100,7 +120,8 @@ try {
   $meetingJson = $meetingBody | ConvertTo-Json -Compress
   $meetingBytes = [System.Text.Encoding]::UTF8.GetBytes($(if ($meetingJson) { $meetingJson } else { '{}' }))
   $meetingHeaders = @{ Authorization = 'Bearer ' + $meetingControl.token }
-  $meetingResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ('http://127.0.0.1:' + $meetingControl.port + '/' + $Command) -Headers $meetingHeaders -ContentType 'application/json; charset=utf-8' -Body $meetingBytes -TimeoutSec 30 -MaximumRedirection 0
+  $meetingTimeout = $(if ($Command -eq 'pr-wait' -or ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'wait' -or $meetingBody.action -eq 'start'))) { 90 } else { 30 })
+  $meetingResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ('http://127.0.0.1:' + $meetingControl.port + '/' + $Command) -Headers $meetingHeaders -ContentType 'application/json; charset=utf-8' -Body $meetingBytes -TimeoutSec $meetingTimeout -MaximumRedirection 0
   $meetingResult = [System.Text.Encoding]::UTF8.GetString($meetingResponse.RawContentStream.ToArray()) | ConvertFrom-Json
   [Console]::Out.WriteLine($meetingResult.message)
   if (!$meetingResult.ok) { exit 1 }
@@ -124,7 +145,7 @@ fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
 quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
 command=status
 if [ $# -gt 0 ]; then command=$1; shift; fi
-topic=''; file=''; changes=0; to=''; page=''
+topic=''; file=''; changes=0; to=''; page=''; action=''; pr=''; wait_sec=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
@@ -132,10 +153,13 @@ while [ $# -gt 0 ]; do
     -Changes) changes=1; shift ;;
     -Page) [ $# -ge 2 ] || fail 'Usage: pr-read -Page <number>'; page=$2; shift 2 ;;
     -To) [ $# -ge 2 ] || fail 'Usage: -To <comment id>|conversation'; to=$2; shift 2 ;;
+    -Action) [ $# -ge 2 ] || fail 'Usage: -Action start|status|wait|stop'; action=$2; shift 2 ;;
+    -Pr) [ $# -ge 2 ] || fail 'Usage: -Pr <number|url>'; pr=$2; shift 2 ;;
+    -Wait) [ $# -ge 2 ] || fail 'Usage: -Wait <1..60>'; wait_sec=$2; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
-case "$command" in start|join|round|propose-close|end|status|task-report|task-status|pr-reply|pr-review|pr-read|pr-start) ;; *) fail "Unknown command: $command" ;; esac
+case "$command" in start|join|round|propose-close|end|status|task-report|task-status|pr-reply|pr-review|pr-read|pr-start|pr-wait|pr-reviewers) ;; *) fail "Unknown command: $command" ;; esac
 if [ "$command" = pr-reply ]; then
   printf '%s' "$to" | grep -Eq '^([0-9]{1,19}|conversation)$' || fail 'Usage: meeting.sh pr-reply -To <comment id>|conversation -File <reply.md>'
 elif [ -n "$to" ]; then fail "meeting.sh $command takes no -To."; fi
@@ -143,6 +167,21 @@ if [ -n "$page" ]; then
   [ "$command" = pr-read ] || fail 'Only pr-read takes -Page.'
   case "$page" in *[!0-9a-f-]*|0*) fail 'Invalid feedback cursor.' ;; esac
   [ "$(printf %s "$page" | wc -c)" -le 48 ] || fail 'Invalid feedback cursor.'
+fi
+if [ -n "$action" ]; then
+  [ "$command" = pr-reviewers ] || fail 'Only pr-reviewers takes -Action.'
+  case "$action" in start|status|wait|stop) ;; *) fail 'Usage: meeting.sh pr-reviewers -Action start|status|wait|stop' ;; esac
+elif [ "$command" = pr-reviewers ]; then
+  action=status
+fi
+if [ -n "$pr" ]; then
+  [ "$command" = pr-reviewers ] && [ "$action" = start ] || fail 'Only pr-reviewers -Action start takes -Pr.'
+fi
+if [ -n "$wait_sec" ]; then
+  if [ "$command" != pr-wait ] && { [ "$command" != pr-reviewers ] || [ "$action" != wait ]; }; then
+    fail 'Use -Wait <1..60> only with pr-wait or pr-reviewers -Action wait.'
+  fi
+  printf '%s' "$wait_sec" | grep -Eq '^([1-9]|[1-5][0-9]|60)$' || fail 'Use -Wait <1..60>.'
 fi
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
@@ -169,8 +208,10 @@ if [ "$command" = task-report ]; then
 fi
 work=$(mktemp -d) || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$work"; if [ -n "$task_report" ]; then rm -f -- "$task_report"; fi' EXIT
+max_time=30
+if [ "$command" = pr-wait ] || { [ "$command" = pr-reviewers ] && { [ "$action" = wait ] || [ "$action" = start ]; }; }; then max_time=90; fi
 {
-  printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = 30\nmax-redirs = 0\n'
+  printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = %s\nmax-redirs = 0\n' "$max_time"
   printf 'header = "Authorization: Bearer %s"\n' "$token"
   printf 'url = "http://127.0.0.1:%s/%s"\n' "$port" "$command"
   printf 'form-string = "helper=sh"\n'
@@ -183,6 +224,9 @@ if [ -n "$file" ]; then
 fi
 if [ "$command" = start ]; then printf 'form-string = "topic=%s"\n' "$(quote "$topic")" >> "$work/config"; fi
 if [ "$command" = pr-reply ]; then printf 'form-string = "to=%s"\n' "$to" >> "$work/config"; fi
+if [ -n "$action" ]; then printf 'form-string = "action=%s"\n' "$action" >> "$work/config"; fi
+if [ -n "$pr" ]; then printf 'form-string = "pr=%s"\n' "$(quote "$pr")" >> "$work/config"; fi
+if [ -n "$wait_sec" ]; then printf 'form-string = "wait=%s"\n' "$wait_sec" >> "$work/config"; fi
 if [ "$changes" -eq 1 ]; then
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail '-Changes needs a Git repository in the current folder.'
   : > "$work/changes"
@@ -203,7 +247,7 @@ if [ "$changes" -eq 1 ]; then
   if ! grep -q '[^[:space:]]' "$work/changes"; then printf '# No uncommitted changes.' > "$work/changes"; fi
   printf 'form = "changes=<%s"\n' "$(quote "$work/changes")" >> "$work/config"
 fi
-if [ "$command" = pr-read ]; then
+if [ "$command" = pr-read ] || [ "$command" = pr-wait ] || [ "$command" = pr-reviewers ]; then
   printf 'form-string = "format=pr-json"\n' >> "$work/config"
   if [ -n "$page" ]; then printf 'form-string = "page=%s"\n' "$page" >> "$work/config"; fi
   curl --fail-with-body -K - < "$work/config"
@@ -275,8 +319,8 @@ Pull request loops: when the person asks you, in their own message, to review a 
 `
 
 const PR_CHAT_INSTRUCTIONS = `
-When the person asks for fix-pr or review-pr (including /fix-pr, /review-pr, "fix PR 42" or "review PR 287"), perform that role in this conversation. Invoke the matching fix-pr or review-pr skill and follow its instructions, including its bundled poller. A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
-If CLI discovery selects a personal copy or the skill is unavailable, read the packaged workflow with the shell: ${process.platform === 'win32' ? 'node "$env:COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"' : 'node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"'} --guide <fix-pr or review-pr>. Follow that output in this chat.
+When the person asks for fix-pr, review-pr, or review-and-fix-pr (including /fix-pr, /review-pr, /review-and-fix-pr, "fix PR 42", "review PR 287", or "review and fix PR 42"), perform that role in this conversation. Invoke the matching fix-pr, review-pr, or review-and-fix-pr skill and follow its instructions. A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
+If CLI discovery selects a personal copy or the skill is unavailable, read the packaged workflow with the shell: ${process.platform === 'win32' ? 'node "$env:COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"' : 'node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"'} --guide <fix-pr|review-pr|review-and-fix-pr>. Follow that output in this chat.
 For an explicit request to start or stop repository-wide discovery, use the meeting helper's pr-start command.
 `
 
@@ -317,9 +361,11 @@ export async function prepareMeetingSessionEnvironment(directory: string, contro
 
 export interface MeetingRequest { topic: string; text: string; changes: string | null; sessionId?: string
   /** pr-reply: the inline comment id to answer, or "conversation". */
-  page?: string; to?: string }
+  page?: string; to?: string
+  /** pr-reviewers / pr-wait options. */
+  action?: string; pr?: string; wait?: number }
 export interface MeetingResponse { ok: boolean; message: string }
-export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest) => MeetingResponse | Promise<MeetingResponse>
+export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest, signal?: AbortSignal) => MeetingResponse | Promise<MeetingResponse>
 
 /**
  * Outside agents' requests (`/guest/<command>`, meeting-guests.ts). Their tokens are not session tokens: a guest token
@@ -341,7 +387,12 @@ export class MeetingControlServer {
   private listening: Promise<number> | null = null
   private readonly tokens = new Map<string, string>()
 
-  constructor(private readonly handle: MeetingRequestHandler, private readonly guest?: GuestEndpoint, private readonly onListening?: (port: number) => void) {}
+  constructor(
+    private readonly handle: MeetingRequestHandler,
+    private readonly guest?: GuestEndpoint,
+    private readonly onListening?: (port: number) => void,
+    private readonly prReviewerMcp?: PrReviewerMcpDeps<unknown>,
+  ) {}
 
   /** The port, starting the server if no session has yet; an invited guest needs it before its host restarts. */
   port(): Promise<number> {
@@ -384,6 +435,10 @@ export class MeetingControlServer {
           response.end(JSON.stringify(body))
         }
         const port = (server.address() as { port: number } | null)?.port
+        if (this.prReviewerMcp && port && (request.url ?? '').split('?')[0] === PR_REVIEWER_MCP_PATH) {
+          void handlePrReviewerMcpHttp(request, response, port, this.prReviewerMcp)
+          return
+        }
         // No CORS; reject browser-originated requests and DNS rebinding before authentication.
         if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { ok: false, message: 'Forbidden' }); return }
         if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, response, send); return }
@@ -391,15 +446,23 @@ export class MeetingControlServer {
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
         const command = (request.url ?? '').slice(1)
         if (request.method !== 'POST' || !(MEETING_COMMANDS as readonly string[]).includes(command)) { send(404, { ok: false, message: 'Unknown meeting command' }); return }
+        const gone = new AbortController()
+        response.once('close', () => { if (!response.writableFinished) gone.abort() })
         void readFields(request).then(async (body) => {
           if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
           const text = (key: string): string => typeof body[key] === 'string' ? body[key] as string : ''
+          const rawWait = body.wait !== undefined ? Number(body.wait) : undefined
+          const wait = rawWait !== undefined && Number.isSafeInteger(rawWait) && rawWait >= 1 && rawWait <= 60 ? rawWait : undefined
           const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
-            ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}) })
-          if (command === 'pr-read' && body.format === 'pr-json' && answer.ok) {
-            response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-            response.end(answer.message)
-          } else send(command === 'pr-read' && body.format === 'pr-json' && !answer.ok ? 400 : 200, answer)
+            ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}),
+            ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}), ...(wait !== undefined ? { wait } : {}) }, gone.signal)
+          const rawJsonCommand = command === 'pr-read' || command === 'pr-wait' || command === 'pr-reviewers'
+          if (rawJsonCommand && body.format === 'pr-json' && answer.ok) {
+            if (!request.socket.destroyed) {
+              response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              response.end(answer.message)
+            }
+          } else if (!request.socket.destroyed) send(rawJsonCommand && body.format === 'pr-json' && !answer.ok ? 400 : 200, answer)
         }).catch(() => { if (!response.headersSent) send(500, { ok: false, message: 'The desktop could not handle the meeting command.' }) })
       })
       server.once('error', reject)
