@@ -15,7 +15,7 @@ import { safeRepoSegments } from './git-untracked.js'
  * that are on disk. The project's own Git decides which paths are eligible (tracked, or untracked and not ignored) on
  * every capture; the shadow stages exactly that list.
  *
- * The caller must pass the trust gate before `capture`: listing the eligible paths runs Git in the project.
+ * Listing the eligible paths runs Git in the project, so `capture` asks the caller's trust gate right before it does.
  */
 
 export interface CheckpointLimits {
@@ -239,9 +239,13 @@ export class CheckpointStore {
    */
   async eligiblePaths(worktreeRoot: string, signal?: AbortSignal): Promise<EligiblePaths> {
     const project = (args: string[]): Promise<GitRunResult> => this.runner.run({ cwd: worktreeRoot, args, signal, timeoutMs: 30_000, maxStdoutBytes: LIST_MAX_BYTES })
-    const sparse = await project(['config', '--get-regexp', '^(core\\.sparsecheckout|index\\.sparse)$'])
-    if (sparse.exitCode === 0 && /\s(true|yes|on|1)\s*$/mi.test(sparse.stdout.toString('utf8'))) throw new CheckpointRefused('This repository uses a sparse checkout')
-    if (sparse.exitCode !== 0 && sparse.exitCode !== 1) throw new CheckpointRefused(describe(sparse, 'Reading the repository settings'))
+    // The value Git itself would use: the last one over every config file, with a bare key read as true.
+    for (const key of ['core.sparseCheckout', 'index.sparse']) {
+      const value = await project(['config', '--type=bool', '--get', key])
+      if (value.exitCode === 0 && value.stdout.toString('utf8').trim() === 'true') throw new CheckpointRefused('This repository uses a sparse checkout')
+      // 1 means the key is not set.
+      if (value.exitCode !== 0 && value.exitCode !== 1) throw new CheckpointRefused(describe(value, 'Reading the repository settings'))
+    }
     const tracked = await project(['ls-files', '-z', '-s'])
     if (!gitSucceeded(tracked)) throw new CheckpointRefused(describe(tracked, 'Listing tracked files'))
     const others = await project(['ls-files', '-z', '-o', '--exclude-standard'])
@@ -347,22 +351,26 @@ export class CheckpointStore {
 
   /**
    * Snapshot the worktree for one side of a turn and record it on the turn. Never throws: a snapshot that cannot be
-   * taken is recorded with its reason. `refused` is the reason from the caller's own checks (the trust gate), if any.
+   * taken is recorded with its reason. `gate` is the caller's trust check: it is asked inside the queue, right before
+   * Git first runs in the project, and a reason it returns is recorded instead of a snapshot. A turn that is no longer
+   * recorded (its store was deleted) gets nothing: no Git runs and nothing is written.
    * `skip` says the snapshot is no longer wanted. It is asked when the capture reaches the front of the queue and
    * again after the last file was read, just before the snapshot is saved; a true answer records nothing. After a
    * turn's end snapshot the store's turn caps are enforced, so they hold while the app stays open.
    */
-  capture(worktreeRoot: string, sessionId: string, turn: number, phase: CheckpointPhase, options: { refused?: string | null; skip?: () => boolean } = {}): Promise<CheckpointCapture | null> {
+  capture(worktreeRoot: string, sessionId: string, turn: number, phase: CheckpointPhase, options: { gate?: () => Promise<string | null>; skip?: () => boolean } = {}): Promise<CheckpointCapture | null> {
     const store = this.storeDirectory(worktreeRoot)
     return this.queued(store, async () => {
       if (options.skip?.()) return null
       let discarded = false
+      const meta = await this.readMeta(store, worktreeRoot)
+      if (!meta.sessions[sessionId]?.turns.some(candidate => candidate.n === turn)) return null
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), this.limits.captureTimeoutMs)
       let result: CheckpointCapture
-      const meta = await this.readMeta(store, worktreeRoot)
       try {
-        if (options.refused) throw new CheckpointRefused(options.refused)
+        const refused = await options.gate?.()
+        if (refused) throw new CheckpointRefused(refused)
         await this.ensureShadow(store, controller.signal)
         const eligible = await this.eligiblePaths(worktreeRoot, controller.signal)
         const tree = await this.stage(store, worktreeRoot, eligible.paths, controller.signal)
@@ -490,7 +498,7 @@ export class CheckpointStore {
       session.turns = keep
       if (keep.length === 0) delete meta.sessions[sessionId]
     }
-    const dropOldest = (count: number): void => {
+    const dropOldest = (count: number): number => {
       const all = Object.entries(meta.sessions).flatMap(([sessionId, session]) => session.turns.filter(turn => turn.state !== 'open').map(turn => ({ sessionId, turn })))
         .sort((left, right) => left.turn.startedAt - right.turn.startedAt).slice(0, Math.max(0, count))
       for (const { sessionId, turn } of all) {
@@ -499,6 +507,7 @@ export class CheckpointStore {
         if (session.turns.length === 0) delete meta.sessions[sessionId]
         removed.push({ sessionId, n: turn.n })
       }
+      return all.length
     }
     const count = (): number => Object.values(meta.sessions).reduce((sum, session) => sum + session.turns.length, 0)
     dropOldest(count() - this.limits.maxTurnsPerStore)
@@ -530,11 +539,14 @@ export class CheckpointStore {
     }
     let bytes = await reclaim()
     for (let round = 0; bytes > this.limits.maxStoreBytes && count() > 0 && round < 8; round++) {
-      dropOldest(Math.max(1, Math.ceil(count() / 2)))
+      // Open turns are never dropped: with only those left there is nothing more to give back.
+      if (dropOldest(Math.max(1, Math.ceil(count() / 2))) === 0) break
       bytes = await reclaim()
     }
     report.removedTurns += removed.length
-    if (count() === 0 || bytes > this.limits.maxStoreBytes) { await this.removeStore(name); report.deletedStores++; return }
+    // A store with a turn still running keeps its start snapshot, whatever its size.
+    const running = Object.values(meta.sessions).some(session => session.turns.some(turn => turn.state === 'open'))
+    if (!running && (count() === 0 || bytes > this.limits.maxStoreBytes)) { await this.removeStore(name); report.deletedStores++; return }
     report.bytesAfter += bytes
   }
 }

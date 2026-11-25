@@ -21,11 +21,10 @@ export interface CheckpointTargetInput {
   projectPath: string
 }
 
-export interface CheckpointTargetDeps {
+export interface CheckpointGateDeps {
   executable: GitExecutable
   runner: GitRunner
   trust: CheckpointTrust
-  homeDirectory?: string
 }
 
 export const NEEDS_REVIEW = 'This repository’s Git settings need review in the Git panel first'
@@ -33,40 +32,47 @@ export const NEEDS_REVIEW = 'This repository’s Git settings need review in the
 /**
  * The repository a session's turns are snapshotted in, or null when it gets no checkpoints: no repository, a
  * repository above the project folder (its changes are not the project's), or a folder that is not the project's.
- * The same checks the Git panel makes before it runs Git are made here; a repository that fails one is returned with
- * the reason, so the turn can say why it has no snapshot.
+ * Only the filesystem is read here. Whether Git may run there is `checkpointGate`'s question, asked before every
+ * snapshot.
  */
-export async function resolveCheckpointTarget(input: CheckpointTargetInput, deps: CheckpointTargetDeps): Promise<TurnTarget | null> {
+export async function resolveCheckpointTarget(input: CheckpointTargetInput, homeDirectory?: string): Promise<TurnTarget | null> {
   if (!hostPath.isAbsolute(input.cwd) || !isLocalFilesystemPath(input.cwd) || !isLocalFilesystemPath(input.projectPath)) return null
   let found: Awaited<ReturnType<typeof enclosingRepository>>
   let project: string
   try {
-    found = await enclosingRepository(input.cwd, deps.homeDirectory)
+    found = await enclosingRepository(input.cwd, homeDirectory)
     project = await realPathNative(input.projectPath)
   } catch { return null }
   if (found.kind !== 'found') return null
-  const root = found.root
-  let issue = found.issue
-  if (!isSameOrInside(root, project)) {
-    // Outside the project folder only a linked worktree of one of the project's own repositories counts.
-    const worktree = await inspectSessionWorktree(root, main => isSameOrInside(main, project))
-    if (!worktree) return null
-    issue ??= worktree.issue
-  }
-  const target = (refused: string | null): TurnTarget => ({ sessionId: input.sessionId, worktreeRoot: root, refused })
-  if (issue) return target(issue)
+  // Outside the project folder only a linked worktree of one of the project's own repositories counts.
+  if (!isSameOrInside(found.root, project) && !(await inspectSessionWorktree(found.root, main => isSameOrInside(main, project)))) return null
+  return { sessionId: input.sessionId, worktreeRoot: found.root, projectPath: project }
+}
+
+/**
+ * Why Git must not be run in a target's repository right now, or null when it may. These are the checks the Git panel
+ * makes before every command: the `.git` pointers stay on local storage, a worktree still belongs to the project's
+ * repository, and the repository's own config names no program the person has not accepted. It runs before each
+ * snapshot, because an agent can change any of this during a turn.
+ */
+export async function checkpointGate(target: Pick<TurnTarget, 'worktreeRoot' | 'projectPath'>, deps: CheckpointGateDeps): Promise<string | null> {
   const { version } = deps.executable
   if (!deps.executable.supported || version.major < MIN_CHECKPOINT_GIT.major || (version.major === MIN_CHECKPOINT_GIT.major && version.minor < MIN_CHECKPOINT_GIT.minor)) {
-    return target(`Checkpoints need Git ${MIN_CHECKPOINT_GIT.major}.${MIN_CHECKPOINT_GIT.minor} or newer (this is ${version.text})`)
+    return `Checkpoints need Git ${MIN_CHECKPOINT_GIT.major}.${MIN_CHECKPOINT_GIT.minor} or newer (this is ${version.text})`
   }
+  const root = target.worktreeRoot
   try {
-    // Checked again right before Git runs: the pointers can change while the session is open.
     const entry = await inspectGitEntry(root)
-    if (!entry) return null
-    if (entry.issue) return target(entry.issue)
+    if (!entry) return 'The .git entry is gone'
+    if (entry.issue) return entry.issue
+    if (!isSameOrInside(root, target.projectPath)) {
+      const worktree = await inspectSessionWorktree(root, main => isSameOrInside(main, target.projectPath))
+      if (!worktree) return 'This folder is no longer a worktree of its repository'
+      if (worktree.issue) return worktree.issue
+    }
     const scan = await scanRepoConfig(deps.runner, root, undefined, deps.trust)
-    if (scan.includes === 'held') return target(NEEDS_REVIEW)
-    if (scan.items.length > 0 && !(await deps.trust.isTrusted(root, scan.hash))) return target(NEEDS_REVIEW)
-  } catch { return target('This repository’s Git settings could not be read') }
-  return target(null)
+    if (scan.includes === 'held') return NEEDS_REVIEW
+    if (scan.items.length > 0 && !(await deps.trust.isTrusted(root, scan.hash))) return NEEDS_REVIEW
+  } catch { return 'This repository’s Git settings could not be read' }
+  return null
 }

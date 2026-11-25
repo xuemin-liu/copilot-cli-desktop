@@ -124,7 +124,7 @@ import { projectActivity } from './git-branch.js'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import { CheckpointStore, clearCheckpointFolder } from './checkpoint-store.js'
 import { TurnCheckpoints } from './turn-checkpoints.js'
-import { resolveCheckpointTarget } from './turn-checkpoint-target.js'
+import { checkpointGate, resolveCheckpointTarget } from './turn-checkpoint-target.js'
 import { GitTrustStore } from './git-trust.js'
 import { registerGitIpc } from './git-ipc.js'
 import type { GitIpcEvent } from './git-ipc.js'
@@ -478,8 +478,10 @@ function turnCheckpointRuntime(): Promise<CheckpointRuntime | null> {
         if (!tab || !session || tab.cli || tab.remote || tab.sideChat || !tab.lastSessionId || !session.sessionCwd) return null
         const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
         if (!profile) return null
-        return resolveCheckpointTarget({ sessionId: tab.lastSessionId, cwd: session.sessionCwd, projectPath: profile.path }, { executable, runner, trust: gitTrustStore() })
+        return resolveCheckpointTarget({ sessionId: tab.lastSessionId, cwd: session.sessionCwd, projectPath: profile.path })
       },
+      // The Git panel's own checks, made again right before every snapshot.
+      gate: (target) => checkpointGate(target, { executable, runner, trust: gitTrustStore() }),
       onError: (error) => { void writeAppLog(`Turn checkpoint failed: ${redactDiagnosticText(String(error)).slice(0, 300)}`).catch(() => {}) },
     })
     return { store, turns }
@@ -2145,6 +2147,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (managedTabs.get(id)?.session !== session) return
     const previous = tabsState.tabs.find(candidate => candidate.id === id)?.lastSessionId
     if (previous && previous !== sessionId) {
+      // The tab switched to another conversation: a turn of the earlier one never ends here.
+      noteTurn((turns) => turns.tabClosed(id))
       cancelHeldInput(id,true)
       endAutomatic(id,false);endMeetingJournal(id,false)
       sessionLastOutputAt.delete(id)
@@ -3994,6 +3998,8 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
       if (managed) {
         await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before unloading: ${String(error)}`))
         await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+        // A stop can return before `exit` fires, and the listeners go next.
+        noteTurn((turns) => turns.tabClosed(tabId))
         managed.session.removeAllListeners()
         managedTabs.delete(tabId)
         if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
@@ -4038,6 +4044,8 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       if (managed) {
         await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before closing: ${String(error)}`))
         await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+        // A stop can return before `exit` fires, and the listeners go next.
+        noteTurn((turns) => turns.tabClosed(tabId))
         managed.session.removeAllListeners()
         managedTabs.delete(tabId)
       }
@@ -4216,6 +4224,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         || (cli === 'claude' && await claudeSessionStored(sessionId))
         || (cli === 'antigravity' && await antigravitySessionStored(sessionId))
       )
+      noteTurn((turns) => turns.tabClosed(tabId))
       managed?.session.removeAllListeners()
       const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
       let replacement: PtySession
@@ -4306,6 +4315,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       resumeSessionId = null
     }
     tab = tabsState.tabs.find((candidate) => candidate.id === tabId) ?? tab
+    noteTurn((turns) => turns.tabClosed(tabId))
     managed?.session.removeAllListeners()
     // Capture the terminal size as the very last step before constructing
     // the replacement — no further awaits happen between this line and
@@ -5509,6 +5519,7 @@ async function stopAllSessions(): Promise<void> {
     const managed = managedTabs.get(tabId)
     if (!managed) return
     await managed.session.stop().catch(() => {})
+    noteTurn((turns) => turns.tabClosed(tabId))
     managed.session.removeAllListeners()
     managedTabs.delete(tabId)
   })))
@@ -6637,6 +6648,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   if (checkpointsTurnedOff) {
     // Deleting needs only the app's own folder, so it works when Git is gone. The store's queue is used when there is one.
     const runtime = checkpointRuntime ? await checkpointRuntime : null
+    // First, so no turn that is open adds a snapshot after the delete.
+    runtime?.turns.turnedOff()
     try {
       if (runtime) await runtime.store.clear()
       else await clearCheckpointFolder(join(app.getPath('userData'), 'checkpoints'))

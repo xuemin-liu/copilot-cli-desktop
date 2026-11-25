@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { CheckpointStore, checkpointRef, clearCheckpointFolder, folderBytes, sessionRefKey, storeNameFor, turnLabel, type CheckpointLimits } from './checkpoint-store.js'
@@ -185,6 +185,12 @@ test('no checkpoint, with the reason, for a sparse checkout, too many files, too
   const sparse = fixture.repo('sparse')
   fixture.plain(sparse, 'config', 'core.sparseCheckout', 'true')
   assert.match((await snap(store, sparse)).reason ?? '', /sparse checkout/)
+  // The value Git would use decides: a later `false` wins over an earlier `true`, and a bare key means true.
+  appendFileSync(join(sparse, '.git', 'config'), '[core]\n\tsparseCheckout = false\n')
+  assert.equal((await snap(store, sparse)).reason, null)
+  const bare = fixture.repo('sparse-bare')
+  appendFileSync(join(bare, '.git', 'config'), '[index]\n\tsparse\n')
+  assert.match((await snap(store, bare)).reason ?? '', /sparse checkout/)
 
   const many = fixture.repo('many')
   for (const name of ['1', '2', '3', '4']) writeFileSync(join(many, `${name}.txt`), name)
@@ -196,7 +202,7 @@ test('no checkpoint, with the reason, for a sparse checkout, too many files, too
 
   const refused = fixture.repo('refused')
   const turn = await store.beginTurn(refused, 's', 'p')
-  const taken = await store.capture(refused, 's', turn, 'before', { refused: 'This repository needs review in the Git panel' })
+  const taken = await store.capture(refused, 's', turn, 'before', { gate: async () => 'This repository needs review in the Git panel' })
   assert.equal(taken?.reason, 'This repository needs review in the Git panel')
   assert.equal(existsSync(join(root, storeNameFor(refused), 'git')), false, 'a refused capture starts no Git at all')
 })
@@ -365,4 +371,26 @@ test('deleting the checkpoint folder needs no Git, leaves other folders, and rep
   assert.equal(existsSync(join(root, 'not-a-store', 'git', 'x')), true)
   assert.equal(existsSync(join(root, 'c'.repeat(24))), true)
   await clearCheckpointFolder(join(root, 'missing'))
+})
+
+test('a store with a turn still running is never deleted for its size, and a turn whose record is gone gets nothing', async (t) => {
+  const made = await setup(t, { maxStoreBytes: 100_000 })
+  if (!made) return
+  const { fixture, store } = made
+  const repo = fixture.repo('running')
+  writeFileSync(join(repo, 'blob.bin'), randomBytes(300_000))
+  const turn = await store.beginTurn(repo, 's', 'still running')
+  const before = await store.capture(repo, 's', turn, 'before')
+  // The startup prune runs while the turn is open, and the store is over its size cap.
+  const report = await store.prune({ sessionExists: () => true })
+  assert.equal(report.deletedStores, 0)
+  assert.equal((await store.turns(repo)).s![0]!.state, 'open')
+  assert.equal((await store.fileAt(repo, before!.commit!, 'blob.bin'))?.length, 300_000, 'its start snapshot still reads')
+
+  // The store is deleted (the feature was turned off) while a capture for the turn is still on its way.
+  await store.clear()
+  let gateAsked = false
+  assert.equal(await store.capture(repo, 's', turn, 'after', { gate: async () => { gateAsked = true; return null } }), null)
+  assert.equal(gateAsked, false, 'no Git is run for it')
+  assert.equal(existsSync(store.storeDirectory(repo)), false, 'and nothing is written back')
 })
