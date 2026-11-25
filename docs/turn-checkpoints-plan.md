@@ -200,8 +200,11 @@ B1 and running it in the real app with the real CLI (1.0.114) and the local mock
   `<pasted_content file="…/session-state/<session id>/files/paste-<number>.txt" size="40.2 KB" lines="703" />`.
   The message sent to the model carried the same reference and none of the pasted text.
 - So Copilot CLI already does what B1 set out to do: it saves a large paste as a file in its own session folder and
-  puts a reference in the prompt. Its file needs no `--add-dir` and no approval, and Copilot cleans it up with the
-  session.
+  puts a reference in the prompt.
+- Not verified, so do not rely on it for sensitive text: whether the model can read that file without an approval
+  (the mock model was not asked to read it; the only file read in this run was of the B1 prototype's own file, with
+  `--add-dir`), and how long the file is kept (no session was deleted and the file was not looked at again, so
+  which action, if any, removes it is unknown). The file sits under Copilot's `session-state` folder in plain text.
 - The note in `meeting-turns.ts` that "older CLIs recorded a large paste as a placeholder" does not mean that current
   ones send the full text, as the first spike report assumed. That assumption was wrong.
 - Not measured: the size at which Copilot starts doing this. 40 KB is over it.
