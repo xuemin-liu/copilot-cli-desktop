@@ -4970,14 +4970,17 @@ async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string
 }
 
 /**
- * Take every one of these seats out of the meeting now, in this turn of the event loop: their meeting seats are closed
- * and they leave the hub before anything is awaited. A run that is stopped while its first round is held releases that
+ * Take every one of these seats out of the meeting now, in this turn of the event loop: their sessions are told to stop,
+ * their meeting seats are closed and they leave the hub, all before anything is awaited. A run that is stopped while its first round is held releases that
  * round right after; without this the seats still waiting for their teardown would be sent the post the person just
  * stopped them from getting.
  */
 function revokeMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: string): void {
   for (const seat of seats) {
     clearMeetingSeatJoinTimer(seat)
+    // Every session is told to stop now, also one that has not spawned yet: the teardown below takes the seats one
+    // after another, and a CLI must not start for a seat that is waiting its turn to be torn down.
+    if (seat.tabId) void managedTabs.get(seat.tabId)?.session.stop().catch(() => {})
     const guestSeatId = seat.guestSeatId
     seat.guestSeatId = null
     if (!guestSeatId) continue
@@ -4998,6 +5001,7 @@ function reapMeetingReviewers(): void {
   for (const group of meetingReviewers.list()) {
     if (group.stage === 'ended' || meetingHub.isOpen(group.meetingId)) continue
     const seats = meetingReviewers.end(group.id, 'closed')
+    revokeMeetingReviewerSeats(seats, 'The meeting is closed.')
     void teardownMeetingReviewerSeats(seats, 'The meeting is closed.')
   }
 }
@@ -5322,6 +5326,11 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
   if (action === 'retry') {
     const profile = desktopConfig.profiles.find((candidate) => candidate.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
+    // A seat that still has its tab keeps that slot through the retry; one without a tab needs a free one, like a start.
+    const current = group.seats.get(payload)
+    if (current && current.tabId === null && current.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
+      throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
+    }
     const { previous, next } = meetingReviewers.replace(group.id, payload)
     broadcastState()
     await releaseMeetingReviewerSeat(previous, 'This reviewer was started again.')
