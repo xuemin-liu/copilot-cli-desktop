@@ -182,6 +182,17 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     assert.equal(usage.code, 1)
     assert.match(usage.stderr, /Usage: meeting\.(ps1|sh) round -File/)
     assert.equal(calls.length, 3, 'a usage error sends nothing')
+    // -Reviewers asks the desktop to start hidden reviewer sessions with the meeting; it belongs to start alone.
+    assert.equal(calls[0]!.request.reviewers, undefined, 'a plain start asks for none')
+    const withReviewers = await run('start', '-Topic', 'login plan', '-File', join(directory, 'plan.md'), '-Reviewers')
+    assert.equal(withReviewers.code, 0, withReviewers.stderr)
+    assert.equal(calls.length, 4)
+    assert.equal(calls.at(-1)!.command, 'start')
+    assert.equal(calls.at(-1)!.request.reviewers, true)
+    const misplaced = await run('round', '-File', join(directory, 'plan.md'), '-Reviewers')
+    assert.equal(misplaced.code, 1)
+    assert.match(misplaced.stderr, /Use -Reviewers only with start/)
+    assert.equal(calls.length, 4, 'a misplaced -Reviewers sends nothing')
   } finally {
     await server.close()
     await rm(directory, { recursive: true, force: true })

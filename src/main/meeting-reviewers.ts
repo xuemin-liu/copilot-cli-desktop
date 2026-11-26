@@ -40,6 +40,11 @@ export interface MeetingReviewerGroup {
   projectPath: string
   /** The commit the reviewers' checkouts are pinned to; null for a plan-only meeting (no repository, or no commit yet). */
   commit: string | null
+  /**
+   * The permission mode the person was asked about and allowed for this run: every launch of every seat, a Retry
+   * included, uses it, whatever the setting says by then. Null until the person has answered.
+   */
+  allowAll: boolean | null
   /** `consent`: the person is being asked. `starting`: seats are coming up and round 1 is held. `active`: the gate is open. */
   stage: 'consent' | 'starting' | 'active' | 'ended'
   outcome: 'closed' | 'stopped' | null
@@ -99,7 +104,7 @@ export class MeetingReviewerRegistry {
     const id = randomUUID()
     const group: MeetingReviewerGroup = {
       id, meetingId: input.meetingId, hostTabId: input.hostTabId, profileId: input.profileId, projectPath: input.projectPath,
-      commit: null, stage: 'consent', outcome: null, seats: new Map(), notice: null,
+      commit: null, allowAll: null, stage: 'consent', outcome: null, seats: new Map(), notice: null,
     }
     for (const cli of input.clis) group.seats.set(cli, newSeat(id, cli, false))
     this.groups.set(id, group)
@@ -155,6 +160,8 @@ export class MeetingReviewerRegistry {
     const previous = group?.seats.get(cli)
     if (!group || !previous) throw new MeetingReviewerError('That reviewer seat is not in this run.')
     if (group.stage === 'ended') throw new MeetingReviewerError('This run is over.')
+    // Nothing starts before the person has answered: a Retry is no way round the question.
+    if (group.stage === 'consent') throw new MeetingReviewerError('Answer the question about hidden reviewers first.')
     const next = newSeat(groupId, cli, true)
     group.seats.set(cli, next)
     previous.lifecycle = previous.lifecycle === 'starting' || previous.lifecycle === 'joined' ? 'stopped' : previous.lifecycle
@@ -168,6 +175,20 @@ export class MeetingReviewerRegistry {
 
   joinedCount(group: MeetingReviewerGroup): number {
     return [...group.seats.values()].filter((seat) => seat.lifecycle === 'joined').length
+  }
+
+  /** The person closed a seat's tab themselves: the seat no longer has one, and if it was in the meeting it has left. */
+  tabClosed(tabId: string): { group: MeetingReviewerGroup; seat: MeetingReviewerSeat; wasLive: boolean } | null {
+    const found = this.seatByTabId(tabId)
+    if (!found) return null
+    const { seat } = found
+    seat.tabId = null
+    const wasLive = found.group.stage !== 'ended' && (seat.lifecycle === 'starting' || seat.lifecycle === 'joined')
+    if (wasLive) {
+      seat.lifecycle = seat.lifecycle === 'joined' ? 'left' : 'failed'
+      seat.error = 'Its tab was closed.'
+    }
+    return { ...found, wasLive }
   }
 
   /** The run is over. Returns its seats, for the caller to close their sessions and folders. Idempotent. */

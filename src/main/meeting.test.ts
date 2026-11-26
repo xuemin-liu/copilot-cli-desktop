@@ -605,7 +605,7 @@ test('a proposal to close that everyone left does not turn the host\'s revised p
   h.hub.post('tab-host', 'propose-close', '- ship v1', null)
   assert.equal(h.last('tab-b').kind, 'vote')
   h.hub.leave('tab-b')
-  assert.equal(h.hub.views()[0]!.stage, 'waiting')
+  assert.equal(h.hub.views()[0]!.stage, 'host', 'a vote nobody is left to answer goes back to the host')
 
   // The host changes its mind and posts something to review.
   h.hub.post('tab-host', 'round', 'v2: one more change, please review', null)
@@ -619,15 +619,26 @@ test('a proposal to close that everyone left does not turn the host\'s revised p
   assert.equal(h.to('tab-host').at(-1)!.kind, 'digest')
 })
 
-test('a proposal to close that everyone left is still put to whoever joins next, when the host did not replace it', () => {
+test('a proposal to close whose only voter left has failed: it is not put to whoever joins next', () => {
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'v1', changes: null })
   h.hub.join(reviewerB, 'K7QF')
   h.hub.turnCompleted('tab-b', h.last('tab-b'), 'ok')
   h.hub.post('tab-host', 'propose-close', '- ship v1', null)
   h.hub.leave('tab-b')
-  h.hub.join(reviewerC, 'K7QF')
+  const back = h.to('tab-host').at(-1)!
+  assert.equal(back.kind, 'digest')
+  assert.match(back.text, /Not everyone agreed/)
+  // The seat that replaces the voter joins from the next round: it is not handed the vote, and cannot close the meeting.
+  h.hub.join(reviewerC, 'K7QF', { nextRound: true })
+  assert.deepEqual(h.to('tab-c'), [])
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  assert.equal(h.hub.views()[0]!.outcome, null)
+  // Put again, to who is here now, it is theirs to answer.
+  h.hub.post('tab-host', 'propose-close', '- ship v1', null)
   assert.equal(h.last('tab-c').kind, 'vote')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'AGREE')
+  assert.equal(h.hub.views()[0]!.outcome, 'agreed')
 })
 
 test('a post held at the round limit is kept for the next reviewer when everyone left during the pause', () => {
@@ -1009,10 +1020,32 @@ test('a seat that replaces another mid-round gets nothing until the next round',
   assert.deepEqual(h.to('tab-d'), [])
   assert.deepEqual(h.hub.views()[0]!.waitingFor, ['tab-b'], 'the round does not wait for it')
   h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review')
-  assert.equal(h.to('tab-host').at(-1)?.kind, 'digest')
+  const digest = h.to('tab-host').at(-1)!
+  assert.equal(digest.kind, 'digest')
+  // It was never asked, so it is not reported as silent: one reviewer was asked, and one replied.
+  assert.doesNotMatch(digest.text, /No reply in time/)
+  assert.doesNotMatch(digest.text, /review late/)
+  assert.doesNotMatch(h.files.get(at('K7QF', 'round-1', 'replies.md'))!, /review late/)
   h.hub.post('tab-host', 'round', 'plan v2', null)
   assert.equal(h.to('tab-d').at(-1)?.kind, 'post')
   assert.deepEqual([...h.hub.views()[0]!.waitingFor].sort(), ['tab-b', 'tab-d'])
+  // From then on it is a reviewer like any other: its silence is reported.
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review 2')
+  h.advance(10 * 60_000)
+  assert.match(h.to('tab-host').at(-1)!.text, /No reply in time from: .*review late/)
+})
+
+test('a seat that replaces another while the host has the replies gets nothing until the host posts again', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review')
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  h.hub.join(reviewerD, 'K7QF', { nextRound: true })
+  assert.deepEqual(h.to('tab-d'), [], 'the finished round is not handed to it as a late turn')
+  h.hub.post('tab-host', 'round', 'plan v2', null)
+  assert.equal(h.to('tab-d').at(-1)?.kind, 'post')
+  assert.match(h.to('tab-d').at(-1)!.text, /round 2/)
 })
 
 test('a voter who leaves during a vote keeps it from passing: the proposal goes back to the host', () => {

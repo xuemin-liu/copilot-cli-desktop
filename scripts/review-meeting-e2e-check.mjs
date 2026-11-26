@@ -86,6 +86,8 @@ else {
       const vote = /Start your reply with AGREE/.test(message)
       if (vote && behavior.mode === 'exit-on-vote') return
       await tool('meeting_reply', { text: vote ? 'AGREE' : (behavior.reply ?? 'Stub review: looks fine.') })
+      // An agent that leaves the meeting and goes on running: its seat is gone, its process is not.
+      if (behavior.mode === 'leave-after-reply') { await tool('meeting_leave', {}); dump({ stage: 'left', ...info }); await new Promise((done) => setTimeout(done, 120_000)); return }
     }
   }
   run().then(() => dump({ stage: 'done' }), (error) => { dump({ stage: 'error', error: String(error && error.stack || error) }); process.exitCode = 1 })
@@ -400,7 +402,22 @@ class AgyStub {
     await hostF('meeting_end')
     await until('everything to be closed', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0, 30_000)
 
-    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF] }, null, 2))
+    // 9. A hidden reviewer that leaves the meeting while its process runs on: the run says so and offers Retry.
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'leave-after-reply' }))
+    const hostH = await client('claude-code')
+    const meetingH = meetingIdOf((await hostH('meeting_start', { topic: 'leaves', post: 'Plan H.', folder: repo, reviewers: true })).text)
+    const gone = await until('the seat to show as left', async () => { const group = await groupOf(meetingH); return group?.seats[0].verdict === 'incomplete' ? group : null }, 30_000)
+    assert.match(gone.seats[0].error, /It left the meeting/)
+    assert.ok(gone.seats[0].tabId, 'its tab stays, since its session is still running')
+    assert.match((await hostH('meeting_status')).text, /- Antigravity CLI: left/)
+    assert.match(await nextMessage(hostH), /Stub review: looks fine\./, 'its one review reached the host')
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'review' }))
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(gone.id)}, 'retry', 'antigravity')`)
+    await until('the retried seat to be in the meeting', async () => (await groupOf(meetingH))?.seats[0].verdict === 'reviewing')
+    await hostH('meeting_end')
+    await until('everything to be closed', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0, 30_000)
+
+    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF, meetingH] }, null, 2))
     app.exit(0)
   }
 }
