@@ -197,7 +197,53 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
       onOpenSettings={noop}
     />,
   )
+  assert.match(expandedHtml, /<details class="sidebar-temp-reviewers" open="">/)
   assert.match(expandedHtml, /Reviewers \(1\)/)
+  assert.match(expandedHtml, /Review PR #42 · Claude Code/)
+
+  // Standalone / profile-scoped reviewers (with no regular host tab open) still render under their workspace:
+  const standaloneReviewer = makeTab('tab-solo', 'Review PR #42 · Antigravity CLI', {
+    cli: 'antigravity',
+    tempReviewer: {
+      groupId: '22222222-2222-4222-8222-222222222222',
+      hostTabId: null,
+      cli: 'antigravity',
+      prLabel: 'PR #42',
+      prNumber: 42,
+      repository: 'omaha:3001/owner/repo',
+      prUrl: 'http://omaha:3001/owner/repo/pulls/42',
+    },
+  })
+  const standaloneHtml = renderToStaticMarkup(
+    <Sidebar
+      profiles={[PROFILE]}
+      tabs={[standaloneReviewer]}
+      installedCliVersion="1.0.114"
+      activeProfileId={PROFILE.id}
+      activeTabId={null}
+      canOpenTab
+      collapsed={false}
+      onToggleCollapsed={noop}
+      onSelectWorkspace={noop}
+      onActivateProfile={noop}
+      onRemoveProfile={noop}
+      onActivateTab={noop}
+      onPopOutTab={noop}
+      onRenameTab={noop}
+      onCloseTab={noop}
+      onRestartTab={noop}
+      onUnloadTab={noop}
+      onCreateTab={noop}
+      onCreateTabWithAttachments={noop}
+      onFanOut={noop}
+      onResumePicker={noop}
+      onOpenHistory={noop}
+      onConnectRemote={noop}
+      onOpenSettings={noop}
+    />,
+  )
+  assert.match(standaloneHtml, /Reviewers \(1\)/)
+  assert.match(standaloneHtml, /Review PR #42 · Antigravity CLI/)
 
   const collapsedHtml = renderToStaticMarkup(
     <Sidebar

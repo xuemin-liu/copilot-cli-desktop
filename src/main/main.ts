@@ -4080,14 +4080,33 @@ async function startTempReviewersFlow(options: {
 
   let verifiedOwnPull = false
   const consentWarnings: string[] = []
-  if (allowAll && clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
+  if (allowAll && clis.includes('copilot') && options.profile.permissionPreset !== 'full-access') {
     consentWarnings.push(
-      `${options.profile.name} is configured with the Restricted (read-only) Copilot preset, while "Allow all permissions in hidden PR reviewer sessions" is enabled (--allow-all).`,
+      `${options.profile.name} uses the "${PERMISSION_PRESET_INFO[options.profile.permissionPreset].label}" Copilot preset, while "Allow all permissions in hidden PR reviewer sessions" elevates Copilot reviewers to Full computer access (--allow-all).`,
     )
   }
-  if (allowAll && clis.includes('codex') && options.profile.otherCli?.codex?.sandbox === 'read-only' && options.profile.otherCli?.codex?.approval !== 'allow-all') {
+  if (
+    allowAll
+    && clis.includes('codex')
+    && options.profile.otherCli?.codex?.approval !== 'allow-all'
+    && (
+      options.profile.otherCli?.codex?.sandbox === 'read-only'
+      || options.profile.otherCli?.codex?.sandbox === 'workspace-write'
+      || options.profile.otherCli?.codex?.approval === 'on-request'
+    )
+  ) {
     consentWarnings.push(
-      `${options.profile.name} configures Codex CLI sandbox as Read only, while "Allow all permissions in hidden PR reviewer sessions" is enabled (--dangerously-bypass-approvals-and-sandbox).`,
+      `${options.profile.name} configures narrower Codex CLI permissions, while "Allow all permissions in hidden PR reviewer sessions" launches Codex CLI with --dangerously-bypass-approvals-and-sandbox.`,
+    )
+  }
+  if (allowAll && clis.includes('claude') && options.profile.otherCli?.claude?.approval && options.profile.otherCli.claude.approval !== 'allow-all') {
+    consentWarnings.push(
+      `${options.profile.name} configures Claude Code approval mode "${options.profile.otherCli.claude.approval}", while "Allow all permissions in hidden PR reviewer sessions" launches Claude Code with --dangerously-skip-permissions.`,
+    )
+  }
+  if (allowAll && clis.includes('antigravity') && options.profile.otherCli?.antigravity?.approval && options.profile.otherCli.antigravity.approval !== 'allow-all') {
+    consentWarnings.push(
+      `${options.profile.name} configures Antigravity CLI approval mode "${options.profile.otherCli.antigravity.approval}", while "Allow all permissions in hidden PR reviewer sessions" launches Antigravity CLI with --dangerously-skip-permissions.`,
     )
   }
   if (ghRepo && prNumber !== null) {

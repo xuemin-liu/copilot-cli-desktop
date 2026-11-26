@@ -405,7 +405,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 2\n')
     assert.deepEqual(await reviewCheckoutState(runner, area), { head: head1Sha, clean: true })
 
-    // Round 2 modifying .mcp.json, .claude/settings.json, .claude/hooks/run.sh, .codex/hooks.json, .github/hooks/pre.json, and .vscode/mcp.json is pushed to origin and detected:
+    // Round 2 modifying .mcp.json, .claude/..., .codex/..., .github/..., .vscode/..., .gemini/..., and Antigravity [._]agents?/... configs is pushed to origin and detected:
     writeFileSync(join(repo, 'app.ts'), 'export const v = 3\n')
     writeFileSync(join(repo, '.mcp.json'), '{"mcpServers":{}}\n')
     mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true })
@@ -417,6 +417,14 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     writeFileSync(join(repo, '.github', 'hooks', 'pre.json'), '{}\n')
     mkdirSync(join(repo, '.vscode'), { recursive: true })
     writeFileSync(join(repo, '.vscode', 'mcp.json'), '{}\n')
+    mkdirSync(join(repo, '.gemini', 'config'), { recursive: true })
+    writeFileSync(join(repo, '.gemini', 'hooks.json'), '{}\n')
+    writeFileSync(join(repo, '.gemini', 'config', 'mcp_config.json'), '{}\n')
+    mkdirSync(join(repo, '.agents', 'plugins', 'demo'), { recursive: true })
+    writeFileSync(join(repo, '.agents', 'hooks.json'), '{}\n')
+    writeFileSync(join(repo, '.agents', 'plugins', 'demo', 'mcp_config.json'), '{}\n')
+    mkdirSync(join(repo, 'nested', '_agent'), { recursive: true })
+    writeFileSync(join(repo, 'nested', '_agent', 'plugins.json'), '{}\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-2'], { cwd: repo, env: gitEnv })
     const head2Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
@@ -424,12 +432,17 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
 
     const configInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head2Sha, baseSha)
     const expectedConfigs = [
+      '.agents/hooks.json',
+      '.agents/plugins/demo/mcp_config.json',
       '.claude/hooks/run.sh',
       '.claude/settings.json',
       '.codex/hooks.json',
+      '.gemini/config/mcp_config.json',
+      '.gemini/hooks.json',
       '.github/hooks/pre.json',
       '.mcp.json',
       '.vscode/mcp.json',
+      'nested/_agent/plugins.json',
     ]
     assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
     assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)
