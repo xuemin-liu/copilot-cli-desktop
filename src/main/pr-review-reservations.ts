@@ -59,7 +59,9 @@ export class ReviewReservations {
     if (!UUID.test(record.launchId) || basename(record.root) !== record.launchId) throw new Error('Invalid reviewer folder')
     const held = this.holder(record.repository, record.number, record.reviewer)
     if (held) throw new Error(held.kept
-      ? `An earlier review of PR #${record.number} left changes in its worktree (${held.checkout}); look at it and remove it first.`
+      ? held.detached
+        ? `The folder of an earlier review of PR #${record.number} is still in use and could not be deleted (${held.root}); close what has it open, then try again.`
+        : `An earlier review of PR #${record.number} left changes in its worktree (${held.checkout}); look at it and remove it first.`
       : `PR #${record.number} already has a review starting or running.`)
     this.records.set(record.launchId, { ...record, taskId: null, createdAt: this.now(), kept: false })
     try { await this.save() } catch (error) { this.records.delete(record.launchId); throw error }

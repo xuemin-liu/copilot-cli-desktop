@@ -989,7 +989,8 @@ let sweeping=false
 async function clearDetachedReviewHold(store:ReviewReservations,repository:string,number:number,reviewer:string):Promise<void>{
   const held=store.holder(repository,number,reviewer)
   if(!held||!held.kept||held.detached!==true||held.codexAuthSync||reviewLaunches.has(held.launchId))return
-  const removal=await removeReviewerAreaDetailed(held,await meetingGitRunner(),{detached:true}).catch(()=>null)
+  // One short try: a folder still held open is reported at once rather than waited on.
+  const removal=await removeReviewerAreaDetailed(held,await meetingGitRunner(),{detached:true,folderRetries:1}).catch(()=>null)
   if(removal?.outcome==='removed')await store.release(held.launchId).catch(()=>{})
 }
 /**
@@ -1015,7 +1016,7 @@ async function sweepReviewerAreas():Promise<void>{
       const credOutcome = await recoverSweptReviewerCredentials(record, store)
       if (credOutcome === 'retry-sync') continue
       if (record.kept && !record.detached && existsSync(record.checkout)) continue
-      const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),{detached:record.detached===true}).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
+      const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),record.detached===true?{detached:true,folderRetries:1}:undefined).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(removal.outcome==='removed')await store.release(record.launchId)
       else if(removal.reason==='detached')await store.keep(record.launchId,true)

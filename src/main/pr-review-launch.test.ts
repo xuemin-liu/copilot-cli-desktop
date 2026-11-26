@@ -207,6 +207,18 @@ test('a folder a clean removal left behind goes on a later try, also with its .g
     assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner, { detached: true }), { outcome: 'removed' })
     assert.equal(existsSync(unknown.root), false)
     assert.throws(() => f.plain(project, 'rev-parse', '--verify', unknown.ref), 'its ref goes with it')
+    // A repository someone made of the leftover folder is real Git metadata: the record does not let it go.
+    const recovered = await leftover()
+    rmSync(join(recovered.checkout, '.git'))
+    f.plain(recovered.checkout, 'init', '-q')
+    f.plain(recovered.checkout, 'add', '-A'); f.plain(recovered.checkout, 'commit', '-qm', 'recovered by the person')
+    assert.deepEqual(await removeReviewerAreaDetailed(recovered, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+    assert.match(f.plain(recovered.checkout, 'log', '--oneline'), /recovered by the person/)
+    // So is a .git file that points anywhere but a missing entry of this project's own worktrees folder.
+    const foreign = await leftover()
+    writeFileSync(join(foreign.checkout, '.git'), `gitdir: ${join(f.root, 'not-the-project', 'worktrees', 'gone')}\n`)
+    assert.deepEqual(await removeReviewerAreaDetailed(foreign, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+    assert.ok(existsSync(join(foreign.checkout, 'a.txt')))
     // The record does not weaken the path guard: a checkout that is not this review's own folder is never removed.
     const linked = await leftover()
     const elsewhere = join(f.root, 'elsewhere'); mkdirSync(elsewhere); writeFileSync(join(elsewhere, 'mine.txt'), 'the person\'s')
@@ -236,7 +248,9 @@ test('a clean worktree whose folder cannot be deleted is reported as detached, a
     // A process whose working folder is the checkout (a reviewer's leftover child) keeps Windows from deleting it.
     holder = spawn(process.execPath, ['-e', 'process.stdout.write("up");setInterval(()=>{},1000)'], { cwd: area.checkout, stdio: ['ignore', 'pipe', 'ignore'] })
     await new Promise<void>((done, fail) => { holder!.stdout!.once('data', () => done()); holder!.once('error', fail) })
-    const held = await removeReviewerAreaDetailed(area, f.runner, { retryDelaysMs: [5, 5] })
+    const started = Date.now()
+    const held = await removeReviewerAreaDetailed(area, f.runner, { retryDelaysMs: [5, 5], folderRetries: 1 })
+    assert.ok(Date.now() - started < 20_000, 'a held folder is given up on quickly')
     assert.equal(held.outcome, 'kept')
     assert.equal(held.outcome === 'kept' && held.reason, 'detached', 'Git took the clean worktree out; only the folder stayed')
     assert.ok(existsSync(area.checkout))
@@ -271,12 +285,19 @@ test('a kept reservation records a detached removal, keeps it across a restart, 
     const reread = new ReviewReservations(path)
     assert.equal(reread.holder('o/r', 1, 'x')?.detached, true)
     assert.equal(reread.holder('o/r', 2, 'x')?.detached, true)
+    // A new start of the same review says what is in the way: changes for the person, or a folder still in use.
+    const again = mk(3)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 1, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /still in use and could not be deleted/)
+    const c = mk(4)
+    await store.reserve({ launchId: c.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: c.root, checkout: join(c.root, 'checkout'), ref: `refs/desktop-review/${c.launchId}` })
+    await store.keep(c.launchId)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /left changes in its worktree/)
     // A record whose flag is not a boolean is not trusted at all.
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>[]
     raw[0]!.detached = 'yes'
     writeFileSync(path, JSON.stringify(raw))
     const tampered = new ReviewReservations(path)
-    assert.equal(tampered.list().length, 1)
+    assert.equal(tampered.list().length, 2)
   } finally { f.cleanup() }
 })
 

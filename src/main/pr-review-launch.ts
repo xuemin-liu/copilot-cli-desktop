@@ -1,7 +1,7 @@
 import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
 import { githubRemoteRepository, type GithubSnapshot } from './workflow-github.js'
@@ -53,6 +53,23 @@ async function realPath(path: string): Promise<string> {
   try { return realpathSync.native(path) } catch { return resolve(path) }
 }
 
+/**
+ * Whether the checkout's `.git` is only what a removed worktree of this project left: a file (not a repository's
+ * folder) that points into the project's own `worktrees` folder at an entry that no longer exists. Anything else is
+ * real Git metadata and is not the desktop's to delete.
+ */
+async function staleWorktreePointer(runner: GitRunner, project: string, checkout: string): Promise<boolean> {
+  const marker = join(checkout, '.git')
+  const info = await lstat(marker).catch(() => null)
+  if (!info?.isFile() || info.size > 4096) return false
+  const pointed = /^gitdir: (.+?)\r?\n?$/.exec(await readFile(marker, 'utf8').catch(() => ''))?.[1]
+  if (!pointed) return false
+  const target = resolve(checkout, pointed)
+  if (await lstat(target).then(() => true, () => false)) return false
+  const common = (await git(runner, project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read').catch(() => '')).trim()
+  return common !== '' && samePath(dirname(target), join(await realPath(common), 'worktrees'))
+}
+
 export type ReviewerAreaRemovalResult =
   | { outcome: 'removed' }
   | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner' | 'detached'; detail?: string }
@@ -69,12 +86,14 @@ const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
  * - When Git took the clean worktree out of the project and only deleting the folder failed, reports
  *   `{ outcome: 'kept', reason: 'detached' }`: nothing of the person's is in what is left. A caller that recorded this
  *   passes `detached: true` on a later try, which lets the folder go although the project no longer registers it, also
- *   when a failed removal left the worktree's `.git` file behind.
+ *   when a failed removal left the worktree's own, now stale, `.git` file behind. Any other `.git` there (a repository
+ *   someone made of the leftover folder, say) still keeps it. `folderRetries` bounds how long deleting a folder that
+ *   is still held open is tried.
  */
 export async function removeReviewerAreaDetailed(
   area: Pick<ReviewerArea, 'root' | 'checkout' | 'project' | 'ref'>,
   runner?: GitRunner | null,
-  options?: { retryDelaysMs?: readonly number[]; detached?: boolean },
+  options?: { retryDelaysMs?: readonly number[]; detached?: boolean; folderRetries?: number },
 ): Promise<ReviewerAreaRemovalResult> {
   // Whether Git is known to have taken this worktree out while it was clean: recorded by an earlier try, or done below.
   let detached = options?.detached === true
@@ -98,8 +117,8 @@ export async function removeReviewerAreaDetailed(
     let registered = false
     for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
     // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
-    if (!registered && !detached && await stat(join(area.checkout, '.git')).then(() => true, () => false)) {
-      return { outcome: 'kept', reason: 'unregistered' }
+    if (!registered && await lstat(join(area.checkout, '.git')).then(() => true, () => false)) {
+      if (!detached || !await staleWorktreePointer(runner, area.project, area.checkout)) return { outcome: 'kept', reason: 'unregistered' }
     }
     if (registered) {
       if (!missing) {
@@ -158,7 +177,7 @@ export async function removeReviewerAreaDetailed(
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   try {
-    await rm(area.root, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 })
+    await rm(area.root, { recursive: true, force: true, maxRetries: options?.folderRetries ?? 6, retryDelay: 200 })
   } catch (error) {
     return { outcome: 'kept', reason: detached ? 'detached' : 'git-failed', detail: error instanceof Error ? error.message : String(error) }
   }
