@@ -239,6 +239,9 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
 
   // Claude Code's one-shot mode prints nothing until it ends, so it stays interactive; the others run one-shot with allow-all.
+  // A meeting's reviewer reaches this computer only: Codex read-only is refused for a pull request, and fine for a meeting.
+  assert.throws(() => resolveOtherCliReviewerArgs('codex', { sandbox: 'read-only' }, false, null, 'demo'), /blocks network access to the pull request host/)
+  assert.deepEqual(resolveOtherCliReviewerArgs('codex', { sandbox: 'read-only' }, false, null, 'demo', false), { configForLaunch: { sandbox: 'read-only' }, allowAllArgs: [] })
   assert.equal(otherCliReviewerOneShot('claude', true, true), false)
   // In a project Claude Code does not trust, interactive would stop at its trust question: it stays one-shot.
   assert.equal(otherCliReviewerOneShot('claude', true, false), true)

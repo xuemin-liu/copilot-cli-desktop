@@ -1032,7 +1032,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(removal.outcome==='removed')await store.release(record.launchId)
       else if(removal.reason==='detached')await store.keep(record.launchId,removal.detachedAt)
       else if(record.detachedAt!==undefined&&removal.reason==='dirty'){await store.undetach(record.launchId);workflowNotice=`Files were saved in the leftover review folder of PR #${record.number}, so it was kept: ${record.checkout}. Look at it, then delete the folder.`;broadcastState()}
-      else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of PR #${record.number} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
+      else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of ${record.repository.startsWith('meeting/')?`meeting ${record.repository.slice(8)}`:`PR #${record.number}`} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
     }
   }finally{sweeping=false}
 }
@@ -5118,6 +5118,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
   const store = reviewReservations()
   if (!store) throw new Error('Review reservations are unavailable')
   const runner = await meetingGitRunner().catch(() => null)
+  if (cancelled()) throw new Error('The meeting reviewer was stopped before it started')
   const area = planReviewerArea(reviewerAreaBase())
   const launchId = basename(area.root)
   seat.launchId = launchId
@@ -5129,6 +5130,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
   reviewLaunches.add(launchId)
   try {
     await makeReviewerArea(area)
+    if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
     if (group.commit) {
       if (!runner) throw new Error('Git is not available')
       await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit)
@@ -5155,7 +5157,9 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     const resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not installed`)
     const help = await otherCliHelp(resolution)
-    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, profile.otherCli?.[cli], allowAll, help, profile.name)
+    // A meeting's reviewer talks to this computer only, so the check a pull request reviewer needs (a sandbox that
+    // can reach the pull request host) is not applied.
+    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, profile.otherCli?.[cli], allowAll, help, profile.name, false)
     // Its own address for the meeting tools, as a tab that runs this CLI gets. Antigravity reads the one shared file.
     const meetingArgs = await otherCliMeetingArgs(cli, newMeetingTabTag(), resolution, area.checkout)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs, ...meetingArgs]
@@ -5234,10 +5238,14 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     meetingSeatJoinTimers.set(generation, timer)
     broadcastState()
   } catch (error) {
-    // The seat was released while this launch was still making its folder (the meeting closed, or the seat was let go,
-    // during the checkout): that release may have run before the worktree existed. What this launch made since is its
-    // own to take back, or it would stay with nothing to account for it.
-    if (seat.area !== area) await discardMeetingReviewerArea(area, launchId).catch(() => {})
+    // The seat was released while this launch was still going (the meeting closed, or the seat was let go, during the
+    // checkout): that release ran before the worktree, the meeting seat or the tab of this launch existed. What this
+    // launch made since is its own to take back, or it would stay with nothing to account for it. The seat's fields
+    // hold what was made after the release; the folder is no longer on the seat, so it is taken by its own name.
+    if (seat.area !== area) {
+      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.').catch(() => {})
+      await discardMeetingReviewerArea(area, launchId).catch(() => {})
+    }
     throw error
   } finally {
     reviewLaunches.delete(launchId)
@@ -5280,6 +5288,8 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
     const { previous, next } = meetingReviewers.replace(group.id, payload)
     broadcastState()
     await releaseMeetingReviewerSeat(previous, 'This reviewer was started again.')
+    // The run may have ended meanwhile (the meeting closed): then there is nothing to start.
+    if (group.stage === 'ended' || group.seats.get(payload) !== next || next.lifecycle !== 'starting') { broadcastState(); return snapshot() }
     try {
       await launchMeetingReviewerSeat(group, next, profile)
     } catch (error) {
@@ -6292,6 +6302,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
           await cleanupReviewerSeatCredentials(seat.area)
           if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
         }
+      }
+      // The same for a meeting's hidden reviewer: its seat has no tab any more, and one that was in the meeting has left.
+      const closedMeetingSeat = closing?.tempReviewer?.meetingId ? meetingReviewers.tabClosed(tabId) : null
+      if (closedMeetingSeat) {
+        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.').catch(() => {})
+        if (closedMeetingSeat.wasLive) settleMeetingReviewerGate(closedMeetingSeat.group)
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
       if (hostedTempGroup) {

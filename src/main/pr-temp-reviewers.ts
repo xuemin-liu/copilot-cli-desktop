@@ -271,9 +271,11 @@ export function resolveOtherCliReviewerArgs(
   reviewerAllowAll: boolean,
   help: string | null,
   workspaceName: string,
+  /** False for a reviewer that reaches nothing but this computer (a review meeting): a read-only sandbox is then fine. */
+  needsPullRequestHost = true,
 ): { configForLaunch: PerCliConfig | undefined; allowAllArgs: string[] } {
   if (!reviewerAllowAll) {
-    if (cli === 'codex' && savedConfig?.sandbox === 'read-only' && savedConfig?.approval !== 'allow-all') {
+    if (needsPullRequestHost && cli === 'codex' && savedConfig?.sandbox === 'read-only' && savedConfig?.approval !== 'allow-all') {
       throw new Error(
         `${workspaceName} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Pull request reviewers.`,
       )

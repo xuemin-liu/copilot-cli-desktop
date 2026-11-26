@@ -73,6 +73,32 @@ test('events of an earlier launch of a seat do not touch the launch that replace
   assert.equal(next.lifecycle, 'failed')
 })
 
+test('nothing can be started again before the person has answered, and a closed tab ends its seat', () => {
+  const registry = new MeetingReviewerRegistry()
+  const group = run(registry)
+  assert.throws(() => registry.replace(group.id, 'claude'), /Answer the question about hidden reviewers first/)
+  assert.equal(group.seats.get('claude')!.replacement, false, 'the seat was not replaced')
+  group.stage = 'active'
+  const claude = group.seats.get('claude')!
+  claude.guestSeatId = 'guest:aaaaaaaaaaaaaaaa'
+  claude.tabId = 'tab-9'
+  registry.seatJoined('guest:aaaaaaaaaaaaaaaa')
+  assert.equal(registry.tabClosed('tab-404'), null)
+  const closed = registry.tabClosed('tab-9')!
+  assert.equal(closed.wasLive, true)
+  assert.equal(claude.tabId, null)
+  assert.equal(claude.lifecycle, 'left')
+  assert.equal(claude.error, 'Its tab was closed.')
+  assert.equal(registry.view(group).seats[0]!.tabId, null, 'no Peek for a tab that is gone')
+  // A seat that had already failed only loses its tab.
+  const codex = group.seats.get('codex')!
+  codex.tabId = 'tab-10'
+  registry.failSeat(codex, codex.generation, 'It did not join in time.')
+  assert.equal(registry.tabClosed('tab-10')!.wasLive, false)
+  assert.equal(codex.error, 'It did not join in time.')
+  assert.equal(registry.replace(group.id, 'codex').next.replacement, true)
+})
+
 test('dismissing a seat takes it out of the run; ending a run stops what is left and is idempotent', () => {
   const registry = new MeetingReviewerRegistry()
   const group = run(registry, 'K7QF', 'p1', ['claude', 'codex', 'antigravity'])

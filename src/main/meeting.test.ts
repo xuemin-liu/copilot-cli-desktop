@@ -1020,10 +1020,32 @@ test('a seat that replaces another mid-round gets nothing until the next round',
   assert.deepEqual(h.to('tab-d'), [])
   assert.deepEqual(h.hub.views()[0]!.waitingFor, ['tab-b'], 'the round does not wait for it')
   h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review')
-  assert.equal(h.to('tab-host').at(-1)?.kind, 'digest')
+  const digest = h.to('tab-host').at(-1)!
+  assert.equal(digest.kind, 'digest')
+  // It was never asked, so it is not reported as silent: one reviewer was asked, and one replied.
+  assert.doesNotMatch(digest.text, /No reply in time/)
+  assert.doesNotMatch(digest.text, /review late/)
+  assert.doesNotMatch(h.files.get(at('K7QF', 'round-1', 'replies.md'))!, /review late/)
   h.hub.post('tab-host', 'round', 'plan v2', null)
   assert.equal(h.to('tab-d').at(-1)?.kind, 'post')
   assert.deepEqual([...h.hub.views()[0]!.waitingFor].sort(), ['tab-b', 'tab-d'])
+  // From then on it is a reviewer like any other: its silence is reported.
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review 2')
+  h.advance(10 * 60_000)
+  assert.match(h.to('tab-host').at(-1)!.text, /No reply in time from: .*review late/)
+})
+
+test('a seat that replaces another while the host has the replies gets nothing until the host posts again', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'review')
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  h.hub.join(reviewerD, 'K7QF', { nextRound: true })
+  assert.deepEqual(h.to('tab-d'), [], 'the finished round is not handed to it as a late turn')
+  h.hub.post('tab-host', 'round', 'plan v2', null)
+  assert.equal(h.to('tab-d').at(-1)?.kind, 'post')
+  assert.match(h.to('tab-d').at(-1)!.text, /round 2/)
 })
 
 test('a voter who leaves during a vote keeps it from passing: the proposal goes back to the host', () => {

@@ -216,6 +216,11 @@ interface Meeting {
    */
   voters: Set<string> | null
   gone: MeetingReplyView[]
+  /**
+   * Who is in the meeting without having been asked anything in the round under way (one who joined during a vote, a
+   * seat that replaces another): the round's replies are not theirs to be missing from.
+   */
+  skipping: Set<string>
 }
 
 interface FailedTurn { round: number; kind: MeetingDeliveryKind; tries: number; error: string; since: number }
@@ -349,6 +354,7 @@ export class MeetingHub {
       gathering: false,
       voters: null,
       gone: [],
+      skipping: new Set(),
     }
     this.meetings.set(id, meeting)
     this.writePost(meeting, 'Opening post', request.changes)
@@ -377,6 +383,7 @@ export class MeetingHub {
     } else if (options.nextRound === true || (meeting.stage === 'reviewing' && meeting.voters !== null)) {
       // A vote is answered by those it was put to, and a seat that replaces another starts with the next round, whatever
       // the meeting is doing now: it is in the meeting, and gets nothing until the host posts again.
+      if (meeting.stage === 'reviewing') meeting.skipping.add(participant.tabId)
     } else {
       // Mid-round it answers this round; otherwise (host thinking, paused) its reply joins the next digest as a late one.
       // During a discussion it has no review for the others to answer: its review joins the next digest as a late one.
@@ -757,6 +764,7 @@ export class MeetingHub {
       gathering: false,
       voters: null,
       gone: [],
+      skipping: new Set(),
     }
     bySession.set(state.host.sessionId!, host.tabId)
     this.meetings.set(meeting.id, meeting)
@@ -864,6 +872,7 @@ export class MeetingHub {
     }
     meeting.participants.delete(tabId)
     meeting.replies.delete(tabId)
+    meeting.skipping.delete(tabId)
     this.cancel(meeting, tabId)
     this.appendTranscript(meeting, heading, `In round ${meeting.round}.`)
     const wasAwaited = meeting.awaiting.delete(tabId)
@@ -917,6 +926,7 @@ export class MeetingHub {
     meeting.reviewed = null
     meeting.voters = null
     meeting.gone = []
+    meeting.skipping.clear()
     meeting.stage = 'waiting'
   }
 
@@ -928,6 +938,7 @@ export class MeetingHub {
     meeting.awaiting = new Set(meeting.participants.keys())
     meeting.voters = meeting.vote ? new Set(meeting.participants.keys()) : null
     meeting.gone = []
+    meeting.skipping.clear()
     meeting.cancelTimer?.()
     meeting.cancelTimer = this.timers.set(() => this.timeOut(meeting), this.settings().roundTimeoutMinutes * 60_000)
     for (const tabId of meeting.participants.keys()) this.deliverRound(meeting, tabId, false)
@@ -976,12 +987,15 @@ export class MeetingHub {
       return { title: participant.title, folder: participant.folder, role: participant.role ?? null, text: reply?.text ?? null, vote: reply?.vote ?? null }
     }
     // A vote counts those it was put to: not one who joined since, and also one who left since (who did not vote).
+    // Nor does any round count one who is here without having been asked in it: they have no reply to be missing.
     const voters = meeting.voters
+    const asked = [...meeting.participants.values()].filter((participant) => !meeting.skipping.has(participant.tabId))
     const collected = voters === null
-      ? [...meeting.participants.values()].map(view)
-      : [...[...meeting.participants.values()].filter((participant) => voters.has(participant.tabId)).map(view), ...meeting.gone]
+      ? asked.map(view)
+      : [...asked.filter((participant) => voters.has(participant.tabId)).map(view), ...meeting.gone]
     meeting.voters = null
     meeting.gone = []
+    // `skipping` stays as it is through a discussion, which is still this round; the next round to open clears it.
     meeting.awaiting.clear()
     const paths = roundPaths(meeting.folder, meeting.round)
     if (meeting.discussing) {
@@ -1059,6 +1073,7 @@ export class MeetingHub {
     meeting.gathering = false
     meeting.voters = null
     meeting.gone = []
+    meeting.skipping.clear()
     meeting.held = null
     // The agreed notice to the host was queued just before; everything else not yet typed is dropped.
     for (const tabId of meeting.participants.keys()) this.cancel(meeting, tabId)
