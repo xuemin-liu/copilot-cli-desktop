@@ -34,6 +34,7 @@ param(
   [string]$Base = '',
   [int]$Wait = 0,
   [switch]$Force,
+  [switch]$Reviewers,
   [switch]$Changes
 )
 $ErrorActionPreference = 'Stop'
@@ -107,6 +108,10 @@ try {
     }
     $meetingBody.force = '1'
   }
+  if ($Reviewers) {
+    if ($Command -ne 'start') { throw 'Use -Reviewers only with start.' }
+    $meetingBody.reviewers = '1'
+  }
   if ($Command -eq 'task-report') {
     $reportRoot = [IO.Path]::GetFullPath($env:COPILOT_DESKTOP_TASK_REPORT_DIR)
     $reportPath = [IO.Path]::GetFullPath($File)
@@ -166,13 +171,14 @@ fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
 quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
 command=status
 if [ $# -gt 0 ]; then command=$1; shift; fi
-topic=''; file=''; changes=0; force=0; to=''; page=''; action=''; pr=''; head_rev=''; base_rev=''; wait_sec=''
+topic=''; file=''; changes=0; force=0; reviewers=0; to=''; page=''; action=''; pr=''; head_rev=''; base_rev=''; wait_sec=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
     -File) [ $# -ge 2 ] || fail 'Usage: -File <path>'; file=$2; shift 2 ;;
     -Changes) changes=1; shift ;;
     -Force) force=1; shift ;;
+    -Reviewers) reviewers=1; shift ;;
     -Page) [ $# -ge 2 ] || fail 'Usage: pr-read -Page <number>'; page=$2; shift 2 ;;
     -To) [ $# -ge 2 ] || fail 'Usage: -To <comment id>|conversation'; to=$2; shift 2 ;;
     -Action) [ $# -ge 2 ] || fail 'Usage: -Action start|status|wait|round|finish|stop'; action=$2; shift 2 ;;
@@ -223,6 +229,7 @@ if [ "$force" -eq 1 ]; then
     fail 'Use -Force only with pr-reviewers -Action round.'
   fi
 fi
+if [ "$reviewers" -eq 1 ] && [ "$command" != start ]; then fail 'Use -Reviewers only with start.'; fi
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
 if [ -z "$state" ] || [ ! -f "$state" ]; then fail 'Meetings need a session started by Copilot CLI Desktop. Resume this session from the desktop once.'; fi
@@ -278,6 +285,7 @@ if [ -n "$head_rev" ]; then printf 'form-string = "head=%s"\n' "$(quote "$head_r
 if [ -n "$base_rev" ]; then printf 'form-string = "base=%s"\n' "$(quote "$base_rev")" >> "$work/config"; fi
 if [ -n "$wait_sec" ]; then printf 'form-string = "wait=%s"\n' "$wait_sec" >> "$work/config"; fi
 if [ "$force" -eq 1 ]; then printf 'form-string = "force=1"\n' >> "$work/config"; fi
+if [ "$reviewers" -eq 1 ]; then printf 'form-string = "reviewers=1"\n' >> "$work/config"; fi
 if [ "$changes" -eq 1 ]; then
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail '-Changes needs a Git repository in the current folder.'
   : > "$work/changes"
@@ -414,7 +422,9 @@ export interface MeetingRequest { topic: string; text: string; changes: string |
   /** pr-reply: the inline comment id to answer, or "conversation". */
   page?: string; to?: string
   /** pr-reviewers / pr-wait options. */
-  action?: string; pr?: string; head?: string; base?: string; wait?: number; force?: boolean }
+  action?: string; pr?: string; head?: string; base?: string; wait?: number; force?: boolean
+  /** start: have the desktop start hidden reviewer sessions for the meeting. */
+  reviewers?: boolean }
 export interface MeetingResponse { ok: boolean; message: string }
 export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest, signal?: AbortSignal) => MeetingResponse | Promise<MeetingResponse>
 export type SeatReceiptHandler = (payload: Record<string, unknown>) => MeetingResponse | Promise<MeetingResponse>
@@ -503,11 +513,12 @@ export class MeetingControlServer {
           const rawWait = body.wait !== undefined ? Number(body.wait) : undefined
           const wait = rawWait !== undefined && Number.isSafeInteger(rawWait) && rawWait >= 1 && rawWait <= 60 ? rawWait : undefined
           const force = body.force === true || body.force === 'true' || body.force === '1'
+          const reviewers = body.reviewers === true || body.reviewers === 'true' || body.reviewers === '1'
           const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
             ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}),
             ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}),
             ...(body.head !== undefined ? { head: text('head') } : {}), ...(body.base !== undefined ? { base: text('base') } : {}),
-            ...(wait !== undefined ? { wait } : {}), ...(force ? { force: true } : {}) }, gone.signal)
+            ...(wait !== undefined ? { wait } : {}), ...(force ? { force: true } : {}), ...(reviewers ? { reviewers: true } : {}) }, gone.signal)
           const rawJsonCommand = command === 'pr-read' || command === 'pr-reviewers'
           if (rawJsonCommand && body.format === 'pr-json' && answer.ok) {
             if (!request.socket.destroyed) {
