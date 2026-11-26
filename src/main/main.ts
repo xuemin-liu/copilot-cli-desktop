@@ -145,6 +145,7 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCliChoice } from './session-cli.js'
 import {
+  buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -3820,13 +3821,13 @@ async function launchTempReviewerSeat(
       COPILOT_DESKTOP_PR_STATE: seatStateDir,
     }
     delete env.COPILOT_HOME
-    let cliArgs: string[]
-    if (cli === 'claude') {
-      const sessionArgs = help && helpListsFlag(help, '--session-id') ? ['--session-id', seat.generation] : []
-      cliArgs = [...configArgs, ...sessionArgs, ...addDirArgs, '--', prompt]
-    } else {
-      cliArgs = [...configArgs, ...addDirArgs, prompt]
-    }
+    const cliArgs = buildOtherCliReviewerCliArgs(cli, {
+      configArgs,
+      addDirArgs,
+      generation: seat.generation,
+      prompt,
+      help,
+    })
     if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
     assertWorkspaceListed(profile)
     const id = `tab-${nextTabSequence++}`
@@ -3843,6 +3844,7 @@ async function launchTempReviewerSeat(
       detectApprovals: false,
       processLabel: sessionCliLabel(cli),
       ...(cli === 'codex' ? { sessionIdDiscovery: new CodexSessionDiscovery({ root: codexSessionsRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
+      ...(cli === 'antigravity' ? { sessionIdDiscovery: new AntigravitySessionDiscovery({ root: antigravityDataRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
     })
     managedTabs.set(id, { session })
     profilesWithSessionTabs.add(profile.id)
@@ -3933,7 +3935,7 @@ async function askTempReviewerConsent(
       `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
       'Each reviewer runs in a hidden background tab inside an isolated detached Git worktree, accesses the pull request using your configured CLI and Git credentials, and posts its review comments and approvals directly on the pull request.',
       allowAll
-        ? 'Allow all permissions is enabled for these hidden reviewer sessions (--allow-all for Copilot CLI, --dangerously-skip-permissions for Claude Code, --dangerously-bypass-approvals-and-sandbox for Codex CLI) so background reviews do not block on terminal prompts.'
+        ? 'Allow all permissions is enabled for these hidden reviewer sessions (--allow-all for Copilot CLI, --dangerously-skip-permissions for Claude Code and Antigravity CLI, --dangerously-bypass-approvals-and-sandbox for Codex CLI) so background reviews do not block on terminal prompts.'
         : 'Allow all permissions for hidden PR reviewers is turned off; each reviewer uses this workspace\'s configured CLI permission settings.',
     ]
     if (nonCopilotReviewers.length > 0) {

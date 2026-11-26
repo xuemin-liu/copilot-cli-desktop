@@ -38,8 +38,16 @@ test('buildOtherCliLaunchArgs emits Codex approval and sandbox independently, an
   assert.deepEqual(buildOtherCliLaunchArgs('codex', { approval: 'on-request' }), ['--ask-for-approval', 'on-request'])
 })
 
-test('buildOtherCliLaunchArgs ships Antigravity model but no permission flags', () => {
+test('buildOtherCliLaunchArgs emits Antigravity approval modes and model as separate tokens', () => {
   assert.deepEqual(buildOtherCliLaunchArgs('antigravity', { model: 'some-model' }), ['--model', 'some-model'])
+  assert.deepEqual(
+    buildOtherCliLaunchArgs('antigravity', { approval: 'auto', model: 'some-model' }),
+    ['--mode', 'auto', '--model', 'some-model'],
+  )
+  assert.deepEqual(
+    buildOtherCliLaunchArgs('antigravity', { approval: 'allow-all', model: 'some-model' }),
+    ['--dangerously-skip-permissions', '--model', 'some-model'],
+  )
 })
 
 test('an unset config inherits: no flags at all', () => {
@@ -67,7 +75,7 @@ test('reading a saved config keeps a well-formed level this build does not know,
     { approval: 'on-request', sandbox: 'danger-full-access', model: 'gpt-5' },
   )
   assert.deepEqual(normalizePerCliConfig('codex', { approval: 'not a level!', sandbox: 7, model: '--x' }), {})
-  assert.deepEqual(normalizePerCliConfig('antigravity', { approval: 'plan' }), {})
+  assert.deepEqual(normalizePerCliConfig('antigravity', { approval: 'allow-all', sandbox: 'read-only' }), { approval: 'allow-all' })
 })
 
 test('normalizeOtherCliConfig drops CLIs with no usable settings', () => {
@@ -125,7 +133,8 @@ test('validateOtherCliConfig rejects malformed new values instead of dropping th
   assert.throws(() => validateOtherCliConfig({ claude: { model: '--bad' } }, undefined), /not a usable model name/)
   assert.throws(() => validateOtherCliConfig({ claude: { approval: 'bypassPermissions' } }, undefined), /does not support approval mode/)
   assert.throws(() => validateOtherCliConfig({ bash: { model: 'x' } }, undefined), /Unknown CLI/)
-  assert.throws(() => validateOtherCliConfig({ antigravity: { approval: 'plan' } }, undefined), /has no setting "approval"/)
+  assert.throws(() => validateOtherCliConfig({ antigravity: { sandbox: 'read-only' } }, undefined), /has no setting "sandbox"/)
+  assert.deepEqual(validateOtherCliConfig({ antigravity: { approval: 'allow-all' } }, undefined), { antigravity: { approval: 'allow-all' } })
   assert.throws(() => validateOtherCliConfig({ codex: { approval: 5 } }, undefined), /Invalid codex approval/)
   assert.throws(() => validateOtherCliConfig([], undefined), /Invalid settings/)
 })

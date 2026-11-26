@@ -97,8 +97,17 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
     supportsModel: true,
     modelLabel: 'Model',
     modelPlaceholder: 'Antigravity default',
-    selectors: [],
-    permissionNote: 'Approvals are managed by Antigravity.',
+    selectors: [{
+      key: 'approval',
+      label: 'Approval mode',
+      inheritLabel: 'Use CLI settings',
+      levels: [
+        { value: 'plan', label: 'Plan (--mode plan)', args: ['--mode', 'plan'] },
+        { value: 'accept-edits', label: 'Accept edits (--mode accept-edits)', args: ['--mode', 'accept-edits'] },
+        { value: 'auto', label: 'Auto (--mode auto)', args: ['--mode', 'auto'] },
+        { value: 'allow-all', label: 'Allow all (--dangerously-skip-permissions)', args: ['--dangerously-skip-permissions'] },
+      ],
+    }],
   },
 }
 

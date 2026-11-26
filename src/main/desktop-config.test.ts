@@ -70,8 +70,8 @@ test('reviewerClis and reviewerAllowAll default cleanly and round-trip global an
   assert.equal(normalizeDesktopConfig({}).reviewerAllowAll, true)
   for (const value of ['false', 0, null, {}]) assert.equal(normalizeDesktopConfig({ reviewerAllowAll: value }).reviewerAllowAll, true, String(value))
   assert.equal(normalizeDesktopConfig({ reviewerAllowAll: false }).reviewerAllowAll, false)
-  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['codex', 'claude'] }).reviewerClis, ['claude', 'codex'])
-  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity'] }).reviewerClis, ['copilot'])
+  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity', 'codex', 'claude'] }).reviewerClis, ['claude', 'codex', 'antigravity'])
+  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['unknown-cli'] }).reviewerClis, ['copilot'])
   await withTempFile(async filename => {
     const config = structuredClone(DEFAULT_DESKTOP_CONFIG)
     config.reviewerClis = ['copilot', 'claude']

@@ -76,6 +76,15 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
         error: 'Codex exited unexpectedly',
         keptCheckoutPath: null,
       },
+      {
+        cli: 'antigravity',
+        tabId: 'tab-4',
+        verdict: 'reviewing',
+        checkedOut: 'a'.repeat(40),
+        needsAttention: false,
+        error: null,
+        keptCheckoutPath: null,
+      },
     ],
     notice: null,
   }
@@ -87,12 +96,13 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
   assert.match(activeHtml, /Copilot CLI/)
   assert.match(activeHtml, /Claude Code/)
   assert.match(activeHtml, /Codex CLI/)
+  assert.match(activeHtml, /Antigravity CLI/)
   assert.match(activeHtml, /reviewing on PR…/)
   assert.match(activeHtml, /needs approval/)
   assert.match(activeHtml, /Hide/)
   assert.match(activeHtml, /Peek/)
-  assert.equal((activeHtml.match(/>Retry</g) ?? []).length, 3, 'Retry is available on reviewing, needsAttention, and failed seats')
-  assert.equal((activeHtml.match(/>Dismiss</g) ?? []).length, 3, 'Dismiss is available on all active seats')
+  assert.equal((activeHtml.match(/>Retry</g) ?? []).length, 4, 'Retry is available on reviewing, needsAttention, and failed seats')
+  assert.equal((activeHtml.match(/>Dismiss</g) ?? []).length, 4, 'Dismiss is available on all active seats')
   assert.match(activeHtml, /Stop reviewers/)
 
   // Starting seats expose Dismiss (so a stuck launch can be dropped) without Retry:

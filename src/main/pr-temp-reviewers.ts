@@ -255,10 +255,10 @@ export function resolveCopilotReviewerPreset(
 }
 
 /**
- * Resolves launch settings and permission flags for a non-Copilot temporary PR reviewer session (`claude` or `codex`).
- * When `reviewerAllowAll` is enabled (the default), preserves any configured `model` while supplying verified
- * allow-all flags (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for
- * Codex CLI) so hidden background reviews do not block on interactive approval prompts.
+ * Resolves launch settings and permission flags for a non-Copilot temporary PR reviewer session (`claude`, `codex`,
+ * or `antigravity`). When `reviewerAllowAll` is enabled (the default), preserves any configured `model` while supplying
+ * verified allow-all flags (`--dangerously-skip-permissions` for Claude Code and Antigravity CLI,
+ * `--dangerously-bypass-approvals-and-sandbox` for Codex CLI) so hidden background reviews do not block on prompts.
  */
 export function resolveOtherCliReviewerArgs(
   cli: Exclude<ReviewerCli, 'copilot'>,
@@ -289,6 +289,18 @@ export function resolveOtherCliReviewerArgs(
     )
   }
 
+  if (cli === 'antigravity') {
+    if (help && helpListsFlag(help, '--dangerously-skip-permissions')) {
+      return { configForLaunch, allowAllArgs: ['--dangerously-skip-permissions'] }
+    }
+    if (help && helpListsFlag(help, '--mode')) {
+      return { configForLaunch, allowAllArgs: ['--mode', 'auto'] }
+    }
+    throw new Error(
+      'Could not confirm that this Antigravity CLI installation supports --dangerously-skip-permissions or --mode auto.',
+    )
+  }
+
   if (help && helpListsFlag(help, '--dangerously-bypass-approvals-and-sandbox')) {
     return { configForLaunch, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] }
   }
@@ -298,6 +310,37 @@ export function resolveOtherCliReviewerArgs(
   throw new Error(
     'Could not confirm that this Codex CLI installation supports --dangerously-bypass-approvals-and-sandbox.',
   )
+}
+
+/**
+ * Builds the final CLI arguments for launching a non-Copilot temporary PR reviewer session (`claude`, `codex`, or
+ * `antigravity`) with its initial review prompt.
+ */
+export function buildOtherCliReviewerCliArgs(
+  cli: Exclude<ReviewerCli, 'copilot'>,
+  options: {
+    configArgs: readonly string[]
+    addDirArgs: readonly string[]
+    generation: string
+    prompt: string
+    help: string | null
+  },
+): string[] {
+  const { configArgs, addDirArgs, generation, prompt, help } = options
+  if (cli === 'claude') {
+    const sessionArgs = help && helpListsFlag(help, '--session-id') ? ['--session-id', generation] : []
+    return [...configArgs, ...sessionArgs, ...addDirArgs, '--', prompt]
+  }
+  if (cli === 'antigravity') {
+    if (help && helpListsFlag(help, '--prompt-interactive')) {
+      return [...configArgs, ...addDirArgs, '--prompt-interactive', prompt]
+    }
+    if (help && helpListsFlag(help, '--print')) {
+      return [...configArgs, ...addDirArgs, '--print', prompt]
+    }
+    throw new Error('Could not confirm that this Antigravity CLI installation supports --prompt-interactive or --print.')
+  }
+  return [...configArgs, ...addDirArgs, prompt]
 }
 
 export function buildReviewerBrief(options: {

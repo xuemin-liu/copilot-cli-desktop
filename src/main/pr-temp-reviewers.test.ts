@@ -16,6 +16,7 @@ import {
 } from './pr-review-launch.js'
 import { ReviewReservations } from './pr-review-reservations.js'
 import {
+  buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -99,7 +100,12 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
 })
 
 test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly on the remote PR host and never perform local-only review', () => {
-  for (const [cli, tag] of [['copilot', '[Copilot CLI]'], ['claude', '[Claude Code]'], ['codex', '[Codex CLI]']] as const) {
+  for (const [cli, tag] of [
+    ['copilot', '[Copilot CLI]'],
+    ['claude', '[Claude Code]'],
+    ['codex', '[Codex CLI]'],
+    ['antigravity', '[Antigravity CLI]'],
+  ] as const) {
     const brief = buildReviewerBrief({
       cli,
       repository: 'xuemin-liu/copilot-cli-desktop',
@@ -158,6 +164,50 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.deepEqual(
     resolveOtherCliReviewerArgs('codex', { approval: 'allow-all', sandbox: 'read-only' }, false, '  --dangerously-bypass-approvals-and-sandbox', 'demo'),
     { configForLaunch: { approval: 'allow-all', sandbox: 'read-only' }, allowAllArgs: [] },
+  )
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('antigravity', { approval: 'plan', model: 'gemini-3-pro' }, true, '  --dangerously-skip-permissions\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'gemini-3-pro' }, allowAllArgs: ['--dangerously-skip-permissions'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('antigravity', undefined, true, '  --mode <m>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--mode', 'auto'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('antigravity', undefined, true, null, 'demo'),
+    /Could not confirm that this Antigravity CLI installation supports/,
+  )
+
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('claude', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --session-id <id>',
+    }),
+    ['--dangerously-skip-permissions', '--session-id', '11111111-1111-4111-8111-111111111111', '--add-dir', '/tmp/helper', '--', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('codex', {
+      configArgs: ['--dangerously-bypass-approvals-and-sandbox'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --add-dir <dir>',
+    }),
+    ['--dangerously-bypass-approvals-and-sandbox', '--add-dir', '/tmp/helper', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('antigravity', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --prompt-interactive\n  --add-dir',
+    }),
+    ['--dangerously-skip-permissions', '--add-dir', '/tmp/helper', '--prompt-interactive', 'Review PR'],
   )
 })
 

@@ -1010,8 +1010,8 @@ export function SettingsApp(): JSX.Element | null {
           profile can override which CLIs run). Each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and
           posts its comments and approvals directly onto the pull request. Keeping &ldquo;Allow all permissions&rdquo; enabled
           launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
-          (Claude Code), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background reviews do not stall
-          on terminal prompts.
+          (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
+          reviews do not stall on terminal prompts.
         </p>
       </section>
 

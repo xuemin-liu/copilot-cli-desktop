@@ -8,11 +8,10 @@ export type OtherCli = typeof OTHER_CLIS[number]
 export const OTHER_CLIS = ['claude', 'codex', 'antigravity'] as const
 
 /**
- * CLIs verified to act as temporary PR reviewers: Copilot (OS sandbox) plus Claude Code (`--restricted` + MCP)
- * and Codex CLI (`--sandbox read-only` + MCP), proven in `scripts/pr-temp-reviewers-spike.mjs`.
- * Antigravity is excluded in v1 because it shares a single global MCP config file without per-seat isolation.
+ * CLIs supported as hidden temporary PR reviewers (`review-pr` running directly against the remote PR in an isolated
+ * detached Git worktree): Copilot CLI, Claude Code, Codex CLI, and Antigravity CLI.
  */
-export const SUPPORTED_REVIEWER_CLIS = ['copilot', 'claude', 'codex'] as const
+export const SUPPORTED_REVIEWER_CLIS = ['copilot', 'claude', 'codex', 'antigravity'] as const
 export type ReviewerCli = typeof SUPPORTED_REVIEWER_CLIS[number]
 export const DEFAULT_REVIEWER_CLIS: readonly ReviewerCli[] = ['copilot']
 
