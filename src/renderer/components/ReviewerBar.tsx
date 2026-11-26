@@ -30,6 +30,19 @@ const OUTCOME_LABEL: Record<NonNullable<TempReviewerGroupView['outcome']>, strin
   stopped: 'Stopped',
 }
 
+/** The same seats for a review meeting, which has no pull request: a seat is in the meeting or it is not. */
+const MEETING_VERDICT_LABEL: Record<TempReviewerSeatVerdict, string> = {
+  ...VERDICT_LABEL,
+  starting: 'joining…',
+  reviewing: 'in the meeting',
+  incomplete: 'left (session ended)',
+}
+
+const MEETING_OUTCOME_LABEL: Record<NonNullable<TempReviewerGroupView['outcome']>, string> = {
+  ...OUTCOME_LABEL,
+  closed: 'Meeting closed',
+}
+
 export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekTabId, onPeek, onError }: ReviewerBarProps): JSX.Element | null {
   const [busyGroupId, setBusyGroupId] = useState<string | null>(null)
   if (!activeTabId && !activeProfileId) return null
@@ -55,16 +68,18 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
       {shown.map((group) => {
         const ended = group.stage === 'ended'
         const busy = busyGroupId === group.id
+        const meeting = group.meetingId !== undefined
+        const verdictLabel = meeting ? MEETING_VERDICT_LABEL : VERDICT_LABEL
         const stageSummary = ended
-          ? (group.outcome ? OUTCOME_LABEL[group.outcome] : 'Ended')
+          ? (group.outcome ? (meeting ? MEETING_OUTCOME_LABEL : OUTCOME_LABEL)[group.outcome] : 'Ended')
           : group.stage === 'starting'
-            ? 'Starting reviewers…'
-            : 'Reviewing on PR'
+            ? (meeting ? 'Starting reviewers; round 1 waits for them…' : 'Starting reviewers…')
+            : (meeting ? 'Reviewers in the meeting' : 'Reviewing on PR')
         return (
           <section
             key={group.id}
             className={`meeting-bar reviewer-bar reviewer-bar-${ended ? 'ended' : 'active'}`}
-            aria-label={`Temporary PR reviewers for ${group.prLabel}`}
+            aria-label={meeting ? `Hidden reviewers for ${group.prLabel}` : `Temporary PR reviewers for ${group.prLabel}`}
           >
             {group.prUrl ? (
               <button
@@ -84,7 +99,9 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
               </span>
             )}
             <span className="reviewer-bar-meta">
-              <code>{group.head.slice(0, 7)}</code> · R{group.round} · {stageSummary}
+              {meeting
+                ? <>{group.head ? <><code title="The commit each reviewer's checkout is pinned to">{group.head.slice(0, 7)}</code> · </> : 'no checkout · '}{stageSummary}</>
+                : <><code>{group.head.slice(0, 7)}</code> · R{group.round} · {stageSummary}</>}
             </span>
             <ul className="reviewer-bar-seats" aria-label={`Reviewer seats for ${group.prLabel}`}>
               {group.seats.map((seat) => {
@@ -100,7 +117,7 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                   >
                     <span className="reviewer-seat-name">{sessionCliLabel(seat.cli)}</span>
                     <span className="reviewer-seat-verdict">
-                      {seat.needsAttention && seat.verdict === 'reviewing' ? 'needs approval' : VERDICT_LABEL[seat.verdict]}
+                      {seat.needsAttention && seat.verdict === 'reviewing' ? 'needs approval' : verdictLabel[seat.verdict]}
                     </span>
                     {canPeek && (
                       <button
@@ -151,7 +168,7 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label={`Dismiss temporary reviewers for ${group.prLabel}`}
+                  aria-label={`Dismiss ${meeting ? 'hidden' : 'temporary'} reviewers for ${group.prLabel}`}
                   onClick={() => runAction(group.id, 'dismiss-ended')}
                 >
                   ×

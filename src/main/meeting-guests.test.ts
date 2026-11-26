@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { MeetingHub, type MeetingDelivery, type MeetingTimers } from './meeting.js'
 import {
-  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_PAGE_CHARS, GUEST_UNUSED_SEAT_MS, GuestMailbox, guestHelperCommand,
+  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_PAGE_CHARS, GUEST_UNUSED_SEAT_MS, GuestMailbox, MANAGED_SEAT_RESTARTED, guestHelperCommand,
   guestDeliveryText, guestHostInvitation, guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestChannel, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { MeetingControlServer } from './meeting-session.js'
@@ -588,4 +588,30 @@ test('a host\'s agreed message is worded for its channel when the meeting closes
   mailbox.enqueue(seat.id, { meetingId: 'K7QF', round: 2, kind: 'agreed', text: 'All agreed.' })
   mailbox.close(seat.id, 'The meeting is closed.')
   assert.equal(mailbox.closing(seat), 'mcp: All agreed.')
+})
+
+test('a seat the desktop made for a hidden reviewer is over after a restart; other seats come back as they were', () => {
+  const saved = new GuestMailbox(clock(), () => {})
+  const managed = saved.invite('K7QF', 'Claude Code', null, { managed: true }).seat
+  const ordinary = saved.invite('K7QF', 'Codex', null).seat
+  const host = saved.invite('', 'Host agent', null, { kind: 'host', managed: true }).seat
+  saved.joined(managed)
+  saved.joined(ordinary)
+  assert.equal(managed.managed, true)
+  assert.equal(ordinary.managed, undefined)
+  assert.equal(host.managed, undefined, 'only a reviewer seat is a managed one')
+
+  const restored = new GuestMailbox(clock(), () => {})
+  restored.restore(JSON.parse(saved.serialize()))
+  const back = restored.seat(managed.id)!
+  assert.equal(back.closed, MANAGED_SEAT_RESTARTED)
+  assert.notEqual(back.closedAt, null)
+  assert.equal(back.managed, true)
+  assert.equal(restored.seat(ordinary.id)!.closed, null, 'an outside agent keeps its seat')
+  assert.deepEqual(restored.seatsOf('K7QF').map((seat) => seat.id), [ordinary.id], 'the meeting comes back without the hidden reviewer')
+  // A managed seat that had already closed keeps why.
+  saved.close(managed.id, 'The person removed this reviewer.')
+  const again = new GuestMailbox(clock(), () => {})
+  again.restore(JSON.parse(saved.serialize()))
+  assert.equal(again.seat(managed.id)!.closed, 'The person removed this reviewer.')
 })

@@ -89,6 +89,7 @@ export const GUEST_MCP_TOOLS = [
         post: { type: 'string', description: 'The plan, or a summary of your changes and what you want reviewed.' },
         folder: { type: 'string', description: 'Your project folder, as an absolute path: changes: true attaches its uncommitted changes.' },
         changes: { type: 'boolean', description: 'Attach the uncommitted changes of the project folder.' },
+        reviewers: { type: 'boolean', description: 'Have the desktop start hidden reviewer sessions for this meeting, one per reviewer CLI chosen in its settings; needs folder. The person is asked first. Round 1 opens once each has joined or failed.' },
         name: NAME_PROPERTY,
         invitation: { type: 'string', description: 'A 64-character host invitation token, if the person gave you one: its folder is the one the person picked.' },
       },
@@ -390,7 +391,18 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
   session.seatKey = null
   const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
   if (!answer.ok) { mailbox.close(seat.id, answer.message); session.seatId = null; return toolText(answer.message, true) }
-  return toolText(answer.message + seatKey(token))
+  return toolText(answer.message + seatKey(token) + await startedReviewers(session, deps, seat, args))
+}
+
+/**
+ * `reviewers: true` on a start that opened its meeting: the desktop starts hidden reviewer sessions. Called in the same
+ * turn of the event loop as the start's answer, so the hold on the first round is in place before anyone can join.
+ */
+async function startedReviewers(session: Session, deps: GuestDeps, seat: GuestSeat, args: Record<string, unknown>): Promise<string> {
+  if (args.reviewers !== true || seat.meetingId === '') return ''
+  if (!deps.startReviewers) return ' Hidden reviewers are unavailable in this desktop build.'
+  try { return ` ${await deps.startReviewers(seat, session.desktopTag, args.changes === true)}` }
+  catch (error) { return ` Hidden reviewers could not be started: ${error instanceof Error ? error.message : String(error)}` }
 }
 
 /** A start, with its session reserved from before its first wait until its answer. */
@@ -484,7 +496,7 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
     if (name === 'meeting_start') {
       return reserved(session, async () => {
         const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
-        return toolText(answer.message, !answer.ok)
+        return toolText(answer.ok ? answer.message + await startedReviewers(session, deps, seat, args) : answer.message, !answer.ok)
       })
     }
     return toolText(joinedText(seat))

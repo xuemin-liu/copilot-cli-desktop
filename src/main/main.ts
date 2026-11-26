@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -180,6 +180,10 @@ import {
   type TempReviewerGroup,
   type TempReviewerSeat,
 } from './pr-temp-reviewers.js'
+import {
+  MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
+  type MeetingReviewerGroup, type MeetingReviewerSeat,
+} from './meeting-reviewers.js'
 import { buildOtherCliLaunchArgs, helpListsFlag, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
@@ -1015,6 +1019,7 @@ async function sweepReviewerAreas():Promise<void>{
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
+      if(meetingReviewers.holdsLaunch(record.launchId))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
       const open=[...managedTabs.values()].some(({session})=>session.sessionCwd&&sameRealPath(session.sessionCwd,record.checkout))
@@ -1027,7 +1032,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(removal.outcome==='removed')await store.release(record.launchId)
       else if(removal.reason==='detached')await store.keep(record.launchId,removal.detachedAt)
       else if(record.detachedAt!==undefined&&removal.reason==='dirty'){await store.undetach(record.launchId);workflowNotice=`Files were saved in the leftover review folder of PR #${record.number}, so it was kept: ${record.checkout}. Look at it, then delete the folder.`;broadcastState()}
-      else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of PR #${record.number} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
+      else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of ${record.repository.startsWith('meeting/')?`meeting ${record.repository.slice(8)}`:`PR #${record.number}`} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
     }
   }finally{sweeping=false}
 }
@@ -1378,7 +1383,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
-    tempReviewerGroups: tempReviewers.views(),
+    tempReviewerGroups: [...tempReviewers.views(), ...meetingReviewers.views()],
     workflowTasks: workflowViews(),
     workflowFollowups: followupViews(),
     workflowPrPosts: prPostViews(),
@@ -2240,6 +2245,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     }
     if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) {
       void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
+      if (!shuttingDown()) onMeetingReviewerExit(id, status)
     }
     // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host). Not while the app quits:
     // its meetings are saved as they stand and go on after the next start.
@@ -3515,6 +3521,8 @@ const meetingHub = new MeetingHub(meetingRoot, {
   changed: () => {
     // Not while meetings are being restored one by one: a guest's meeting may simply not be back yet.
     if (guestsReady) guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
+    // Hidden reviewers the desktop started for a meeting end with it, however it closed.
+    reapMeetingReviewers()
     broadcastState()
   },
   notify: (meetingId, message) => {
@@ -3530,7 +3538,7 @@ const meetingHub = new MeetingHub(meetingRoot, {
   folderExists: (id) => existsSync(join(meetingRoot(), id)),
   // An outside agent that stopped polling would hold every round to its timeout; a Copilot tab is the person's to judge.
   dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId),
-  dropped: (tabId, message) => guestMailbox.close(tabId, message),
+  dropped: (tabId, message) => { guestMailbox.close(tabId, message); onMeetingReviewerSeatGone(tabId, 'The meeting took it out after two rounds without a reply.') },
   // A message typed and never confirmed has not asked that session anything either, as far as anyone can tell.
   undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId) || lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === meetingId),
   turnFailed: (meetingId, tabId, error, retrying) => {
@@ -3606,10 +3614,14 @@ const guestDeps: GuestDeps = {
   ready: () => guestsReady,
   isOpen: (id) => meetingHub.isOpen(id),
   join: (seat) => {
-    try { meetingHub.join({ tabId: seat.id, title: `${seat.name} (guest)`, folder: null }, seat.meetingId, { role: seat.role }); return null }
+    // A hidden reviewer that takes the place of an earlier launch of its seat starts with the next round.
+    const replacement = meetingReviewers.seatByGuest(seat.id)?.seat.replacement === true
+    try { meetingHub.join({ tabId: seat.id, title: `${seat.name} (guest)`, folder: null }, seat.meetingId, { role: seat.role, ...(replacement ? { nextRound: true } : {}) }) }
     catch (error) { if (error instanceof MeetingError) return error.message; throw error }
+    onMeetingReviewerJoined(seat.id)
+    return null
   },
-  leave: (seat) => meetingHub.leave(seat.id),
+  leave: (seat) => { meetingHub.leave(seat.id); onMeetingReviewerSeatGone(seat.id, 'It left the meeting.') },
   turnCompleted: (seat, delivery, reply) => meetingHub.turnCompleted(seat.id, delivery, reply),
   material: async (id, name, round) => {
     const folder = meetingHub.folderOf(id)
@@ -3630,7 +3642,11 @@ const guestDeps: GuestDeps = {
     try { meetingHub.end(seat.id); return { ok: true, message: 'The meeting is closed.' } }
     catch (error) { if (error instanceof MeetingError) return { ok: false, message: error.message }; throw error }
   },
-  status: (seat) => meetingStatus(seat.id),
+  status: (seat) => {
+    const reviewers = seat.meetingId ? meetingReviewers.statusText(seat.meetingId) : ''
+    return reviewers ? `${meetingStatus(seat.id)}\n${reviewers}` : meetingStatus(seat.id)
+  },
+  startReviewers: (seat, desktopTag, hasChanges) => startMeetingReviewers({ meetingId: seat.meetingId, desktopTag, folder: seat.folder, hasChanges }),
   waitingOn: (seat) => {
     const view = meetingHub.views().find((meeting) => meeting.id === seat.meetingId)
     return view ? meetingWaitingOn(view, seat.id) : null
@@ -3667,6 +3683,7 @@ function writeGuestEndpoint(port: number): void {
 }
 
 const tempReviewers = new TempReviewerRegistry()
+const meetingReviewers = new MeetingReviewerRegistry()
 const SAFE_GIT_REF_INPUT = /^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$/
 
 async function resolveGitRevisionsForReview(
@@ -4491,6 +4508,10 @@ async function startTempReviewersFlow(options: {
     return { ok: false, message: `${repository} ${prLabel} already has an active standalone review loop.` }
   }
 
+  const busyMeeting = meetingReviewers.activeForProfile(options.profile.id)
+  if (busyMeeting) {
+    return { ok: false, message: `${options.profile.name} is already running hidden reviewers for meeting ${busyMeeting.meetingId}. Stop them first.` }
+  }
   const clis = options.profile.reviewerClis ?? desktopConfig.reviewerClis
   const allowAll = desktopConfig.reviewerAllowAll
   if (!allowAll && clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
@@ -4505,7 +4526,7 @@ async function startTempReviewersFlow(options: {
       message: `${options.profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Pull request reviewers.`,
     }
   }
-  const inUseSeats = Math.max(tempReviewerTabCount(tabsState), tempReviewers.activeSeatCount())
+  const inUseSeats = hiddenReviewerSlotsInUse()
   if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) {
     return {
       ok: false,
@@ -4631,6 +4652,14 @@ async function startTempReviewersFlow(options: {
     )
   }
 
+  // Checked again here, with nothing awaited before the group is recorded: a meeting may have taken this workspace, or
+  // the last free slots, while the pull request was being read.
+  const meetingNow = meetingReviewers.activeForProfile(options.profile.id)
+  if (meetingNow) return { ok: false, message: `${options.profile.name} is already running hidden reviewers for meeting ${meetingNow.meetingId}. Stop them first.` }
+  const seatsNow = hiddenReviewerSlotsInUse()
+  if (seatsNow + clis.length > MAX_TEMP_REVIEWER_TABS) {
+    return { ok: false, message: `Cannot start ${clis.length} temporary reviewer session(s): ${seatsNow}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce configured reviewer CLIs.` }
+  }
   let created: { group: TempReviewerGroup; hostKey: string }
   try {
     created = tempReviewers.createGroup({
@@ -4832,6 +4861,494 @@ async function startTempReviewersMcp(options: {
     context: options.context,
     requireConsent: true,
   })
+}
+
+// Hidden reviewers for a review meeting (docs/review-meeting-plan.md). The meeting is the hub's; this starts one hidden
+// session per configured reviewer CLI, each with a meeting seat the desktop made for it, holds round 1 until each has
+// joined or failed, and closes them when the meeting closes.
+
+/**
+ * Hidden reviewer slots in use, for a pull request and for a meeting alike: every hidden reviewer tab that is open (a
+ * failed or left seat keeps its tab for Peek until its run ends), plus every seat that is starting and has no tab yet.
+ */
+function hiddenReviewerSlotsInUse(): number {
+  const pullSeats = tempReviewers.list().reduce((sum, group) => sum + (group.stage === 'ended' ? 0 : [...group.requiredSeats.values()].filter((seat) => seat.tabId === null && seat.lifecycle === 'starting').length), 0)
+  const meetingSeats = meetingReviewers.list().reduce((sum, group) => sum + (group.stage === 'ended' ? 0 : [...group.seats.values()].filter((seat) => seat.tabId === null && seat.lifecycle === 'starting').length), 0)
+  return tempReviewerTabCount(tabsState) + pullSeats + meetingSeats
+}
+
+/** How long a started reviewer has to take its seat in the meeting before its seat counts as failed. */
+const DEFAULT_MEETING_SEAT_JOIN_MS = 4 * 60_000
+function meetingSeatJoinMs(): number {
+  const raw = Number(process.env.COPILOT_DESKTOP_MEETING_SEAT_JOIN_MS)
+  return Number.isFinite(raw) && raw >= 1_000 && raw <= 60 * 60_000 ? raw : DEFAULT_MEETING_SEAT_JOIN_MS
+}
+/** One per launch of a seat, by its generation. */
+const meetingSeatJoinTimers = new Map<string, NodeJS.Timeout>()
+function clearMeetingSeatJoinTimer(seat: MeetingReviewerSeat): void {
+  const timer = meetingSeatJoinTimers.get(seat.generation)
+  if (timer) { clearTimeout(timer); meetingSeatJoinTimers.delete(seat.generation) }
+}
+
+/**
+ * Round 1 opens once no planned seat is still coming up: each has joined, failed, left or been let go. With nobody in,
+ * the meeting simply keeps waiting, as a meeting without hidden reviewers does, and the host is told why.
+ */
+function settleMeetingReviewerGate(group: MeetingReviewerGroup): void {
+  if (group.stage !== 'starting' || !meetingReviewers.settled(group)) return
+  group.stage = 'active'
+  if (meetingReviewers.joinedCount(group) === 0) {
+    group.notice = `No hidden reviewer joined meeting ${group.meetingId}. Retry a seat here, or have an agent join with "join meeting ${group.meetingId}".`
+  }
+  meetingHub.release(group.meetingId)
+  broadcastState()
+}
+
+/**
+ * A managed seat's meeting seat is gone by a road other than its session ending: its agent left, the person removed it
+ * in the meeting bar, or the meeting took it out for its silence. The run says so, and the seat can be started again.
+ * Its session may well be running still; the tab stays for the person to look at.
+ */
+function onMeetingReviewerSeatGone(guestSeatId: string, why: string): void {
+  const found = meetingReviewers.seatByGuest(guestSeatId)
+  if (!found || found.group.stage === 'ended') return
+  const { group, seat } = found
+  if (!meetingReviewers.seatExited(seat, seat.generation, why)) return
+  void releaseMeetingReviewerSeat(seat, why, { keepTab: true }).then(() => {
+    settleMeetingReviewerGate(group)
+    broadcastState()
+  })
+}
+
+/** A managed seat's agent took its seat in the meeting. */
+function onMeetingReviewerJoined(guestSeatId: string): void {
+  const found = meetingReviewers.seatByGuest(guestSeatId)
+  if (!found || !meetingReviewers.seatJoined(guestSeatId)) return
+  clearMeetingSeatJoinTimer(found.seat)
+  settleMeetingReviewerGate(found.group)
+  broadcastState()
+}
+
+/**
+ * Take back what one launch of a seat holds: its meeting seat, its tab and its folder. Each part is taken once, so this
+ * may be called again for the same launch (an exit, then the close of the meeting).
+ */
+async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string, options: { keepTab?: boolean } = {}): Promise<void> {
+  clearMeetingSeatJoinTimer(seat)
+  const guestSeatId = seat.guestSeatId
+  seat.guestSeatId = null
+  if (guestSeatId) {
+    guestMailbox.close(guestSeatId, why)
+    // The hub counts a voter who leaves mid-vote as one who did not agree.
+    meetingHub.leave(guestSeatId)
+    void rm(guestSeatFolder(guestRoot(), guestSeatId), { recursive: true, force: true }).catch(() => {})
+  }
+  if (options.keepTab) return
+  const tabId = seat.tabId
+  seat.tabId = null
+  if (tabId) {
+    const managed = managedTabs.get(tabId)
+    // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
+    // here aborts that start, so its CLI is not launched for a seat that is already over.
+    void managed?.session.stop().catch(() => {})
+    const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
+    if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
+    if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  }
+  const area = seat.area
+  seat.area = null
+  if (!area) return
+  const store = reviewReservations()
+  const runner = await meetingGitRunner().catch(() => null)
+  const removal = await removeReviewerAreaDetailed(area, runner).catch((error): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }))
+  if (removal.outcome === 'removed') {
+    if (seat.launchId) await store?.release(seat.launchId).catch(() => {})
+  } else {
+    if (seat.launchId) await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+    seat.keptCheckoutPath = area.checkout
+  }
+}
+
+/**
+ * Take every one of these seats out of the meeting now, in this turn of the event loop: their sessions are told to stop,
+ * their meeting seats are closed and they leave the hub, all before anything is awaited. A run that is stopped while its first round is held releases that
+ * round right after; without this the seats still waiting for their teardown would be sent the post the person just
+ * stopped them from getting.
+ */
+function revokeMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: string): void {
+  for (const seat of seats) {
+    clearMeetingSeatJoinTimer(seat)
+    // Every session is told to stop now, also one that has not spawned yet: the teardown below takes the seats one
+    // after another, and a CLI must not start for a seat that is waiting its turn to be torn down.
+    if (seat.tabId) void managedTabs.get(seat.tabId)?.session.stop().catch(() => {})
+    const guestSeatId = seat.guestSeatId
+    seat.guestSeatId = null
+    if (!guestSeatId) continue
+    guestMailbox.close(guestSeatId, why)
+    meetingHub.leave(guestSeatId)
+    void rm(guestSeatFolder(guestRoot(), guestSeatId), { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function teardownMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: string): Promise<void> {
+  // One after another: each removes a worktree of the same repository.
+  for (const seat of seats) await releaseMeetingReviewerSeat(seat, why).catch((error) => writeAppLog(`Could not close a meeting reviewer seat: ${String(error)}`).catch(() => {}))
+  broadcastState()
+}
+
+/** Every run whose meeting is no longer open is over. Called on each change of the hub; ending a run twice does nothing. */
+function reapMeetingReviewers(): void {
+  for (const group of meetingReviewers.list()) {
+    if (group.stage === 'ended' || meetingHub.isOpen(group.meetingId)) continue
+    const seats = meetingReviewers.end(group.id, 'closed')
+    revokeMeetingReviewerSeats(seats, 'The meeting is closed.')
+    void teardownMeetingReviewerSeats(seats, 'The meeting is closed.')
+  }
+}
+
+/** A hidden reviewer's process ended. Its seat leaves the meeting; its tab stays for the person to look at until the run ends. */
+function onMeetingReviewerExit(tabId: string, status: 'completed' | 'crashed'): void {
+  const found = meetingReviewers.seatByTabId(tabId)
+  if (!found || found.group.stage === 'ended') return
+  const { group, seat } = found
+  const wasJoined = seat.lifecycle === 'joined'
+  if (!meetingReviewers.seatExited(seat, seat.generation, wasJoined
+    ? `Its session ${status === 'crashed' ? 'crashed' : 'ended'} before the meeting closed.`
+    : `Its session ${status === 'crashed' ? 'crashed' : 'ended'} before it joined the meeting.`)) return
+  void releaseMeetingReviewerSeat(seat, 'This reviewer\'s session ended.', { keepTab: true }).then(() => {
+    settleMeetingReviewerGate(group)
+    broadcastState()
+  })
+}
+
+async function askMeetingReviewerConsent(meetingId: string, detail: string, stillWanted: () => boolean): Promise<boolean> {
+  const previous = tempReviewerConsentChain
+  let release!: () => void
+  tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
+  await previous.catch(() => {})
+  try {
+    // It may have waited behind another question: a run whose meeting closed meanwhile asks nothing.
+    if (!stillWanted()) return false
+    const owner = mainWindow
+    if (!owner || owner.isDestroyed()) return false
+    if (!owner.isVisible()) owner.show()
+    owner.focus()
+    if (!owner.isFocused()) owner.flashFrame(true)
+    const { response } = await dialog.showMessageBox(owner, {
+      type: 'question',
+      title: 'Hidden meeting reviewers',
+      message: `Start hidden reviewer sessions for meeting ${meetingId}?`,
+      detail,
+      buttons: ['Cancel', 'Start reviewers'],
+      // It can appear while the person is pressing Enter somewhere else.
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    return response === 1
+  } finally {
+    release()
+  }
+}
+
+/** The commit a meeting's reviewers are pinned to: the project's HEAD, or null where there is none to check out. */
+async function meetingReviewCommit(folder: string): Promise<{ project: string; commit: string | null }> {
+  const runner = await meetingGitRunner().catch(() => null)
+  if (!runner) return { project: resolve(folder), commit: null }
+  const read = async (args: string[]): Promise<string | null> => {
+    const result = await runner.run({ cwd: folder, args, kind: 'read', disableHooks: true, timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
+    const text = result && result.exitCode === 0 ? result.stdout.toString('utf8').trim() : ''
+    return text || null
+  }
+  const top = await read(['rev-parse', '--show-toplevel'])
+  if (!top) return { project: resolve(folder), commit: null }
+  const head = await read(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+  return { project: resolve(top), commit: head && /^[a-f0-9]{40,64}$/.test(head) ? head : null }
+}
+
+/** The flag each CLI gets under allow-all, for the consent text. */
+const MEETING_ALLOW_ALL_FLAGS: Partial<Record<ReviewerCli, string>> = {
+  copilot: '--allow-all', claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox', antigravity: '--dangerously-skip-permissions',
+}
+
+/**
+ * `meeting_start` with `reviewers: true`. The first round is held at once, before anything is awaited, so nobody who joins
+ * meanwhile is sent the post alone. The answer goes to the host; the question to the person and the launches go on after it.
+ */
+async function startMeetingReviewers(options: { meetingId: string; desktopTag: string | null; folder: string | null; hasChanges: boolean }): Promise<string> {
+  const { meetingId } = options
+  if (!meetingHub.hold(meetingId)) return 'Hidden reviewers were not started: the meeting already has reviewers.'
+  const refuse = (reason: string): string => { meetingHub.release(meetingId); return `Hidden reviewers were not started: ${reason} Add reviewers by telling an agent "join meeting ${meetingId}".` }
+  if (guestMcp.url() === null) return refuse('the meeting tools are not served on this computer, so a hidden session could not join.')
+  const resolved = await resolveMcpWorkspaceAndTab(options.desktopTag, options.folder ?? undefined).catch((error) => ({ ok: false as const, message: String(error) }))
+  if (!resolved.ok) return refuse(`${resolved.message.replace(/ when calling pr_reviewers_start\.?$/, '.').replace(/, then call pr_reviewers_start\.?$/, '.')}`)
+  if (!meetingHub.isOpen(meetingId)) { meetingHub.release(meetingId); return 'The meeting closed before its reviewers could start.' }
+  const { profile } = resolved
+  const clis = profile.reviewerClis ?? desktopConfig.reviewerClis
+  const busyPull = tempReviewers.activeForProfile(profile.id)
+  if (busyPull) return refuse(`${profile.name} is already running hidden reviewers for ${busyPull.prLabel}. Stop them first.`)
+  const inUseSeats = hiddenReviewerSlotsInUse()
+  if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) return refuse(`${inUseSeats} of ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use, and ${clis.length} more are needed.`)
+  if (clis.length > MAX_MEETING_PARTICIPANTS) return refuse(`a meeting takes at most ${MAX_MEETING_PARTICIPANTS} reviewers.`)
+  let group: MeetingReviewerGroup
+  try {
+    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, clis })
+  } catch (error) {
+    if (error instanceof MeetingReviewerError) return refuse(error.message)
+    meetingHub.release(meetingId)
+    throw error
+  }
+  broadcastState()
+  void runMeetingReviewers(group, profile, options.hasChanges).catch((error) => {
+    const seats = meetingReviewers.end(group.id, 'stopped', `Hidden reviewers could not be started: ${error instanceof Error ? error.message : String(error)}`)
+    revokeMeetingReviewerSeats(seats, 'This reviewer was not started.')
+    meetingHub.release(meetingId)
+    void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
+  })
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; meeting_status shows the seats.`
+}
+
+async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
+  const over = (): boolean => shuttingDown() || group.stage === 'ended' || !meetingHub.isOpen(group.meetingId)
+  const pinned = await meetingReviewCommit(group.projectPath)
+  if (over()) return
+  group.projectPath = pinned.project
+  group.commit = pinned.commit
+  // Read once: what the person is asked about is what every launch of this run gets, a Retry included.
+  const allowAll = desktopConfig.reviewerAllowAll
+  const clis = [...group.seats.keys()]
+  const approved = await askMeetingReviewerConsent(group.meetingId, meetingReviewerConsentDetail({ clis, allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
+  if (over()) return
+  if (!approved) {
+    meetingReviewers.end(group.id, 'stopped', `You declined hidden reviewers for meeting ${group.meetingId}. Reviewers can still join with "join meeting ${group.meetingId}".`)
+    meetingHub.release(group.meetingId)
+    broadcastState()
+    return
+  }
+  group.allowAll = allowAll
+  group.stage = 'starting'
+  broadcastState()
+  for (const seat of [...group.seats.values()]) {
+    if (over()) return
+    if (group.seats.get(seat.cli) !== seat || seat.lifecycle !== 'starting') continue
+    const generation = seat.generation
+    try {
+      await launchMeetingReviewerSeat(group, seat, profile)
+    } catch (error) {
+      if (meetingReviewers.failSeat(seat, generation, error instanceof Error ? error.message : String(error))) {
+        await releaseMeetingReviewerSeat(seat, 'This reviewer could not be started.')
+      }
+    }
+    broadcastState()
+  }
+  settleMeetingReviewerGate(group)
+}
+
+async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, profile: WorkspaceProfile): Promise<void> {
+  const generation = seat.generation
+  const cancelled = (): boolean => (
+    shuttingDown() || group.stage === 'ended' || group.seats.get(seat.cli) !== seat || seat.generation !== generation
+    || seat.lifecycle !== 'starting' || !meetingHub.isOpen(group.meetingId)
+  )
+  const cli = seat.cli
+  if (cli === 'copilot') throw new Error('Copilot CLI cannot join a meeting as a hidden reviewer in this version.')
+  if (guestMcp.url() === null) throw new Error('The meeting tools are not served on this computer, so this reviewer could not join.')
+  const store = reviewReservations()
+  if (!store) throw new Error('Review reservations are unavailable')
+  const runner = await meetingGitRunner().catch(() => null)
+  if (cancelled()) throw new Error('The meeting reviewer was stopped before it started')
+  const area = planReviewerArea(reviewerAreaBase())
+  const launchId = basename(area.root)
+  seat.launchId = launchId
+  seat.area = area
+  // Recorded before anything is made: a crash leaves nothing the next start cannot account for.
+  // A plan-only launch makes no worktree: recorded without a project, so the sweep after a crash removes the folder
+  // itself instead of asking Git about a folder that may be no repository.
+  await store.reserve({ launchId, repository: `meeting/${group.meetingId}`, number: 1, reviewer: `meeting:${group.id}:${cli}:${generation}`, project: group.commit ? resolve(group.projectPath) : '', root: area.root, checkout: area.checkout, ref: area.ref })
+  reviewLaunches.add(launchId)
+  try {
+    await makeReviewerArea(area)
+    if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
+    if (group.commit) {
+      if (!runner) throw new Error('Git is not available')
+      await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit)
+    } else {
+      // Plan-only: there is nothing to check out, so the reviewer starts in an empty folder of its own.
+      await mkdir(area.checkout, { recursive: true, mode: 0o700 })
+    }
+    if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
+    const label = sessionCliLabel(cli)
+    const taken = new Set(guestMailbox.seatsOf(group.meetingId).map((guest) => guest.name))
+    let name = label
+    for (let count = 2; taken.has(name); count++) name = `${label} ${count}`
+    // A seat the desktop makes for the person who allowed this run: granted, as an invitation the person makes is.
+    const { seat: guest, token } = guestMailbox.invite(group.meetingId, name, null, { managed: true })
+    seat.guestSeatId = guest.id
+    await mkdir(guestSeatFolder(guestRoot(), guest.id), { recursive: true })
+    const briefPath = join(area.helper, MEETING_REVIEWER_BRIEF_FILE)
+    await writeFile(briefPath, meetingReviewerBrief({ cli, meetingId: group.meetingId, token, checkout: area.checkout, commit: group.commit, serverName: GUEST_MCP_SERVER_NAME }), { encoding: 'utf8', mode: 0o600 })
+    const prompt = meetingReviewerPromptLine(group.meetingId, briefPath)
+
+    // The mode the person allowed for this run, not the setting as it is now.
+    const allowAll = group.allowAll
+    if (allowAll === null) throw new Error('The person has not allowed this run yet')
+    const resolution = await otherCliLaunchResolution(cli)
+    if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not installed`)
+    const help = await otherCliHelp(resolution)
+    // A meeting's reviewer talks to this computer only, so the check a pull request reviewer needs (a sandbox that
+    // can reach the pull request host) is not applied.
+    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, profile.otherCli?.[cli], allowAll, help, profile.name, false)
+    // Its own address for the meeting tools, as a tab that runs this CLI gets. Antigravity reads the one shared file.
+    const meetingArgs = await otherCliMeetingArgs(cli, newMeetingTabTag(), resolution, area.checkout)
+    const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs, ...meetingArgs]
+    const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
+    const claudeTrustsProject = cli === 'claude' && allowAll && await claudeProjectTrusted([claudeTrustFolderForCheckout(area.commonDir)])
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, cli === 'claude' && claudeBypassesPermissions(configArgs))
+    if (helperAccess.settings !== null) await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
+    const env: NodeJS.ProcessEnv = { ...withCopilotPathAdditions(process.env, resolution.pathAdditions) }
+    delete env.COPILOT_HOME
+    const cliArgs = buildOtherCliReviewerCliArgs(cli, {
+      configArgs,
+      addDirArgs: helperAccess.args,
+      generation,
+      prompt,
+      help,
+      // One turn serves the whole meeting: the agent stays in it, calling meeting_next, until the meeting closes.
+      oneShot: otherCliReviewerOneShot(cli, allowAll, claudeTrustsProject),
+      resumeSessionId: null,
+    })
+    if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
+    assertWorkspaceListed(profile)
+    const id = `tab-${nextTabSequence++}`
+    const session = new PtySession({
+      file: resolution.command,
+      args: [...resolution.prefixArgs, ...cliArgs],
+      cwd: area.checkout,
+      env,
+      spawnPty: spawnNodePty,
+      sessionId: cli === 'claude' ? generation : null,
+      discoverSessionIdFromOutput: false,
+      monitorSessionPermissions: false,
+      detectApprovals: false,
+      processLabel: label,
+      ...(cli === 'codex' ? { sessionIdDiscovery: new CodexSessionDiscovery({ root: codexSessionsRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
+      ...(cli === 'antigravity' ? { sessionIdDiscovery: new AntigravitySessionDiscovery({ root: antigravityDataRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
+    })
+    // The tab first: when no hidden slot is free this throws, and nothing was registered for a tab that does not exist.
+    tabsState = createBackgroundTab(tabsState, {
+      id,
+      title: `Meeting ${group.meetingId} · ${label}`,
+      cli,
+      browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
+      workspaceProfileId: profile.id,
+      sessionPermissionPreset: null,
+      sessionPermissionMode: null,
+      permissionWarning: null,
+      remote: false,
+      cliVersion: resolution.version,
+      lastSessionId: session.lastSessionId,
+      privateOverrides: true,
+      canFork: false,
+      launchWorktree: false,
+      autoTitle: false,
+      tempReviewer: { groupId: group.id, hostTabId: group.hostTabId, cli, repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
+    })
+    managedTabs.set(id, { session })
+    profilesWithSessionTabs.add(profile.id)
+    seat.tabId = id
+    syncTabState()
+    broadcastState()
+    refreshMenus()
+    wireSessionEvents(id, session)
+    reportOtherCliFolder(id, session, area.checkout)
+    await queueTabTransition(id, async () => {
+      if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
+      await session.start()
+    })
+    if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
+    // Running is not joined: the seat fails unless its agent takes it in time.
+    const joinMs = meetingSeatJoinMs()
+    const timer = setTimeout(() => {
+      meetingSeatJoinTimers.delete(generation)
+      if (!meetingReviewers.failSeat(seat, generation, `It did not join the meeting within ${Math.max(1, Math.round(joinMs / 60_000))} minute(s). Look at its tab with Peek, then Retry or Dismiss.`)) return
+      void releaseMeetingReviewerSeat(seat, 'This reviewer did not join in time.', { keepTab: true }).then(() => { settleMeetingReviewerGate(group); broadcastState() })
+    }, joinMs)
+    timer.unref?.()
+    meetingSeatJoinTimers.set(generation, timer)
+    broadcastState()
+  } catch (error) {
+    // The seat was released while this launch was still going (the meeting closed, or the seat was let go, during the
+    // checkout): that release ran before the worktree, the meeting seat or the tab of this launch existed. What this
+    // launch made since is its own to take back, or it would stay with nothing to account for it. The seat's fields
+    // hold what was made after the release; the folder is no longer on the seat, so it is taken by its own name.
+    if (seat.area !== area) {
+      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.').catch(() => {})
+      await discardMeetingReviewerArea(area, launchId).catch(() => {})
+    }
+    throw error
+  } finally {
+    reviewLaunches.delete(launchId)
+  }
+}
+
+/** Remove a reviewer folder no seat holds any more, and settle its reservation. */
+async function discardMeetingReviewerArea(area: ReviewerArea, launchId: string): Promise<void> {
+  const store = reviewReservations()
+  const runner = await meetingGitRunner().catch(() => null)
+  const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
+  if (removal.outcome === 'removed') await store?.release(launchId).catch(() => {})
+  else await store?.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+}
+
+/** The ReviewerBar's buttons, for a meeting's run. */
+async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknown, payload: unknown): Promise<DesktopState> {
+  if (action === 'dismiss-ended') {
+    meetingReviewers.forgetEnded(group.id)
+    broadcastState()
+    return snapshot()
+  }
+  if (action === 'stop') {
+    const seats = meetingReviewers.end(group.id, 'stopped', 'Stopped by you. The meeting goes on without hidden reviewers.')
+    // All of them leave the meeting before the held round is released for whoever else is there.
+    revokeMeetingReviewerSeats(seats, 'The person stopped the hidden reviewers.')
+    meetingHub.release(group.meetingId)
+    await teardownMeetingReviewerSeats(seats, 'The person stopped the hidden reviewers.')
+    return snapshot()
+  }
+  if (!isReviewerCli(payload)) throw new Error('Invalid reviewer CLI')
+  if (action === 'dismiss') {
+    const removed = meetingReviewers.dismiss(group.id, payload)
+    await releaseMeetingReviewerSeat(removed, 'The person removed this reviewer.')
+    settleMeetingReviewerGate(group)
+    broadcastState()
+    return snapshot()
+  }
+  if (action === 'retry') {
+    const profile = desktopConfig.profiles.find((candidate) => candidate.id === group.profileId)
+    if (!profile) throw new Error('Workspace profile is no longer available')
+    // A seat that still has its tab keeps that slot through the retry; one without a tab needs a free one, like a start.
+    const current = group.seats.get(payload)
+    if (current && current.tabId === null && current.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
+      throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
+    }
+    const { previous, next } = meetingReviewers.replace(group.id, payload)
+    broadcastState()
+    await releaseMeetingReviewerSeat(previous, 'This reviewer was started again.')
+    // The run may have ended meanwhile (the meeting closed): then there is nothing to start.
+    if (group.stage === 'ended' || group.seats.get(payload) !== next || next.lifecycle !== 'starting') { broadcastState(); return snapshot() }
+    try {
+      await launchMeetingReviewerSeat(group, next, profile)
+    } catch (error) {
+      if (meetingReviewers.failSeat(next, next.generation, error instanceof Error ? error.message : String(error))) {
+        await releaseMeetingReviewerSeat(next, 'This reviewer could not be started.')
+      }
+      settleMeetingReviewerGate(group)
+      broadcastState()
+      throw error
+    }
+    return snapshot()
+  }
+  throw new Error('Invalid temporary reviewer action')
 }
 
 async function waitGroupTempReviewers(group: TempReviewerGroup, waitSeconds: number, signal?: AbortSignal): Promise<MeetingResponse> {
@@ -5831,6 +6348,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
           await cleanupReviewerSeatCredentials(seat.area)
           if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
         }
+      }
+      // The same for a meeting's hidden reviewer: its seat has no tab any more, and one that was in the meeting has left.
+      const closedMeetingSeat = closing?.tempReviewer?.meetingId ? meetingReviewers.tabClosed(tabId) : null
+      if (closedMeetingSeat) {
+        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.').catch(() => {})
+        if (closedMeetingSeat.wasLive) settleMeetingReviewerGate(closedMeetingSeat.group)
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
       if (hostedTempGroup) {
@@ -7777,6 +8300,8 @@ ipcMain.handle('desktop:followup-default-remove',(event,projectId:unknown):void=
 ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, action: unknown, payload?: unknown): Promise<DesktopState> => {
   assertTrustedIpcSender(event)
   if (typeof groupId !== 'string' || !isValidSessionId(groupId)) throw new Error('Unknown temporary review group')
+  const meetingGroup = meetingReviewers.group(groupId)
+  if (meetingGroup) return meetingReviewerAction(meetingGroup, action, payload)
   const group = tempReviewers.group(groupId)
   if (!group) throw new Error('This temporary review group is no longer listed')
   if (action === 'dismiss-ended') {
@@ -7803,6 +8328,11 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (!previous) throw new Error('That reviewer seat is not in this group')
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
+    // The slot limit is shared with meetings: a seat that still has its tab keeps that slot through the retry, and one
+    // without a tab needs a free one, or it would take the slot another run has already been admitted for.
+    if (previous.tabId === null && previous.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
+      throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
+    }
     await cleanupTempReviewerSeat(previous)
     if (group.stage === 'ended') {
       broadcastState()
@@ -7883,6 +8413,7 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     if (!seat || seat.meetingId !== meetingId) throw new Error('That guest is not in this meeting')
     if (seat.joined) meetingHub.leave(seat.id)
     guestMailbox.close(seat.id, 'The person removed you from the meeting.')
+    onMeetingReviewerSeatGone(seat.id, 'You removed it from the meeting.')
   } else if (action === 'join') {
     if (!isSessionTabId(tabId)) throw new Error('Invalid session')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
