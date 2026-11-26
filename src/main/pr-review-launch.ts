@@ -194,7 +194,12 @@ async function ensureCommitIn(runner: GitRunner, cwd: string, prefix: readonly s
   if (!await present()) throw new Error('The pull request\'s base commit could not be fetched; the next check tries again')
 }
 
-const REPO_AGENT_EXEC_CONFIG_RE = /^(?:\.mcp\.json|\.vscode\/mcp\.json|\.claude\/settings(?:\.local)?\.json|\.claude\/hooks|\.codex\/config\.toml|\.codex\/hooks\.json|\.github\/copilot\/settings(?:\.local)?\.json|\.github\/hooks|\.gemini\/settings\.json)(?:$|\/)/i
+const ROOT_REPO_AGENT_EXEC_CONFIG_RE = /^(?:\.claude\/settings(?:\.local)?\.json$|\.claude\/hooks(?:\/|$)|\.codex\/config\.toml$|\.codex\/hooks\.json$|\.github\/copilot\/settings(?:\.local)?\.json$|\.github\/hooks(?:\/|$)|\.gemini\/(?:settings\.json$|hooks\.json$|config\/mcp_config\.json$|extensions(?:\/|$)))/i
+const ANY_DEPTH_REPO_AGENT_EXEC_CONFIG_RE = /(?:^|\/)(?:\.mcp\.json$|\.vscode\/mcp\.json$|[._]agents?\/(?:hooks\.json$|plugins\.json$|mcp_config\.json$|settings\.json$|(?:plugins|sidecars)(?:\/|$)))/i
+
+function isRepoAgentExecConfigPath(path: string): boolean {
+  return ROOT_REPO_AGENT_EXEC_CONFIG_RE.test(path) || ANY_DEPTH_REPO_AGENT_EXEC_CONFIG_RE.test(path)
+}
 
 async function isOnOriginBranch(
   runner: GitRunner,
@@ -258,7 +263,7 @@ export async function inspectReviewCommitAgentConfigs(
   const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(() => '')
   const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(() => '')
   const filterConfigs = (raw: string): string[] =>
-    [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && REPO_AGENT_EXEC_CONFIG_RE.test(line)))]
+    [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && isRepoAgentExecConfigPath(line)))]
   return {
     modifiedAgentConfigs: filterConfigs(diffPaths),
     presentAgentConfigs: filterConfigs(treePaths),

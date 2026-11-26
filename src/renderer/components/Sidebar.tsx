@@ -410,6 +410,14 @@ export function Sidebar({
       </div>}
     </div>
   }
+  const renderReviewerDisclosure = (reviewers: DesktopSessionTab[], key?: string): JSX.Element => (
+    <details key={key} className="sidebar-temp-reviewers" open>
+      <summary>Reviewers ({reviewers.length})</summary>
+      <div className="sidebar-temp-reviewers-list">
+        {reviewers.map((reviewer) => sessionButton(reviewer))}
+      </div>
+    </details>
+  )
   const renderSessionWithReviewers = (tab: DesktopSessionTab, wsName?: string): JSX.Element => {
     const firstInWorkspace = regularTabs.find((candidate) => candidate.workspaceProfileId === tab.workspaceProfileId)?.id === tab.id
     const childReviewers = tabs.filter((candidate) => (
@@ -420,12 +428,7 @@ export function Sidebar({
     return (
       <div key={tab.id} className="sidebar-session-with-reviewers">
         {sessionButton(tab, wsName)}
-        <details className="sidebar-temp-reviewers" open={childReviewers.some((r) => r.id === activeTabId) ? true : undefined}>
-          <summary>Reviewers ({childReviewers.length})</summary>
-          <div className="sidebar-temp-reviewers-list">
-            {childReviewers.map((reviewer) => sessionButton(reviewer))}
-          </div>
-        </details>
+        {renderReviewerDisclosure(childReviewers)}
       </div>
     )
   }
@@ -574,31 +577,46 @@ export function Sidebar({
             Add a workspace to begin
           </button>
         )}
-        {!collapsed && groupMode === 'list' && profiles.length > 0 && (
-          <section className="workspace-group">
-            <div className="workspace-sessions workspace-sessions-flat" aria-label="All sessions">
-              {orderTabs(regularTabs.filter((tab) => {
-                if (!normalizedQuery) return true
-                const profile = profiles.find((item) => item.id === tab.workspaceProfileId)
-                return `${tab.title}\n${profile?.name ?? ''}\n${profile?.path ?? ''}`.toLowerCase().includes(normalizedQuery)
-              })).map((tab) => renderSessionWithReviewers(tab, workspaceName(tab)))}
-            </div>
-          </section>
-        )}
+        {!collapsed && groupMode === 'list' && profiles.length > 0 && (() => {
+          const orphanReviewers = tabs.filter((tab) => (
+            tab.tempReviewer !== undefined
+            && (tab.tempReviewer.hostTabId === null
+              ? !regularTabs.some((regular) => regular.workspaceProfileId === tab.workspaceProfileId)
+              : !regularTabs.some((regular) => regular.id === tab.tempReviewer!.hostTabId))
+          ))
+          return (
+            <section className="workspace-group">
+              <div className="workspace-sessions workspace-sessions-flat" aria-label="All sessions">
+                {orderTabs(regularTabs.filter((tab) => {
+                  if (!normalizedQuery) return true
+                  const profile = profiles.find((item) => item.id === tab.workspaceProfileId)
+                  return `${tab.title}\n${profile?.name ?? ''}\n${profile?.path ?? ''}`.toLowerCase().includes(normalizedQuery)
+                })).map((tab) => renderSessionWithReviewers(tab, workspaceName(tab)))}
+                {orphanReviewers.length > 0 && renderReviewerDisclosure(orphanReviewers, 'orphan-reviewers')}
+              </div>
+            </section>
+          )
+        })()}
         {!collapsed && groupMode === 'workspace' && profiles.map((profile) => {
           const allProfileTabs = regularTabs.filter((tab) => tab.workspaceProfileId === profile.id)
+          const standaloneReviewers = tabs.filter((tab) => (
+            tab.tempReviewer !== undefined
+            && tab.workspaceProfileId === profile.id
+            && (allProfileTabs.length === 0 || (tab.tempReviewer.hostTabId !== null && !allProfileTabs.some((regular) => regular.id === tab.tempReviewer!.hostTabId)))
+          ))
           const profileMatches = `${profile.name}\n${profile.path}`.toLowerCase().includes(normalizedQuery)
           const filteredProfileTabs = normalizedQuery && !profileMatches
             ? allProfileTabs.filter((tab) => tab.title.toLowerCase().includes(normalizedQuery))
             : allProfileTabs
           const profileTabs = orderTabs(filteredProfileTabs)
-          if (normalizedQuery && !profileMatches && profileTabs.length === 0) return null
+          if (normalizedQuery && !profileMatches && profileTabs.length === 0 && standaloneReviewers.length === 0) return null
           return (
             <section key={profile.id} className="workspace-group">
               {workspaceRow(profile)}
-              {profileTabs.length > 0 && (
+              {(profileTabs.length > 0 || standaloneReviewers.length > 0) && (
                 <div className="workspace-sessions" aria-label={`${profile.name} sessions`}>
                   {profileTabs.map((tab) => renderSessionWithReviewers(tab))}
+                  {standaloneReviewers.length > 0 && renderReviewerDisclosure(standaloneReviewers, `standalone-${profile.id}`)}
                 </div>
               )}
             </section>

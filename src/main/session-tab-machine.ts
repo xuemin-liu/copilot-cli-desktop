@@ -9,7 +9,7 @@ import { DEFAULT_MAX_SESSION_TABS } from './session-tab-limit.js'
 /** The default limit; the app passes the one set in Settings. */
 export const MAX_SESSION_TABS = DEFAULT_MAX_SESSION_TABS
 /** Maximum concurrent hidden temporary PR reviewer tabs across active review runs. */
-export const MAX_TEMP_REVIEWER_TABS = 3
+export const MAX_TEMP_REVIEWER_TABS = 8
 
 export interface TabsState {
   tabs: DesktopSessionTab[]

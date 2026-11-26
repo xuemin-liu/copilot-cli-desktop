@@ -145,12 +145,15 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCliChoice } from './session-cli.js'
 import {
+  buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
   prReviewAndFixRequest,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
+  resolveCopilotReviewerPreset,
+  resolveOtherCliReviewerArgs,
   reviewerPromptLine,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
@@ -3711,13 +3714,10 @@ async function launchTempReviewerSeat(
       || seat.lifecycle === 'stopped'
     )
 
+    const allowAll = desktopConfig.reviewerAllowAll
+
     if (seat.cli === 'copilot') {
-      if (profile.permissionPreset === 'read-only') {
-        throw new Error(
-          `${profile.name} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Change the workspace permission preset in Settings or remove Copilot CLI from Pull request reviewers.`,
-        )
-      }
-      const reviewerPreset: PermissionPreset = profile.permissionPreset
+      const reviewerPreset: PermissionPreset = resolveCopilotReviewerPreset(profile.permissionPreset, allowAll, profile.name)
       const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: reviewerPreset, launch: { ...profile.launch, worktree: false } }
       const id = `tab-${nextTabSequence++}`
       allocatedTabId = id
@@ -3807,15 +3807,11 @@ async function launchTempReviewerSeat(
 
     const cli = seat.cli
     const savedConfig = profile.otherCli?.[cli]
-    if (cli === 'codex' && savedConfig?.sandbox === 'read-only') {
-      throw new Error(
-        `${profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Change Codex sandbox in Workspace Settings or remove Codex CLI from Pull request reviewers.`,
-      )
-    }
     const resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${sessionCliLabel(cli)} is not installed`)
     const help = await otherCliHelp(resolution)
-    const configArgs = await otherCliLaunchArgs(cli, resolution, savedConfig)
+    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
+    const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
     const addDirArgs = help && helpListsFlag(help, '--add-dir')
       ? ['--add-dir', area.helper]
       : []
@@ -3825,13 +3821,13 @@ async function launchTempReviewerSeat(
       COPILOT_DESKTOP_PR_STATE: seatStateDir,
     }
     delete env.COPILOT_HOME
-    let cliArgs: string[]
-    if (cli === 'claude') {
-      const sessionArgs = help && helpListsFlag(help, '--session-id') ? ['--session-id', seat.generation] : []
-      cliArgs = [...configArgs, ...sessionArgs, ...addDirArgs, '--', prompt]
-    } else {
-      cliArgs = [...configArgs, ...addDirArgs, prompt]
-    }
+    const cliArgs = buildOtherCliReviewerCliArgs(cli, {
+      configArgs,
+      addDirArgs,
+      generation: seat.generation,
+      prompt,
+      help,
+    })
     if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
     assertWorkspaceListed(profile)
     const id = `tab-${nextTabSequence++}`
@@ -3848,6 +3844,7 @@ async function launchTempReviewerSeat(
       detectApprovals: false,
       processLabel: sessionCliLabel(cli),
       ...(cli === 'codex' ? { sessionIdDiscovery: new CodexSessionDiscovery({ root: codexSessionsRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
+      ...(cli === 'antigravity' ? { sessionIdDiscovery: new AntigravitySessionDiscovery({ root: antigravityDataRoot(env), cwd: area.checkout, claim: claimOtherCliSession }) } : {}),
     })
     managedTabs.set(id, { session })
     profilesWithSessionTabs.add(profile.id)
@@ -3919,6 +3916,7 @@ async function askTempReviewerConsent(
   prLabel: string,
   clis: readonly ReviewerCli[],
   requireExplicitConsent: boolean,
+  allowAll: boolean,
   warnings: readonly string[] = [],
 ): Promise<boolean> {
   const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
@@ -3936,6 +3934,9 @@ async function askTempReviewerConsent(
     const details: string[] = [
       `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
       'Each reviewer runs in a hidden background tab inside an isolated detached Git worktree, accesses the pull request using your configured CLI and Git credentials, and posts its review comments and approvals directly on the pull request.',
+      allowAll
+        ? 'Allow all permissions is enabled for these hidden reviewer sessions (--allow-all for Copilot CLI, --dangerously-skip-permissions for Claude Code and Antigravity CLI, --dangerously-bypass-approvals-and-sandbox for Codex CLI) so background reviews do not block on terminal prompts.'
+        : 'Allow all permissions for hidden PR reviewers is turned off; each reviewer uses this workspace\'s configured CLI permission settings.',
     ]
     if (nonCopilotReviewers.length > 0) {
       details.push(
@@ -4056,16 +4057,17 @@ async function startTempReviewersFlow(options: {
   }
 
   const clis = options.profile.reviewerClis ?? desktopConfig.reviewerClis
-  if (clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
+  const allowAll = desktopConfig.reviewerAllowAll
+  if (!allowAll && clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
     return {
       ok: false,
-      message: `${options.profile.name} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Change the workspace permission preset in Settings or remove Copilot CLI from Pull request reviewers.`,
+      message: `${options.profile.name} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change the workspace permission preset, or remove Copilot CLI from Pull request reviewers.`,
     }
   }
-  if (clis.includes('codex') && options.profile.otherCli?.codex?.sandbox === 'read-only') {
+  if (!allowAll && clis.includes('codex') && options.profile.otherCli?.codex?.sandbox === 'read-only' && options.profile.otherCli?.codex?.approval !== 'allow-all') {
     return {
       ok: false,
-      message: `${options.profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Change Codex sandbox in Workspace Settings or remove Codex CLI from Pull request reviewers.`,
+      message: `${options.profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Pull request reviewers.`,
     }
   }
   const inUseSeats = Math.max(tempReviewerTabCount(tabsState), tempReviewers.activeSeatCount())
@@ -4078,6 +4080,35 @@ async function startTempReviewersFlow(options: {
 
   let verifiedOwnPull = false
   const consentWarnings: string[] = []
+  if (allowAll && clis.includes('copilot') && options.profile.permissionPreset !== 'full-access') {
+    consentWarnings.push(
+      `${options.profile.name} uses the "${PERMISSION_PRESET_INFO[options.profile.permissionPreset].label}" Copilot preset, while "Allow all permissions in hidden PR reviewer sessions" elevates Copilot reviewers to Full computer access (--allow-all).`,
+    )
+  }
+  if (
+    allowAll
+    && clis.includes('codex')
+    && options.profile.otherCli?.codex?.approval !== 'allow-all'
+    && (
+      options.profile.otherCli?.codex?.sandbox === 'read-only'
+      || options.profile.otherCli?.codex?.sandbox === 'workspace-write'
+      || options.profile.otherCli?.codex?.approval === 'on-request'
+    )
+  ) {
+    consentWarnings.push(
+      `${options.profile.name} configures narrower Codex CLI permissions, while "Allow all permissions in hidden PR reviewer sessions" launches Codex CLI with --dangerously-bypass-approvals-and-sandbox.`,
+    )
+  }
+  if (allowAll && clis.includes('claude') && options.profile.otherCli?.claude?.approval && options.profile.otherCli.claude.approval !== 'allow-all') {
+    consentWarnings.push(
+      `${options.profile.name} configures Claude Code approval mode "${options.profile.otherCli.claude.approval}", while "Allow all permissions in hidden PR reviewer sessions" launches Claude Code with --dangerously-skip-permissions.`,
+    )
+  }
+  if (allowAll && clis.includes('antigravity') && options.profile.otherCli?.antigravity?.approval && options.profile.otherCli.antigravity.approval !== 'allow-all') {
+    consentWarnings.push(
+      `${options.profile.name} configures Antigravity CLI approval mode "${options.profile.otherCli.antigravity.approval}", while "Allow all permissions in hidden PR reviewer sessions" launches Antigravity CLI with --dangerously-skip-permissions.`,
+    )
+  }
   if (ghRepo && prNumber !== null) {
     try {
       const api = await githubCliApi(app.getPath('userData'))
@@ -4160,7 +4191,7 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, consentWarnings)
+      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings)
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -4421,6 +4452,7 @@ async function advanceGroupTempReviewers(
             group.prLabel,
             activeClis,
             true,
+            desktopConfig.reviewerAllowAll,
             [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`],
           )
           if (!approved) {
@@ -6572,6 +6604,7 @@ function settingsPreferences(): DesktopPreferences {
     openFilesOutsideWorkspace: desktopConfig.openFilesOutsideWorkspace,
     turnCheckpoints: desktopConfig.turnCheckpoints,
     reviewerClis: [...desktopConfig.reviewerClis],
+    reviewerAllowAll: desktopConfig.reviewerAllowAll,
   }
 }
 
@@ -7744,6 +7777,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'openFilesOutsideWorkspace',
     'turnCheckpoints',
     'reviewerClis',
+    'reviewerAllowAll',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -7767,6 +7801,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('desktopControl' in values && typeof values.desktopControl !== 'boolean')
     || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
     || ('turnCheckpoints' in values && typeof values.turnCheckpoints !== 'boolean')
+    || ('reviewerAllowAll' in values && typeof values.reviewerAllowAll !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -7821,6 +7856,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     checkpointsTurnedOff = values.turnCheckpoints === false && desktopConfig.turnCheckpoints
     if (typeof values.turnCheckpoints === 'boolean') desktopConfig.turnCheckpoints = values.turnCheckpoints
     if (validatedReviewerClis) desktopConfig.reviewerClis = validatedReviewerClis
+    if (typeof values.reviewerAllowAll === 'boolean') desktopConfig.reviewerAllowAll = values.reviewerAllowAll
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

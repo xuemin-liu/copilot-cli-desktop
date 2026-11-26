@@ -295,23 +295,28 @@ function WorkspaceProfileEditor({
           })}
         </div>
         <div className="settings-form-grid">
-          {activeDescriptor.selectors.map((selector) => (
-            <label key={selector.key}>
-              {selector.label}
-              <select
-                value={activeConfig[selector.key] ?? ''}
-                onChange={(event) => setOtherCliField(activeCli, selector.key, event.target.value)}
-              >
-                <option value="">{selector.inheritLabel}</option>
-                {selector.levels.map((level) => (
-                  <option key={level.value} value={level.value}>{level.label}</option>
-                ))}
-                {activeConfig[selector.key] && !selector.levels.some((level) => level.value === activeConfig[selector.key]) && (
-                  <option value={activeConfig[selector.key]}>{activeConfig[selector.key]} (not supported — choose another)</option>
-                )}
-              </select>
-            </label>
-          ))}
+          {activeDescriptor.selectors.map((selector) => {
+            const sandboxBypassed = activeCli === 'codex' && selector.key === 'sandbox' && activeConfig.approval === 'allow-all'
+            return (
+              <label key={selector.key}>
+                {selector.label}
+                <select
+                  value={activeConfig[selector.key] ?? ''}
+                  disabled={sandboxBypassed}
+                  title={sandboxBypassed ? 'Bypassed when Approval is set to Allow all' : undefined}
+                  onChange={(event) => setOtherCliField(activeCli, selector.key, event.target.value)}
+                >
+                  <option value="">{selector.inheritLabel}</option>
+                  {selector.levels.map((level) => (
+                    <option key={level.value} value={level.value}>{level.label}</option>
+                  ))}
+                  {activeConfig[selector.key] && !selector.levels.some((level) => level.value === activeConfig[selector.key]) && (
+                    <option value={activeConfig[selector.key]}>{activeConfig[selector.key]} (not supported — choose another)</option>
+                  )}
+                </select>
+              </label>
+            )
+          })}
           {activeDescriptor.supportsModel && (
             <label>
               {activeDescriptor.modelLabel}
@@ -743,7 +748,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -992,10 +997,21 @@ export function SettingsApp(): JSX.Element | null {
             )
           })}
         </div>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.reviewerAllowAll}
+            onChange={(event) => updatePreference({ reviewerAllowAll: event.target.checked })}
+          />
+          Allow all permissions in hidden PR reviewer sessions
+        </label>
         <p className="settings-disclaimer">
           Default CLIs launched as hidden temporary PR reviewer sessions when <code>review-and-fix-pr</code> runs (each workspace
-          profile can override this). Copilot CLI runs inside Desktop&rsquo;s OS command sandbox; Claude Code and Codex CLI run in
-          read-only review mode over Desktop&rsquo;s scoped reviewer MCP channel under your OS account, after your confirmation.
+          profile can override which CLIs run). Each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and
+          posts its comments and approvals directly onto the pull request. Keeping &ldquo;Allow all permissions&rdquo; enabled
+          launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
+          (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
+          reviews do not stall on terminal prompts.
         </p>
       </section>
 

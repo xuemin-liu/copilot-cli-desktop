@@ -16,12 +16,15 @@ import {
 } from './pr-review-launch.js'
 import { ReviewReservations } from './pr-review-reservations.js'
 import {
+  buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
   prReviewAndFixRequest,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
+  resolveCopilotReviewerPreset,
+  resolveOtherCliReviewerArgs,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
 } from './pr-temp-reviewers.js'
@@ -97,7 +100,12 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
 })
 
 test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly on the remote PR host and never perform local-only review', () => {
-  for (const [cli, tag] of [['copilot', '[Copilot CLI]'], ['claude', '[Claude Code]'], ['codex', '[Codex CLI]']] as const) {
+  for (const [cli, tag] of [
+    ['copilot', '[Copilot CLI]'],
+    ['claude', '[Claude Code]'],
+    ['codex', '[Codex CLI]'],
+    ['antigravity', '[Antigravity CLI]'],
+  ] as const) {
     const brief = buildReviewerBrief({
       cli,
       repository: 'xuemin-liu/copilot-cli-desktop',
@@ -120,6 +128,87 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
     assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`), 'documents single-line tagged format')
     assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
+})
+
+test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verified allow-all flags when enabled and respect workspace settings when disabled', () => {
+  assert.equal(resolveCopilotReviewerPreset('default', true, 'demo'), 'full-access')
+  assert.equal(resolveCopilotReviewerPreset('read-only', true, 'demo'), 'full-access')
+  assert.equal(resolveCopilotReviewerPreset('trusted-directory', false, 'demo'), 'trusted-directory')
+  assert.throws(() => resolveCopilotReviewerPreset('read-only', false, 'demo'), /Restricted \(read-only\)/)
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('claude', { approval: 'plan', model: 'claude-sonnet-5' }, true, '  --dangerously-skip-permissions\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'claude-sonnet-5' }, allowAllArgs: ['--dangerously-skip-permissions'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('claude', undefined, true, '  --permission-mode <mode>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--permission-mode', 'bypassPermissions'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('claude', undefined, true, null, 'demo'),
+    /Could not confirm that this Claude Code installation supports/,
+  )
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', { approval: 'on-request', sandbox: 'read-only', model: 'gpt-5-codex' }, true, '  --dangerously-bypass-approvals-and-sandbox\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'gpt-5-codex' }, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', undefined, true, '  --ask-for-approval <a>\n  --sandbox <s>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('codex', { sandbox: 'read-only' }, false, '  --sandbox <s>', 'demo'),
+    /Read only/,
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', { approval: 'allow-all', sandbox: 'read-only' }, false, '  --dangerously-bypass-approvals-and-sandbox', 'demo'),
+    { configForLaunch: { approval: 'allow-all', sandbox: 'read-only' }, allowAllArgs: [] },
+  )
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('antigravity', { approval: 'plan', model: 'gemini-3-pro' }, true, '  --dangerously-skip-permissions\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'gemini-3-pro' }, allowAllArgs: ['--dangerously-skip-permissions'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('antigravity', undefined, true, '  --mode <m>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--mode', 'auto'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('antigravity', undefined, true, null, 'demo'),
+    /Could not confirm that this Antigravity CLI installation supports/,
+  )
+
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('claude', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --session-id <id>',
+    }),
+    ['--dangerously-skip-permissions', '--session-id', '11111111-1111-4111-8111-111111111111', '--add-dir', '/tmp/helper', '--', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('codex', {
+      configArgs: ['--dangerously-bypass-approvals-and-sandbox'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --add-dir <dir>',
+    }),
+    ['--dangerously-bypass-approvals-and-sandbox', '--add-dir', '/tmp/helper', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('antigravity', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --prompt-interactive\n  --add-dir',
+    }),
+    ['--dangerously-skip-permissions', '--add-dir', '/tmp/helper', '--prompt-interactive', 'Review PR'],
+  )
 })
 
 test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden reviewer seats across rounds, and finishes cleanly', () => {
@@ -316,7 +405,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 2\n')
     assert.deepEqual(await reviewCheckoutState(runner, area), { head: head1Sha, clean: true })
 
-    // Round 2 modifying .mcp.json, .claude/settings.json, .claude/hooks/run.sh, .codex/hooks.json, .github/hooks/pre.json, and .vscode/mcp.json is pushed to origin and detected:
+    // Round 2 modifying .mcp.json, .claude/..., .codex/..., .github/..., .vscode/..., .gemini/..., and Antigravity [._]agents?/... configs is pushed to origin and detected:
     writeFileSync(join(repo, 'app.ts'), 'export const v = 3\n')
     writeFileSync(join(repo, '.mcp.json'), '{"mcpServers":{}}\n')
     mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true })
@@ -328,6 +417,14 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     writeFileSync(join(repo, '.github', 'hooks', 'pre.json'), '{}\n')
     mkdirSync(join(repo, '.vscode'), { recursive: true })
     writeFileSync(join(repo, '.vscode', 'mcp.json'), '{}\n')
+    mkdirSync(join(repo, '.gemini', 'config'), { recursive: true })
+    writeFileSync(join(repo, '.gemini', 'hooks.json'), '{}\n')
+    writeFileSync(join(repo, '.gemini', 'config', 'mcp_config.json'), '{}\n')
+    mkdirSync(join(repo, '.agents', 'plugins', 'demo'), { recursive: true })
+    writeFileSync(join(repo, '.agents', 'hooks.json'), '{}\n')
+    writeFileSync(join(repo, '.agents', 'plugins', 'demo', 'mcp_config.json'), '{}\n')
+    mkdirSync(join(repo, 'nested', '_agent'), { recursive: true })
+    writeFileSync(join(repo, 'nested', '_agent', 'plugins.json'), '{}\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-2'], { cwd: repo, env: gitEnv })
     const head2Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
@@ -335,12 +432,17 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
 
     const configInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head2Sha, baseSha)
     const expectedConfigs = [
+      '.agents/hooks.json',
+      '.agents/plugins/demo/mcp_config.json',
       '.claude/hooks/run.sh',
       '.claude/settings.json',
       '.codex/hooks.json',
+      '.gemini/config/mcp_config.json',
+      '.gemini/hooks.json',
       '.github/hooks/pre.json',
       '.mcp.json',
       '.vscode/mcp.json',
+      'nested/_agent/plugins.json',
     ]
     assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
     assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)

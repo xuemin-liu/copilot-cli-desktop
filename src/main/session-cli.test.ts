@@ -20,12 +20,15 @@ test('the launch key ignores Copilot tabs and tab order, and is empty without an
 test('reviewer CLI normalization preserves canonical order, deduplicates, and rejects invalid UI submissions', () => {
   assert.deepEqual(normalizeReviewerClis(undefined), DEFAULT_REVIEWER_CLIS)
   assert.deepEqual(normalizeReviewerClis([]), DEFAULT_REVIEWER_CLIS)
-  assert.deepEqual(normalizeReviewerClis(['antigravity', 42]), DEFAULT_REVIEWER_CLIS)
-  assert.deepEqual(normalizeReviewerClis(['codex', 'claude', 'codex', 'copilot']), ['copilot', 'claude', 'codex'])
+  assert.deepEqual(normalizeReviewerClis(['unknown-cli', 42]), DEFAULT_REVIEWER_CLIS)
+  assert.deepEqual(
+    normalizeReviewerClis(['antigravity', 'codex', 'claude', 'codex', 'copilot']),
+    ['copilot', 'claude', 'codex', 'antigravity'],
+  )
 
   assert.equal(validateReviewerClis(undefined, true), undefined)
   assert.throws(() => validateReviewerClis(undefined, false), /Invalid PR reviewer CLIs/)
   assert.throws(() => validateReviewerClis([]), /at least one/)
-  assert.throws(() => validateReviewerClis(['antigravity']), /Unsupported PR reviewer CLI/)
-  assert.deepEqual(validateReviewerClis(['codex', 'claude']), ['claude', 'codex'])
+  assert.throws(() => validateReviewerClis(['unknown-cli']), /Unsupported PR reviewer CLI/)
+  assert.deepEqual(validateReviewerClis(['antigravity', 'codex', 'claude']), ['claude', 'codex', 'antigravity'])
 })

@@ -76,6 +76,15 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
         error: 'Codex exited unexpectedly',
         keptCheckoutPath: null,
       },
+      {
+        cli: 'antigravity',
+        tabId: 'tab-4',
+        verdict: 'reviewing',
+        checkedOut: 'a'.repeat(40),
+        needsAttention: false,
+        error: null,
+        keptCheckoutPath: null,
+      },
     ],
     notice: null,
   }
@@ -87,12 +96,13 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
   assert.match(activeHtml, /Copilot CLI/)
   assert.match(activeHtml, /Claude Code/)
   assert.match(activeHtml, /Codex CLI/)
+  assert.match(activeHtml, /Antigravity CLI/)
   assert.match(activeHtml, /reviewing on PR…/)
   assert.match(activeHtml, /needs approval/)
   assert.match(activeHtml, /Hide/)
   assert.match(activeHtml, /Peek/)
-  assert.equal((activeHtml.match(/>Retry</g) ?? []).length, 3, 'Retry is available on reviewing, needsAttention, and failed seats')
-  assert.equal((activeHtml.match(/>Dismiss</g) ?? []).length, 3, 'Dismiss is available on all active seats')
+  assert.equal((activeHtml.match(/>Retry</g) ?? []).length, 4, 'Retry is available on reviewing, needsAttention, and failed seats')
+  assert.equal((activeHtml.match(/>Dismiss</g) ?? []).length, 4, 'Dismiss is available on all active seats')
   assert.match(activeHtml, /Stop reviewers/)
 
   // Starting seats expose Dismiss (so a stuck launch can be dropped) without Retry:
@@ -187,7 +197,53 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
       onOpenSettings={noop}
     />,
   )
+  assert.match(expandedHtml, /<details class="sidebar-temp-reviewers" open="">/)
   assert.match(expandedHtml, /Reviewers \(1\)/)
+  assert.match(expandedHtml, /Review PR #42 · Claude Code/)
+
+  // Standalone / profile-scoped reviewers (with no regular host tab open) still render under their workspace:
+  const standaloneReviewer = makeTab('tab-solo', 'Review PR #42 · Antigravity CLI', {
+    cli: 'antigravity',
+    tempReviewer: {
+      groupId: '22222222-2222-4222-8222-222222222222',
+      hostTabId: null,
+      cli: 'antigravity',
+      prLabel: 'PR #42',
+      prNumber: 42,
+      repository: 'omaha:3001/owner/repo',
+      prUrl: 'http://omaha:3001/owner/repo/pulls/42',
+    },
+  })
+  const standaloneHtml = renderToStaticMarkup(
+    <Sidebar
+      profiles={[PROFILE]}
+      tabs={[standaloneReviewer]}
+      installedCliVersion="1.0.114"
+      activeProfileId={PROFILE.id}
+      activeTabId={null}
+      canOpenTab
+      collapsed={false}
+      onToggleCollapsed={noop}
+      onSelectWorkspace={noop}
+      onActivateProfile={noop}
+      onRemoveProfile={noop}
+      onActivateTab={noop}
+      onPopOutTab={noop}
+      onRenameTab={noop}
+      onCloseTab={noop}
+      onRestartTab={noop}
+      onUnloadTab={noop}
+      onCreateTab={noop}
+      onCreateTabWithAttachments={noop}
+      onFanOut={noop}
+      onResumePicker={noop}
+      onOpenHistory={noop}
+      onConnectRemote={noop}
+      onOpenSettings={noop}
+    />,
+  )
+  assert.match(standaloneHtml, /Reviewers \(1\)/)
+  assert.match(standaloneHtml, /Review PR #42 · Antigravity CLI/)
 
   const collapsedHtml = renderToStaticMarkup(
     <Sidebar
