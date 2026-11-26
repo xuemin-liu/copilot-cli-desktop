@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, makeReviewerArea, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -146,26 +146,21 @@ import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCliChoice } from './session-cli.js'
 import { PR_REVIEWER_MCP_PATH, type PrReviewerMcpDeps } from './pr-reviewer-mcp.js'
 import {
-  authorReplySignature,
   buildClaudeMcpConfigJson,
   buildClaudeReviewerLaunch,
   buildCodexReviewerLaunch,
   buildReviewerBrief,
-  hostAuthorGrantTarget,
   cleanupReviewerSeatCredentials,
-  groupApprovalReceiptIds,
-  materialFeedbackSignature,
+  parseAnyPullRequestInput,
   prepareCodexReviewerHome,
-  prFeedbackSignature,
   prReviewAndFixRequest,
+  readGroupStateForSeat,
   readReviewerDiffPage,
-  readSeatFeedbackPage,
   recoverSweptReviewerCredentials,
+  repositoryLabelFromOrigin,
   reviewerPromptLine,
-  seatGrantTarget,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
-  validateSeatReviewSubmission,
   type TempReviewerGroup,
   type TempReviewerSeat,
 } from './pr-temp-reviewers.js'
@@ -219,6 +214,7 @@ import {
 } from './secure-credentials.js'
 import {
   EMPTY_TABS_STATE,
+  MAX_TEMP_REVIEWER_TABS,
   activateTab,
   activeWorkspaceFor,
   addDormantTab,
@@ -235,6 +231,7 @@ import {
   setTabPermissionMode,
   setTabSessionId,
   setTabStatus,
+  tempReviewerTabCount,
   touchTab,
   visibleSessionTabs,
   type TabsState,
@@ -1331,18 +1328,6 @@ function navigableSessionIds(): ReadonlySet<string> {
   return new Set(tabsState.tabs.filter(tab => !sessionWindows.has(tab.id) && !tab.tempReviewer).map(tab => tab.id))
 }
 
-function tempReviewerReceiptReader(): import('./pr-temp-reviewers.js').ReceiptReader | null {
-  if (!prPosts) return null
-  return {
-    list: (grantId) => {
-      try { return prPosts?.list().filter((r) => r.grantId === grantId) ?? [] } catch { return [] }
-    },
-    settled: (grantId) => {
-      try { return prPosts?.settled(grantId) ?? true } catch { return false }
-    },
-  }
-}
-
 function snapshot(windowSessionId?: string): DesktopState {
   const navigable = navigableSessionIds()
   return {
@@ -1358,7 +1343,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
-    tempReviewerGroups: tempReviewers.views(tempReviewerReceiptReader()),
+    tempReviewerGroups: tempReviewers.views(),
     workflowTasks: workflowViews(),
     workflowFollowups: followupViews(),
     workflowPrPosts: prPostViews(),
@@ -3565,6 +3550,10 @@ const guestDeps: GuestDeps = {
     if (!(await stat(folder).then((info) => info.isDirectory(), () => false))) return `${folder} is not a folder.`
     return null
   },
+  prReviewersStart: (options) => startTempReviewersMcp(options),
+  prReviewersWait: (hostKey, desktopTag, waitSeconds, signal) => waitMcpTempReviewers(hostKey, desktopTag, waitSeconds, signal),
+  prReviewersRound: (hostKey, desktopTag, options) => roundMcpTempReviewers(hostKey, desktopTag, options),
+  prReviewersFinish: (hostKey, desktopTag, outcome) => finishMcpTempReviewers(hostKey, desktopTag, outcome),
 }
 
 /** The helper and the endpoint file, written each time the endpoint starts: its port changes with every app start. */
@@ -3578,34 +3567,57 @@ function writeGuestEndpoint(port: number): void {
 }
 
 const tempReviewers = new TempReviewerRegistry()
-const tempGroupSnapshots = new Map<string, { at: number; inflight?: Promise<void> }>()
 const PR_REVIEWER_PAGE_CHARS = 20_000
+const SAFE_GIT_REF_INPUT = /^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$/
 
-async function refreshTempGroupFromGithub(group: TempReviewerGroup, force = false): Promise<import('./workflow-github.js').GithubSnapshot | null> {
-  if (group.stage === 'ended') return null
-  const state = tempGroupSnapshots.get(group.id) ?? { at: 0 }
-  tempGroupSnapshots.set(group.id, state)
-  if (!force && Date.now() - state.at < 12_000) return null
-  if (state.inflight && !force) {
-    await state.inflight
-    return null
+async function resolveGitRevisionsForReview(
+  runner: GitRunner,
+  folder: string,
+  headInput?: string,
+  baseInput?: string,
+): Promise<{ ok: true; head: string; base: string; branch: string | null } | { ok: false; message: string }> {
+  const readGit = async (args: string[]): Promise<string | null> => {
+    const res = await runner.run({ cwd: folder, args, kind: 'read', disableHooks: true, timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
+    return res && res.exitCode === 0 ? res.stdout.toString('utf8').trim() : null
   }
-  const run = (async () => {
-    const api = await githubCliApi(app.getPath('userData'))
-    const fresh = await readGithubPull(api, group.repository, group.prNumber, { checks: false })
-    state.at = Date.now()
-    const applied = tempReviewers.applySnapshot(group.id, fresh, tempReviewerReceiptReader())
-    if (applied.ended) {
-      await teardownTempReviewerSeats([...group.requiredSeats.values()])
+  const headRef = headInput?.trim() || 'HEAD'
+  if (!SAFE_GIT_REF_INPUT.test(headRef)) {
+    return { ok: false, message: 'Invalid head revision.' }
+  }
+  const head = await readGit(['rev-parse', '--verify', `${headRef}^{commit}`])
+  if (!head || !/^[a-f0-9]{40,64}$/.test(head)) {
+    return { ok: false, message: `Could not resolve head commit "${headRef}" in ${folder}.` }
+  }
+  const branch = await readGit(['symbolic-ref', '--quiet', '--short', 'HEAD'])
+
+  if (baseInput && baseInput.trim()) {
+    const baseRef = baseInput.trim()
+    if (!SAFE_GIT_REF_INPUT.test(baseRef)) {
+      return { ok: false, message: 'Invalid base revision.' }
     }
-    if (applied.changed) broadcastState()
-    return fresh
-  })()
-  state.inflight = run.then(() => {}, () => {})
-  try {
-    return await run
-  } finally {
-    if (state.inflight) delete state.inflight
+    const merged = await readGit(['merge-base', baseRef, head])
+    const direct = merged ?? await readGit(['rev-parse', '--verify', `${baseRef}^{commit}`])
+    if (!direct || !/^[a-f0-9]{40,64}$/.test(direct)) {
+      return { ok: false, message: `Could not resolve base revision "${baseRef}" in ${folder}. Fetch the target branch first or pass a full commit SHA.` }
+    }
+    return { ok: true, head, base: direct, branch }
+  }
+
+  for (const candidate of ['refs/remotes/origin/HEAD', 'refs/remotes/origin/main', 'refs/remotes/origin/master', 'main', 'master']) {
+    const exists = await readGit(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`])
+    if (!exists) continue
+    const mb = await readGit(['merge-base', candidate, head])
+    if (mb && /^[a-f0-9]{40,64}$/.test(mb) && mb !== head) {
+      return { ok: true, head, base: mb, branch }
+    }
+  }
+  const parent = await readGit(['rev-parse', '--verify', '--quiet', `${head}~1^{commit}`])
+  if (parent && /^[a-f0-9]{40,64}$/.test(parent) && parent !== head) {
+    return { ok: true, head, base: parent, branch }
+  }
+  return {
+    ok: false,
+    message: 'Could not infer a distinct base commit for HEAD; pass the target branch or base SHA explicitly (e.g. -Base origin/main or base: "origin/main").',
   }
 }
 
@@ -3626,7 +3638,6 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
   }
   if (!area) return
   if (credOutcome === 'retry-sync') {
-    // Keep the reviewer area on disk without marking `kept: true` so `sweepReviewerAreas` retries syncing and removing it.
     return
   }
   const runner = await meetingGitRunner().catch(() => null)
@@ -3637,7 +3648,7 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
     await store?.keep(seat.launchId).catch(() => {})
     seat.keptCheckoutPath = area.checkout
     const group = tempReviewers.group(seat.groupId)
-    const msg = `The ${sessionCliLabel(seat.cli)} review worktree for PR #${group?.prNumber ?? '?'} has local changes and was kept at ${area.checkout}.`
+    const msg = `The ${sessionCliLabel(seat.cli)} review worktree for ${group?.prLabel ?? 'this PR'} has local changes and was kept at ${area.checkout}.`
     if (group) group.notice = group.notice ? `${group.notice} ${msg}` : msg
     workflowNotice = msg
   }
@@ -3680,122 +3691,50 @@ async function readTempSeatFile(seat: TempReviewerSeat, relPath: string, offset 
 async function submitTempSeatReview(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
-  callerSessionId: string,
   fields: { body: string; approve: boolean; comments: Array<{ path: string; line: number; body: string }>; checks?: { ran: string[]; missing: string[] } },
 ): Promise<{ ok: boolean; text: string }> {
-  const isGroupLive = (): boolean => group.stage !== 'ended' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting')
-  if (!isGroupLive()) {
+  if (group.stage === 'ended' || (seat.lifecycle !== 'running' && seat.lifecycle !== 'starting')) {
     return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
-  }
-  const posts = await ensurePrLoopPosts().catch(() => null)
-  if (!posts) return { ok: false, text: prPostsError ?? 'PR loops are unavailable.' }
-  const freshBeforePost = await refreshTempGroupFromGithub(group, true).catch(() => null)
-  if (!freshBeforePost) {
-    return { ok: false, text: 'Could not verify current pull request feedback on GitHub; retry submitting the review.' }
-  }
-  if (!isGroupLive()) {
-    return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
-  }
-  const list = (value: unknown): string[] | null =>
-    Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && item.trim() && item.length <= 200)
-      ? value.map((item) => (item as string).trim())
-      : null
-  const ran = fields.checks ? list(fields.checks.ran) : null
-  const missing = fields.checks ? list(fields.checks.missing) : null
-  if (fields.checks !== undefined && (!ran || !missing)) {
-    return { ok: false, text: '"checks" must be {"ran": [...], "missing": [...]}.' }
-  }
-  if (fields.approve && !ran?.length) {
-    return { ok: false, text: 'An approval must include "checks": {"ran": [...], "missing": [...]}.' }
-  }
-  const validatedRead = validateSeatReviewSubmission(group, seat, fields.approve)
-  if (!validatedRead.ok) {
-    return { ok: false, text: validatedRead.error }
-  }
-  let approve = fields.approve
-  let body = fields.body
-  const normalizedChecks = ran && missing ? { ran, missing } : undefined
-  if (approve && missing && missing.length > 0) {
-    approve = false
-    body = `Not approved yet at ${seat.checkedOut.slice(0, 12)} (${sessionCliLabel(seat.cli)}): nothing to change was found, but these checks could not run in the reviewer environment: ${missing.join(', ')}.\nRan: ${ran!.join(', ')}.\n${body.trim()}`
   }
   const runner = await meetingGitRunner()
   if (!runner || !seat.area) return { ok: false, text: 'Reviewer checkout is unavailable.' }
   const checkout = await reviewCheckoutState(runner, seat.area).catch(() => null)
   if (!checkout || checkout.head !== seat.checkedOut || !checkout.clean) {
-    return { ok: false, text: 'Reviewer checkout has local changes or is no longer at the prepared head.' }
+    return { ok: false, text: 'Reviewer checkout has local changes or is no longer at the prepared head. Keep temporary files outside the git worktree (e.g. system temp dir) and restore any modified files before submitting.' }
   }
-  const target = seatGrantTarget(group, seat, callerSessionId)
-  const assessedFeedbackSignature = validatedRead.feedbackSignature
-  try {
-    const held = fields.approve && !approve
-    const receipt = await posts.review(
-      target,
-      callerSessionId,
-      {
-        body,
-        comments: fields.comments,
-        approve,
-        heldApproval: held,
-        ...(normalizedChecks ? { checks: normalizedChecks } : {}),
-        seatGeneration: seat.generation,
-        feedbackSignature: assessedFeedbackSignature,
-      },
-      () => {},
-      isGroupLive,
-    )
-    if (!fields.approve && validatedRead.readMatchesCurrent) {
-      const postSnapshot = await refreshTempGroupFromGithub(group, true).catch(() => null)
-      if (postSnapshot) {
-        const excludingOwn = new Set([...groupApprovalReceiptIds(group, tempReviewerReceiptReader()), receipt.id])
-        if (materialFeedbackSignature(postSnapshot, excludingOwn, group.marker) === assessedFeedbackSignature) {
-          seat.assessedFeedback = { head: group.head, base: group.base, materialSignature: group.materialFeedbackSignature }
-          seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
-        }
-      }
+  const recorded = tempReviewers.recordSeatReview(group.id, seat.cli, {
+    body: fields.body,
+    approve: fields.approve,
+    comments: fields.comments,
+    ...(fields.checks !== undefined ? { checks: fields.checks } : {}),
+  })
+  if (!recorded.ok) {
+    return { ok: false, text: recorded.error }
+  }
+  broadcastState()
+  if (recorded.held) {
+    const missingList = recorded.entry.checks?.missing.join(', ') ?? 'checks'
+    return {
+      ok: true,
+      text: `Recorded held approval at ${recorded.entry.head} (round ${recorded.entry.round}; missing checks: ${missingList}). The user can click Approve anyway in Desktop.`,
     }
-    tempReviewers.wakeAll()
-    broadcastState()
-    if (held) {
-      return { ok: true, text: `Recorded held approval at ${receipt.head} (missing checks: ${missing!.join(', ')})${receipt.url ? `: ${receipt.url}` : '.'} The person can click Approve anyway in Desktop.` }
-    }
-    return { ok: true, text: `Posted ${receipt.kind === 'approval' ? 'approval' : 'review'} of ${receipt.head}${receipt.url ? `: ${receipt.url}` : '.'}` }
-  } catch (error) {
-    tempReviewers.wakeAll()
-    broadcastState()
-    return { ok: false, text: error instanceof PrPostRejected ? error.message : 'The desktop could not post the review.' }
+  }
+  return {
+    ok: true,
+    text: `Recorded ${recorded.entry.kind === 'approval' ? 'approval' : 'review'} for ${group.prLabel} round ${recorded.entry.round} at ${recorded.entry.head}.`,
   }
 }
 
 async function submitTempSeatReply(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
-  callerSessionId: string,
   to: string,
   text: string,
 ): Promise<{ ok: boolean; text: string }> {
-  const isGroupLive = (): boolean => group.stage !== 'ended' && (seat.lifecycle === 'running' || seat.lifecycle === 'starting')
-  if (!isGroupLive()) {
-    return { ok: false, text: 'This temporary reviewer seat is no longer active.' }
-  }
-  const posts = await ensurePrLoopPosts().catch(() => null)
-  if (!posts) return { ok: false, text: prPostsError ?? 'PR loops are unavailable.' }
-  try {
-    const target = seatGrantTarget(group, seat, callerSessionId)
-    const receipt = await posts.reply(
-      target,
-      callerSessionId,
-      { to, body: text },
-      isGroupLive,
-    )
-    tempReviewers.wakeAll()
-    broadcastState()
-    return { ok: true, text: `Posted${receipt.url ? `: ${receipt.url}` : '.'}` }
-  } catch (error) {
-    tempReviewers.wakeAll()
-    broadcastState()
-    return { ok: false, text: error instanceof PrPostRejected ? error.message : 'The desktop could not post the reply.' }
-  }
+  const recorded = tempReviewers.recordSeatReply(group.id, seat.cli, to, text)
+  if (!recorded.ok) return { ok: false, text: recorded.error }
+  broadcastState()
+  return { ok: true, text: `Recorded reply (${recorded.entry.id}) on round ${recorded.entry.round}.` }
 }
 
 async function waitTempReviewerSeat(
@@ -3810,42 +3749,40 @@ async function waitTempReviewerSeat(
     if (isEnded() || (seat.lifecycle !== 'running' && seat.lifecycle !== 'starting')) {
       return { ok: true, text: JSON.stringify({ closed: true, status: 'closed', outcome: group.outcome }) }
     }
-    await refreshTempGroupFromGithub(group).catch(() => null)
-    if (isEnded() || (seat.lifecycle !== 'running' && seat.lifecycle !== 'starting')) {
-      return { ok: true, text: JSON.stringify({ closed: true, status: 'closed', outcome: group.outcome }) }
-    }
     if (
-      group.head !== seat.lastSeenHead
+      group.round !== seat.lastSeenRound
+      || group.head !== seat.lastSeenHead
       || group.base !== seat.lastSeenBase
-      || group.authorReplySignature !== seat.lastSeenAuthorReplies
-      || group.materialFeedbackSignature !== seat.lastSeenMaterialFeedback
+      || group.materialStateSignature !== seat.lastSeenStateSignature
     ) {
       const runner = await meetingGitRunner()
       if (!runner || !seat.area) return { ok: false, text: 'Reviewer checkout is unavailable.' }
       try {
         if (seat.policy) await verifyReviewerPolicy(seat.area, seat.policy)
-        const head = await refreshReviewCheckout(runner, seat.area, seat.origin, group.head, group.prNumber, group.base)
+        const head = await refreshAgnosticReviewWorktree(runner, seat.area, seat.origin, group.head, group.base, group.prNumber)
         seat.checkedOut = head
         seat.checkedOutBase = group.base
+        seat.lastSeenRound = group.round
         seat.lastSeenHead = head
         seat.lastSeenBase = group.base
-        seat.lastSeenAuthorReplies = group.authorReplySignature
-        seat.lastSeenMaterialFeedback = group.materialFeedbackSignature
+        seat.lastSeenStateSignature = group.materialStateSignature
         const helperCmd = process.platform === 'win32'
           ? 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
           : 'sh "$COPILOT_DESKTOP_MEETING_HELPER"'
         await writeFile(join(seat.area.helper, 'reviewer-brief.md'), buildReviewerBrief({
           cli: seat.cli,
           repository: group.repository,
+          prLabel: group.prLabel,
           prNumber: group.prNumber,
           prUrl: group.prUrl,
+          round: group.round,
           head,
           base: group.base,
           marker: group.marker,
           reviewHelperCommand: helperCmd,
         }), { encoding: 'utf8', mode: 0o600 }).catch(() => {})
         broadcastState()
-        return { ok: true, text: JSON.stringify({ closed: false, status: 'updated', head, base: group.base }) }
+        return { ok: true, text: JSON.stringify({ closed: false, status: 'updated', round: group.round, head, base: group.base }) }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Checkout refresh failed.'
         tempReviewers.revokeSeat(seat, 'failed', message)
@@ -3855,50 +3792,41 @@ async function waitTempReviewerSeat(
     }
     const remaining = deadline - Date.now()
     if (remaining <= 0) {
-      return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', head: seat.checkedOut, base: seat.checkedOutBase }) }
+      return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', round: seat.lastSeenRound, head: seat.checkedOut, base: seat.checkedOutBase }) }
     }
     const woken = await tempReviewers.waitForChange(Math.min(15_000, remaining), signal)
     if (woken === 'aborted') {
-      return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', head: seat.checkedOut, base: seat.checkedOutBase }) }
+      return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', round: seat.lastSeenRound, head: seat.checkedOut, base: seat.checkedOutBase }) }
     }
   }
-  return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', head: seat.checkedOut, base: seat.checkedOutBase }) }
+  return { ok: true, text: JSON.stringify({ closed: false, status: 'timeout', round: seat.lastSeenRound, head: seat.checkedOut, base: seat.checkedOutBase }) }
 }
 
 const prReviewerMcpDeps: PrReviewerMcpDeps<{ group: TempReviewerGroup; seat: TempReviewerSeat }> = {
   authorize: (token) => tempReviewers.authorizeBearer(token),
   prRead: async ({ group, seat }, page) => {
     try {
-      const api = await githubCliApi(app.getPath('userData'))
-      const text = await readSeatFeedbackPage(group, seat, page, {
-        refreshSnapshot: async () => {
-          const fresh = await refreshTempGroupFromGithub(group, true)
-          if (!fresh && group.stage !== 'ended') throw new Error('Failed to refresh pull request snapshot')
-        },
-        readPage: (cursor) => readPrFeedbackPage(api, group.repository, group.prNumber, cursor),
-      })
-      return { ok: true, text }
-    } catch {
-      return { ok: false, text: 'The pull request page could not be read. Restart pr_read from page one.' }
+      return { ok: true, text: readGroupStateForSeat(group, seat, page) }
+    } catch (error) {
+      return { ok: false, text: error instanceof Error ? error.message : 'The pull request state could not be read; restart pr_read from page 1.' }
     }
   },
   prDiff: ({ seat }, relPath, offset) => readTempSeatDiff(seat, relPath, offset ?? 0),
   prFile: ({ seat }, relPath, offset) => readTempSeatFile(seat, relPath, offset ?? 0),
   prWait: ({ group, seat }, waitSeconds, signal) => waitTempReviewerSeat(group, seat, waitSeconds, signal),
-  prReview: ({ group, seat }, input) => submitTempSeatReview(group, seat, seat.generation, {
+  prReview: ({ group, seat }, input) => submitTempSeatReview(group, seat, {
     body: input.body,
     approve: input.approve,
     comments: input.comments ?? [],
     ...(input.checks ? { checks: input.checks } : {}),
   }),
-  prReply: ({ group, seat }, to, text) => submitTempSeatReply(group, seat, seat.generation, to, text),
+  prReply: ({ group, seat }, to, text) => submitTempSeatReply(group, seat, to, text),
 }
 
 async function launchTempReviewerSeat(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
-  snapshotData: import('./workflow-github.js').GithubSnapshot,
 ): Promise<void> {
   const runner = await meetingGitRunner()
   const store = reviewReservations()
@@ -3911,22 +3839,23 @@ async function launchTempReviewerSeat(
   await store.reserve({
     launchId,
     repository: group.repository,
-    number: group.prNumber,
-    reviewer: `${group.accountId}:temp:${group.id}:${seat.cli}`,
-    project: resolve(profile.path),
+    number: group.prNumber ?? 1,
+    reviewer: `temp:${group.id}:${seat.cli}`,
+    project: resolve(group.projectPath),
     root: area.root,
     checkout: area.checkout,
     ref: area.ref,
   })
   reviewLaunches.add(launchId)
-  let tabId: string | null = null
+  let allocatedTabId: string | null = null
   try {
     await makeReviewerArea(area)
-    await cloneForReview(runner, profile.path, seat.origin, area, snapshotData, group.prNumber)
-    seat.checkedOut = snapshotData.head
-    seat.checkedOutBase = snapshotData.base
-    seat.lastSeenHead = snapshotData.head
-    seat.lastSeenBase = snapshotData.base
+    await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, group.head, group.base, group.prNumber)
+    seat.checkedOut = group.head
+    seat.checkedOutBase = group.base
+    seat.lastSeenRound = group.round
+    seat.lastSeenHead = group.head
+    seat.lastSeenBase = group.base
     const helperCmd = process.platform === 'win32'
       ? 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
       : 'sh "$COPILOT_DESKTOP_MEETING_HELPER"'
@@ -3934,23 +3863,26 @@ async function launchTempReviewerSeat(
     await writeFile(briefPath, buildReviewerBrief({
       cli: seat.cli,
       repository: group.repository,
+      prLabel: group.prLabel,
       prNumber: group.prNumber,
       prUrl: group.prUrl,
-      head: snapshotData.head,
-      base: snapshotData.base,
+      round: group.round,
+      head: group.head,
+      base: group.base,
       marker: group.marker,
       reviewHelperCommand: helperCmd,
     }), { encoding: 'utf8', mode: 0o600 })
-    const prompt = reviewerPromptLine(group.prUrl, briefPath)
+    const prompt = reviewerPromptLine(group.prUrl ?? `${group.repository} ${group.prLabel}`, briefPath)
     const tempMeta = {
       groupId: group.id,
       hostTabId: group.hostTabId,
       cli: seat.cli,
+      prLabel: group.prLabel,
       prNumber: group.prNumber,
       repository: group.repository,
       prUrl: group.prUrl,
     }
-    const title = `Review #${group.prNumber} · ${sessionCliLabel(seat.cli)}`
+    const title = `Review ${group.prLabel} · ${sessionCliLabel(seat.cli)}`
 
     if (seat.cli === 'copilot') {
       const userHome = app.getPath('home')
@@ -3965,6 +3897,7 @@ async function launchTempReviewerSeat(
       seat.policy = policy
       const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: 'default', launch: { ...profile.launch, worktree: false } }
       const id = `tab-${nextTabSequence++}`
+      allocatedTabId = id
       pendingSessionCreations++
       let plan: SessionSpawnPlan
       try {
@@ -4014,7 +3947,6 @@ async function launchTempReviewerSeat(
         autoTitle: false,
         tempReviewer: tempMeta,
       })
-      tabId = id
       seat.tabId = id
       syncTabState()
       broadcastState()
@@ -4087,6 +4019,7 @@ async function launchTempReviewerSeat(
     if (shuttingDown() || group.stage === 'ended') throw new Error('Temporary review stopped while launching')
     assertWorkspaceListed(profile)
     const id = `tab-${nextTabSequence++}`
+    allocatedTabId = id
     const session = new PtySession({
       file: resolution.command,
       args: [...resolution.prefixArgs, ...cliArgs],
@@ -4120,7 +4053,6 @@ async function launchTempReviewerSeat(
       autoTitle: false,
       tempReviewer: tempMeta,
     })
-    tabId = id
     seat.tabId = id
     syncTabState()
     broadcastState()
@@ -4134,21 +4066,31 @@ async function launchTempReviewerSeat(
     seat.lifecycle = 'running'
     broadcastState()
   } catch (error) {
-    if (tabId) {
-      await managedTabs.get(tabId)?.session.stop().catch(() => {})
+    if (allocatedTabId) {
+      const managed = managedTabs.get(allocatedTabId)
+      if (managed) {
+        await managed.session.stop().catch(() => {})
+        managed.session.removeAllListeners()
+        managedTabs.delete(allocatedTabId)
+      }
+      forgetSessionName(allocatedTabId)
+      meetingControl.forget(allocatedTabId)
+      if (tabsState.tabs.some((t) => t.id === allocatedTabId)) {
+        tabsState = closeTab(tabsState, allocatedTabId)
+      }
+      seat.tabId = null
+      syncTabState()
+      broadcastState()
+      refreshMenus()
     }
     const sync = seat.codexAuthSync
     const credOutcome = await cleanupReviewerSeatCredentials(area, sync)
     if (credOutcome === 'clean') {
       seat.codexAuthSync = null
       await store.setCodexAuthSync(launchId, null).catch(() => {})
-      if (!tabId) {
-        const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
-        if (outcome === 'removed') await store.release(launchId).catch(() => {})
-        else await store.keep(launchId).catch(() => {})
-        seat.area = null
-      }
-    } else if (!tabId) {
+      const outcome = await removeReviewerArea(area, runner).catch(() => 'kept' as const)
+      if (outcome === 'removed') await store.release(launchId).catch(() => {})
+      else await store.keep(launchId).catch(() => {})
       seat.area = null
     }
     throw error
@@ -4157,179 +4099,174 @@ async function launchTempReviewerSeat(
   }
 }
 
-async function askTempReviewerConsent(repository: string, prNumber: number, clis: readonly ReviewerCli[], nonCopilotHost: boolean): Promise<boolean> {
+let tempReviewerConsentChain: Promise<void> = Promise.resolve()
+
+async function askTempReviewerConsent(repository: string, prLabel: string, clis: readonly ReviewerCli[], requireExplicitConsent: boolean): Promise<boolean> {
   const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
   const unverifiedPlatform = process.platform !== 'win32'
-  if (!nonCopilotHost && nonCopilotReviewers.length === 0 && !unverifiedPlatform) return true
-  const owner = mainWindow
-  if (!owner || owner.isDestroyed()) return false
-  if (!owner.isVisible()) owner.show()
-  owner.focus()
-  if (!owner.isFocused()) owner.flashFrame(true)
-  const details: string[] = [
-    `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
-  ]
-  if (nonCopilotReviewers.length > 0) {
-    details.push(`Non-Copilot reviewers (${nonCopilotReviewers.map((cli) => sessionCliLabel(cli)).join(', ')}) run in read-only source-review mode in isolated detached worktrees and send PR diffs and source files to their configured model providers.`)
+  if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && !unverifiedPlatform) return true
+  const previous = tempReviewerConsentChain
+  let release!: () => void
+  tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
+  await previous.catch(() => {})
+  try {
+    const owner = mainWindow
+    if (!owner || owner.isDestroyed()) return false
+    if (!owner.isVisible()) owner.show()
+    owner.focus()
+    if (!owner.isFocused()) owner.flashFrame(true)
+    const details: string[] = [
+      `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
+    ]
+    if (nonCopilotReviewers.length > 0) {
+      details.push(`Non-Copilot reviewers (${nonCopilotReviewers.map((cli) => sessionCliLabel(cli)).join(', ')}) run in read-only source-review mode in isolated detached worktrees and send PR diffs and source files to their configured model providers.`)
+    }
+    if (unverifiedPlatform) {
+      details.push(`Platform note (${process.platform}): OS sandbox containment was verified on Windows; confirm before running reviewers on this OS.`)
+    }
+    const { response } = await dialog.showMessageBox(owner, {
+      type: 'question',
+      title: 'Temporary PR reviewers',
+      message: `Start temporary PR reviewer session(s) for ${repository} ${prLabel}?`,
+      detail: details.join('\n\n'),
+      buttons: ['Cancel', 'Start reviewers'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    return response === 1
+  } finally {
+    release()
   }
-  if (unverifiedPlatform) {
-    details.push(`Platform note (${process.platform}): OS sandbox containment was verified on Windows; confirm before running reviewers on this OS.`)
-  }
-  const { response } = await dialog.showMessageBox(owner, {
-    type: 'question',
-    title: 'Temporary PR reviewers',
-    message: `Start temporary PR reviewer session(s) for ${repository} #${prNumber}?`,
-    detail: details.join('\n\n'),
-    buttons: ['Cancel', 'Start reviewers'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  })
-  return response === 1
 }
 
-function tempGroupStatusPayload(group: TempReviewerGroup): string {
-  const view = tempReviewers.view(group, tempReviewerReceiptReader())
-  return JSON.stringify({
-    done: group.stage === 'ended',
-    outcome: group.outcome,
-    readyToConfirm: view.confirmTarget !== null,
-    group: view,
-  })
+function tempGroupStatusPayload(group: TempReviewerGroup, hostKey?: string): string {
+  const basePayload = tempReviewers.statusPayload(group)
+  if (!hostKey) return basePayload
+  const parsed = JSON.parse(basePayload) as Record<string, unknown>
+  return JSON.stringify({ ...parsed, hostKey })
 }
 
-async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: string | undefined, prInput: string | undefined): Promise<MeetingResponse> {
-  if (tab.remote || tab.sideChat || tab.tempReviewer) {
-    return { ok: false, message: 'Start temporary PR reviewers from a local foreground session.' }
-  }
-  const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+async function startTempReviewersFlow(options: {
+  profile: WorkspaceProfile
+  hostTabId: string | null
+  hostSessionId: string | null
+  checkoutFolder: string
+  prInput?: string | undefined
+  prUrlInput?: string | undefined
+  headInput?: string | undefined
+  baseInput?: string | undefined
+  context?: string | undefined
+  requireConsent: boolean
+  askedFromPrompt?: { number: number | null; repository: string | null; prUrl?: string | null } | null
+}): Promise<{ ok: boolean; message: string; hostKey?: string }> {
   const runner = await meetingGitRunner()
-  if (!profile || profile.general || !runner) {
-    return { ok: false, message: 'Ask from a session in a project whose origin is a GitHub repository.' }
+  if (!runner || options.profile.general) {
+    return { ok: false, message: 'Start temporary PR reviewers in a Git workspace project.' }
   }
-  let asked: { repository: string | null; number: number | null } | null = null
-  if (!tab.cli) {
-    const prompt = meetingReader(tab.id).activePersonPrompt
-    asked = prompt === null ? null : prReviewAndFixRequest(prompt)
-    if (!asked) {
-      return { ok: false, message: 'Ask in a new message of your own, for example "/review-and-fix-pr" or "review and fix PR 42".' }
+  let parsedPr: ReturnType<typeof parseAnyPullRequestInput> | null = null
+  const rawPr = options.prInput?.trim() || options.prUrlInput?.trim() || options.askedFromPrompt?.prUrl || (options.askedFromPrompt?.number !== null && options.askedFromPrompt?.number !== undefined ? String(options.askedFromPrompt.number) : '')
+  if (rawPr) {
+    try {
+      parsedPr = parseAnyPullRequestInput(rawPr)
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'Invalid pull request identifier.' }
     }
   }
-  let repository: string | null = asked?.repository ?? null
-  let prNumber: number | null = asked?.number ?? null
-  if (prInput && prInput.trim()) {
-    const trimmed = prInput.trim()
-    if (/^\d{1,9}$/.test(trimmed)) {
-      const parsedNum = Number(trimmed)
-      if (prNumber !== null && prNumber !== parsedNum) {
-        return { ok: false, message: `The prompt asked for PR #${prNumber}, not #${parsedNum}.` }
+  if (options.prUrlInput && options.prUrlInput.trim() && (!parsedPr || !parsedPr.prUrl)) {
+    try {
+      const parsedUrl = parseAnyPullRequestInput(options.prUrlInput.trim())
+      if (parsedPr && parsedPr.number !== null && parsedUrl.number !== null && parsedPr.number !== parsedUrl.number) {
+        return { ok: false, message: `Conflicting PR numbers: ${parsedPr.number} vs ${parsedUrl.number}.` }
       }
-      prNumber = parsedNum
-    } else {
-      try {
-        const parsed = parseGithubPullUrl(trimmed)
-        if (prNumber !== null && prNumber !== parsed.number) {
-          return { ok: false, message: `The prompt asked for PR #${prNumber}, not #${parsed.number}.` }
-        }
-        if (repository !== null && repository.toLowerCase() !== parsed.repository.toLowerCase()) {
-          return { ok: false, message: `The prompt asked for ${repository}, not ${parsed.repository}.` }
-        }
-        repository = parsed.repository
-        prNumber = parsed.number
-      } catch {
-        return { ok: false, message: 'Pass -Pr as a pull request number or GitHub pull request URL.' }
+      parsedPr = {
+        number: parsedPr?.number ?? parsedUrl.number,
+        prLabel: parsedPr?.prLabel ?? parsedUrl.prLabel,
+        prUrl: parsedUrl.prUrl,
+        repository: parsedUrl.repository ?? parsedPr?.repository ?? null,
       }
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'Invalid pr_url.' }
     }
   }
-  const api = await githubCliApi(app.getPath('userData')).catch(() => null)
-  if (!api) return { ok: false, message: 'GitHub CLI is not available; install it and sign in.' }
-  if (!repository) {
-    const originRes = await runner.run({ cwd: profile.path, args: ['remote', 'get-url', 'origin'], kind: 'read', timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
-    repository = originRes && originRes.exitCode === 0 ? githubRemoteRepository(originRes.stdout.toString('utf8').trim()) : null
-    if (!repository) return { ok: false, message: 'This project\'s origin is not a github.com repository.' }
-  }
-  if (prNumber === null) {
-    const folder = managedTabs.get(tab.id)?.session.sessionCwd ?? profile.path
-    const readGit = async (args: string[]): Promise<string | null> => {
-      const res = await runner.run({ cwd: folder, args, kind: 'read', timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
-      return res && res.exitCode === 0 ? res.stdout.toString('utf8').trim() : null
+  if (options.askedFromPrompt) {
+    if (options.askedFromPrompt.number !== null && parsedPr?.number !== null && parsedPr?.number !== undefined && options.askedFromPrompt.number !== parsedPr.number) {
+      return { ok: false, message: `The prompt asked for #${options.askedFromPrompt.number}, not #${parsedPr.number}.` }
     }
-    const branch = await readGit(['symbolic-ref', '--quiet', '--short', 'HEAD'])
-    const own = githubRemoteRepository((await readGit(['remote', 'get-url', 'origin'])) ?? '') ?? repository
-    if (!branch || !own) return { ok: false, message: 'Current folder is not on a branch of a github.com repository; pass -Pr <number>.' }
-    const pulls = await api(`repos/${own}/pulls?state=open&head=${encodeURIComponent(`${own.split('/')[0]}:${branch}`)}&per_page=10`).catch(() => null)
-    const found = Array.isArray(pulls) ? pulls.filter((pull): pull is { number: number } => Number.isSafeInteger((pull as { number?: unknown })?.number)) : []
-    if (found.length !== 1) {
-      return { ok: false, message: found.length ? `Branch ${branch} has ${found.length} open pull requests; pass -Pr <number>.` : `Branch ${branch} has no open pull request in ${own} yet.` }
+    if (options.askedFromPrompt.repository && parsedPr?.repository && options.askedFromPrompt.repository.toLowerCase() !== parsedPr.repository.toLowerCase()) {
+      return { ok: false, message: `The prompt asked for ${options.askedFromPrompt.repository}, not ${parsedPr.repository}.` }
     }
-    repository = own
-    prNumber = found[0]!.number
   }
 
-  const existingForHost = tempReviewers.activeForHost(tab.id)
-  if (existingForHost && existingForHost.repository.toLowerCase() === repository.toLowerCase() && existingForHost.prNumber === prNumber) {
-    return { ok: true, message: tempGroupStatusPayload(existingForHost) }
-  }
-  if (followups?.list().some((g) => g.enabled && g.role === 'reviewer' && g.repository.toLowerCase() === repository!.toLowerCase() && g.number === prNumber)) {
-    return { ok: false, message: `Pull request ${repository} #${prNumber} already has an active standalone review loop.` }
-  }
+  const topLevelRes = await runner.run({ cwd: options.checkoutFolder, args: ['rev-parse', '--show-toplevel'], kind: 'read', disableHooks: true, timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
+  const checkoutRoot = topLevelRes && topLevelRes.exitCode === 0 && topLevelRes.stdout.toString('utf8').trim()
+    ? resolve(topLevelRes.stdout.toString('utf8').trim())
+    : resolve(options.checkoutFolder)
 
-  let origin: string
-  try {
-    origin = await projectOrigin(runner, profile.path, repository)
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : 'Project origin does not match the pull request repository.' }
-  }
-  const credentials = await projectCredentialSettings(runner, profile.path).catch(() => ['unreadable Git config'])
+  const originRes = await runner.run({ cwd: checkoutRoot, args: ['remote', 'get-url', 'origin'], kind: 'read', disableHooks: true, timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
+  const origin = originRes && originRes.exitCode === 0 ? originRes.stdout.toString('utf8').trim() : ''
+  const repository = parsedPr?.repository ?? options.askedFromPrompt?.repository ?? repositoryLabelFromOrigin(origin, options.profile.name)
+
+  const credentials = await projectCredentialSettings(runner, checkoutRoot).catch(() => ['unreadable Git config'])
   if (credentials.length > 0) {
-    return { ok: false, message: `${profile.name}'s local Git config holds ${credentials.join(' and ')}, which reviewers could read. Move credentials to global Git config or a credential manager.` }
+    return { ok: false, message: `${options.profile.name}'s local Git config holds ${credentials.join(' and ')}, which reviewers could read. Move credentials to global Git config or a credential manager.` }
   }
 
-  const snapshotData = await readGithubPull(api, repository, prNumber, { checks: false }).catch((error: unknown) => (error instanceof Error ? error : new Error('Could not read pull request')))
-  if (snapshotData instanceof Error) return { ok: false, message: snapshotData.message }
-  if (!snapshotData.open) return { ok: false, message: `PR #${prNumber} is closed.` }
-  if (!snapshotData.baseRepository || snapshotData.headRepository.toLowerCase() !== snapshotData.baseRepository.toLowerCase()) {
-    return { ok: false, message: 'A pull request from a fork cannot be reviewed here.' }
+  const revisions = await resolveGitRevisionsForReview(runner, checkoutRoot, options.headInput, options.baseInput)
+  if (!revisions.ok) return { ok: false, message: revisions.message }
+
+  const prNumber = parsedPr?.number ?? options.askedFromPrompt?.number ?? null
+  const ghRepo = githubRemoteRepository(origin)
+  const prUrl = parsedPr?.prUrl ?? options.askedFromPrompt?.prUrl ?? (prNumber !== null && ghRepo ? `https://github.com/${ghRepo}/pull/${prNumber}` : null)
+  const prLabel = parsedPr?.prLabel ?? (prNumber !== null ? `PR #${prNumber}` : revisions.branch ? `Branch ${revisions.branch}` : `Commit ${revisions.head.slice(0, 7)}`)
+
+  if (options.hostTabId) {
+    const existingForHost = tempReviewers.activeForHost(options.hostTabId)
+    if (existingForHost && existingForHost.repository.toLowerCase() === repository.toLowerCase() && existingForHost.prNumber === prNumber) {
+      return { ok: true, message: tempGroupStatusPayload(existingForHost) }
+    }
   }
-  const me = await api('user').catch(() => null) as { id?: unknown } | null
-  if (!me || !Number.isSafeInteger(me.id) || snapshotData.author !== me.id) {
-    return { ok: false, message: 'Only your own pull requests can be reviewed here for now.' }
+  if (prNumber !== null && followups?.list().some((g) => g.enabled && g.role === 'reviewer' && g.repository.toLowerCase() === repository.toLowerCase() && g.number === prNumber)) {
+    return { ok: false, message: `${repository} ${prLabel} already has an active standalone review loop.` }
   }
 
-  const clis = profile.reviewerClis ?? desktopConfig.reviewerClis
-  const prUrl = `https://github.com/${repository}/pull/${prNumber}`
-  let group: TempReviewerGroup
+  const clis = options.profile.reviewerClis ?? desktopConfig.reviewerClis
+  const inUseSeats = Math.max(tempReviewerTabCount(tabsState), tempReviewers.activeSeatCount())
+  if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) {
+    return {
+      ok: false,
+      message: `Cannot start ${clis.length} temporary reviewer session(s): ${inUseSeats}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce configured reviewer CLIs.`,
+    }
+  }
+  let created: { group: TempReviewerGroup; hostKey: string }
   try {
-    group = tempReviewers.createGroup({
-      hostTabId: tab.id,
-      hostSessionId: sessionId ?? tab.lastSessionId ?? null,
-      profileId: profile.id,
-      accountId: me.id as number,
+    created = tempReviewers.createGroup({
+      hostTabId: options.hostTabId,
+      hostSessionId: options.hostSessionId,
+      profileId: options.profile.id,
+      projectPath: checkoutRoot,
       repository,
+      prLabel,
       prNumber,
       prUrl,
       marker: DEFAULT_PR_MARKER,
-      head: snapshotData.head,
-      base: snapshotData.base,
-      feedbackSignature: prFeedbackSignature(snapshotData, DEFAULT_PR_MARKER),
-      materialFeedbackSignature: materialFeedbackSignature(snapshotData, new Set(), DEFAULT_PR_MARKER),
-      authorReplySignature: authorReplySignature(snapshotData, DEFAULT_PR_MARKER),
+      head: revisions.head,
+      base: revisions.base,
+      ...(options.context ? { context: options.context } : {}),
       clis,
       origin,
     })
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : 'Could not create temporary reviewer group.' }
   }
-  tempGroupSnapshots.set(group.id, { at: Date.now() })
+
+  const { group, hostKey } = created
   broadcastState()
 
-  // Run interactive consent and sequential CLI startup asynchronously so `pr-reviewers -Action start` returns
-  // promptly (`stage: "starting"`) without timing out if the user takes >30s on the consent dialog or prompt startup.
-  const nonCopilotHost = Boolean(tab.cli)
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      const approved = await askTempReviewerConsent(repository!, prNumber!, clis, nonCopilotHost)
+      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent)
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -4338,11 +4275,10 @@ async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: stri
         }
         return
       }
-      await ensurePrLoopPosts()
       for (const seat of group.requiredSeats.values()) {
         if (isEnded()) break
         try {
-          await launchTempReviewerSeat(group, seat, profile, snapshotData)
+          await launchTempReviewerSeat(group, seat, options.profile)
         } catch (error) {
           tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
           broadcastState()
@@ -4362,32 +4298,240 @@ async function startTempReviewersCommand(tab: DesktopSessionTab, sessionId: stri
     }
   })()
 
+  return { ok: true, message: tempGroupStatusPayload(group, options.requireConsent ? hostKey : undefined), hostKey }
+}
+
+async function startTempReviewersCommand(
+  tab: DesktopSessionTab,
+  sessionId: string | undefined,
+  request: Pick<MeetingRequest, 'pr' | 'head' | 'base' | 'text'>,
+): Promise<MeetingResponse> {
+  if (tab.remote || tab.sideChat || tab.tempReviewer) {
+    return { ok: false, message: 'Start temporary PR reviewers from a local foreground session.' }
+  }
+  const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+  if (!profile || profile.general) {
+    return { ok: false, message: 'Start temporary PR reviewers from a project workspace.' }
+  }
+  let asked: ReturnType<typeof prReviewAndFixRequest> = null
+  if (!tab.cli) {
+    const prompt = meetingReader(tab.id).activePersonPrompt
+    asked = prompt === null ? null : prReviewAndFixRequest(prompt)
+    if (!asked) {
+      return { ok: false, message: 'Ask in a new message of your own, for example "/review-and-fix-pr" or "review and fix PR 42".' }
+    }
+  }
+  const folder = managedTabs.get(tab.id)?.session.sessionCwd ?? tab.worktree?.path ?? tab.launchWorktreePath ?? profile.path
+  const res = await startTempReviewersFlow({
+    profile,
+    hostTabId: tab.id,
+    hostSessionId: sessionId ?? tab.lastSessionId ?? null,
+    checkoutFolder: folder,
+    prInput: request.pr,
+    headInput: request.head,
+    baseInput: request.base,
+    context: request.text,
+    requireConsent: Boolean(tab.cli),
+    askedFromPrompt: asked,
+  })
+  return { ok: res.ok, message: res.message }
+}
+
+async function resolveMcpWorkspaceAndTab(desktopTag: string | null, folderInput?: string): Promise<
+  | { ok: true; profile: WorkspaceProfile; hostTab: DesktopSessionTab | null; checkoutFolder: string }
+  | { ok: false; message: string }
+> {
+  const taggedTabId = desktopTag ? meetingTabTags.get(desktopTag) : undefined
+  const taggedTab = taggedTabId ? tabsState.tabs.find((t) => t.id === taggedTabId && !t.remote && !t.sideChat && !t.tempReviewer) ?? null : null
+  if (taggedTab) {
+    const profile = desktopConfig.profiles.find((p) => p.id === taggedTab.workspaceProfileId && !p.general)
+    if (!profile) return { ok: false, message: 'This tab is not in a Git project workspace.' }
+    let checkoutFolder = managedTabs.get(taggedTab.id)?.session.sessionCwd ?? taggedTab.worktree?.path ?? taggedTab.launchWorktreePath ?? profile.path
+    if (folderInput && folderInput.trim()) {
+      if (!isAbsolute(folderInput) || !isLocalFilesystemPath(folderInput)) {
+        return { ok: false, message: 'Pass folder as a local absolute path.' }
+      }
+      const sameMain = await isSameFolder(folderInput, profile.path)
+      const linked = sameMain ? null : await resolveProjectWorktree(profile.path, folderInput).catch(() => null)
+      if (!sameMain && !linked) {
+        return { ok: false, message: `Folder ${folderInput} does not belong to this tab's workspace (${profile.path}).` }
+      }
+      checkoutFolder = linked?.root ?? profile.path
+    }
+    return { ok: true, profile, hostTab: taggedTab, checkoutFolder }
+  }
+
+  if (!folderInput || !folderInput.trim()) {
+    return { ok: false, message: 'Pass folder (absolute path to your workspace repository) when calling pr_reviewers_start.' }
+  }
+  if (!isAbsolute(folderInput) || folderInput.length > 4096 || !isLocalFilesystemPath(folderInput)) {
+    return { ok: false, message: 'Pass folder as a local absolute path.' }
+  }
+  let canonical: string
+  try {
+    canonical = await realPathNative(folderInput)
+  } catch {
+    return { ok: false, message: `${folderInput} does not exist.` }
+  }
+  const resolveUntaggedAntigravityTab = (profileId: string): DesktopSessionTab | null => {
+    const activeAg = tabsState.tabs.find((t) => (
+      t.id === tabsState.activeTabId
+      && t.workspaceProfileId === profileId
+      && t.cli === 'antigravity'
+      && !t.remote
+      && !t.sideChat
+      && !t.tempReviewer
+    ))
+    if (activeAg) return activeAg
+    const agTabs = tabsState.tabs.filter((t) => (
+      t.workspaceProfileId === profileId
+      && t.cli === 'antigravity'
+      && !t.remote
+      && !t.sideChat
+      && !t.tempReviewer
+    ))
+    return agTabs.length === 1 ? agTabs[0]! : null
+  }
+  for (const profile of desktopConfig.profiles) {
+    if (profile.general) continue
+    if (await isSameFolder(canonical, profile.path)) {
+      return { ok: true, profile, hostTab: resolveUntaggedAntigravityTab(profile.id), checkoutFolder: canonical }
+    }
+    const linked = await resolveProjectWorktree(profile.path, canonical).catch(() => null)
+    if (linked) {
+      return { ok: true, profile, hostTab: resolveUntaggedAntigravityTab(profile.id), checkoutFolder: linked.root }
+    }
+  }
+  return { ok: false, message: `Open ${canonical} as a workspace in Copilot CLI Desktop first, then call pr_reviewers_start.` }
+}
+
+function resolveMcpHostGroup(hostKey: string | null, desktopTag: string | null): TempReviewerGroup | null {
+  if (hostKey !== null) {
+    return tempReviewers.authorizeHostKey(hostKey)
+  }
+  const taggedTabId = desktopTag ? meetingTabTags.get(desktopTag) : undefined
+  if (taggedTabId) {
+    return tempReviewers.latestForHost(taggedTabId)
+  }
+  return null
+}
+
+async function startTempReviewersMcp(options: {
+  desktopTag: string | null
+  folder?: string
+  pr?: string
+  prUrl?: string
+  head?: string
+  base?: string
+  context?: string
+}): Promise<{ ok: boolean; message: string; hostKey?: string }> {
+  if (!guestsReady) return { ok: false, message: 'Copilot CLI Desktop is still starting; retry in a moment.' }
+  const resolved = await resolveMcpWorkspaceAndTab(options.desktopTag, options.folder)
+  if (!resolved.ok) return resolved
+  return startTempReviewersFlow({
+    profile: resolved.profile,
+    hostTabId: resolved.hostTab?.id ?? null,
+    hostSessionId: resolved.hostTab?.lastSessionId ?? null,
+    checkoutFolder: resolved.checkoutFolder,
+    prInput: options.pr,
+    prUrlInput: options.prUrl,
+    headInput: options.head,
+    baseInput: options.base,
+    context: options.context,
+    requireConsent: true,
+  })
+}
+
+async function waitGroupTempReviewers(group: TempReviewerGroup, waitSeconds: number, signal?: AbortSignal): Promise<MeetingResponse> {
+  const isEnded = (): boolean => group.stage === 'ended'
+  if (isEnded()) return { ok: true, message: tempGroupStatusPayload(group) }
+  const baselineSettledKey = group.lastObservedHostSettledKey
+  const deadline = Date.now() + Math.min(60, Math.max(1, waitSeconds)) * 1000
+  while (!signal?.aborted) {
+    if (isEnded()) return { ok: true, message: tempGroupStatusPayload(group) }
+    const view = tempReviewers.view(group)
+    const allApproved = group.stage === 'active'
+      && view.seats.length > 0
+      && view.seats.every((s) => s.verdict === 'approved')
+    const settledKey = tempReviewers.settledStateKey(group, view)
+    if (allApproved || (settledKey !== null && settledKey !== baselineSettledKey)) {
+      group.lastObservedHostSettledKey = settledKey
+      return { ok: true, message: tempGroupStatusPayload(group) }
+    }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      if (settledKey !== null) group.lastObservedHostSettledKey = settledKey
+      return { ok: true, message: tempGroupStatusPayload(group) }
+    }
+    const woken = await tempReviewers.waitForChange(Math.min(15_000, remaining), signal)
+    if (woken === 'aborted') return { ok: true, message: tempGroupStatusPayload(group) }
+  }
   return { ok: true, message: tempGroupStatusPayload(group) }
 }
 
 async function waitHostTempReviewers(tabId: string, waitSeconds: number, signal?: AbortSignal): Promise<MeetingResponse> {
   const group = tempReviewers.latestForHost(tabId)
   if (!group) return { ok: false, message: 'No temporary PR reviewers have been started for this session.' }
-  const isEnded = (): boolean => group.stage === 'ended'
-  if (isEnded()) return { ok: true, message: tempGroupStatusPayload(group) }
-  await refreshTempGroupFromGithub(group, true).catch(() => null)
-  await prPosts?.reconcile().catch(() => {})
-  const deadline = Date.now() + Math.min(60, Math.max(1, waitSeconds)) * 1000
-  while (!signal?.aborted) {
-    if (isEnded()) return { ok: true, message: tempGroupStatusPayload(group) }
-    const view = tempReviewers.view(group, tempReviewerReceiptReader())
-    const anyPending = view.seats.some((s) => s.verdict === 'starting' || s.verdict === 'reviewing' || s.verdict === 'settling')
-    const anyActionable = view.seats.some((s) => s.verdict === 'changes-requested' || s.verdict === 'failed' || s.verdict === 'stopped' || s.verdict === 'uncertain')
-    if (anyActionable && !anyPending) {
-      return { ok: true, message: tempGroupStatusPayload(group) }
-    }
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) return { ok: true, message: tempGroupStatusPayload(group) }
-    const woken = await tempReviewers.waitForChange(Math.min(15_000, remaining), signal)
-    if (woken === 'aborted') return { ok: true, message: tempGroupStatusPayload(group) }
-    await refreshTempGroupFromGithub(group).catch(() => null)
+  return waitGroupTempReviewers(group, waitSeconds, signal)
+}
+
+async function waitMcpTempReviewers(hostKey: string | null, desktopTag: string | null, waitSeconds: number, signal?: AbortSignal): Promise<MeetingResponse> {
+  const group = resolveMcpHostGroup(hostKey, desktopTag)
+  if (!group) return { ok: false, message: 'No temporary PR reviewers are bound to this session; call pr_reviewers_start first (or pass host_key).' }
+  return waitGroupTempReviewers(group, waitSeconds, signal)
+}
+
+async function advanceGroupTempReviewers(
+  group: TempReviewerGroup,
+  checkoutFolder: string,
+  headInput: string,
+  baseInput: string | undefined,
+  summary: string,
+): Promise<MeetingResponse> {
+  const runner = await meetingGitRunner()
+  if (!runner) return { ok: false, message: 'Git is not available.' }
+  const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
+  if (!revisions.ok) return { ok: false, message: revisions.message }
+  try {
+    tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary)
+    broadcastState()
+    return { ok: true, message: tempGroupStatusPayload(group) }
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : 'Could not advance review round.' }
   }
-  return { ok: true, message: tempGroupStatusPayload(group) }
+}
+
+async function roundMcpTempReviewers(
+  hostKey: string | null,
+  desktopTag: string | null,
+  options: { head: string; base?: string; summary: string },
+): Promise<MeetingResponse> {
+  const group = resolveMcpHostGroup(hostKey, desktopTag)
+  if (!group) return { ok: false, message: 'No temporary PR reviewers are bound to this session; call pr_reviewers_start first (or pass host_key).' }
+  const hostTab = group.hostTabId ? tabsState.tabs.find((t) => t.id === group.hostTabId) : null
+  const folder = (hostTab ? managedTabs.get(hostTab.id)?.session.sessionCwd ?? hostTab.worktree?.path ?? hostTab.launchWorktreePath : null) ?? group.projectPath
+  return advanceGroupTempReviewers(group, folder, options.head, options.base, options.summary)
+}
+
+async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'approved' | 'stopped'): Promise<MeetingResponse> {
+  try {
+    const { seats } = tempReviewers.finishByHost(group.id, outcome)
+    await teardownTempReviewerSeats(seats)
+    const payload = tempGroupStatusPayload(group)
+    if (outcome === 'stopped') {
+      tempReviewers.forgetEnded(group.id)
+    }
+    broadcastState()
+    return { ok: true, message: payload }
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : 'Could not finish temporary review group.' }
+  }
+}
+
+async function finishMcpTempReviewers(hostKey: string | null, desktopTag: string | null, outcome: 'approved' | 'stopped'): Promise<MeetingResponse> {
+  const group = resolveMcpHostGroup(hostKey, desktopTag)
+  if (!group) return { ok: false, message: 'No temporary PR reviewers are bound to this session; call pr_reviewers_start first (or pass host_key).' }
+  return finishGroupTempReviewers(group, outcome)
 }
 
 const meetingControl = new MeetingControlServer(handleMeetingCommand, {
@@ -4545,7 +4689,7 @@ async function validateMeetingCallerBinding(
 function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest, signal?: AbortSignal): Promise<MeetingResponse> {
   // Long-polling wait commands validate session binding atomically inside the per-tab queue, then await changes outside
   // the queue so status/stop commands in the same tab are never blocked behind an open wait.
-  if (command === 'pr-wait' || (command === 'pr-reviewers' && (request.action ?? 'status') === 'wait')) {
+  if (command === 'pr-wait' || (command === 'pr-reviewers' && (request.action ?? 'status').toLowerCase() === 'wait')) {
     const previous = meetingCommands.get(tabId) ?? Promise.resolve()
     const check = previous.catch(() => {}).then(() => validateMeetingCallerBinding(tabId, command, request))
     const gate = check.then(() => ({ ok: true, message: '' }))
@@ -4593,13 +4737,28 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           }
         }
         if (action === 'start') {
-          return startTempReviewersCommand(currentTab, request.sessionId, request.pr)
+          return startTempReviewersCommand(currentTab, request.sessionId, request)
         }
         if (action === 'status') {
           const group = tempReviewers.latestForHost(tabId)
           if (!group) return { ok: false, message: 'No temporary PR reviewers have been started for this session.' }
-          await refreshTempGroupFromGithub(group).catch(() => null)
+          const settled = tempReviewers.settledStateKey(group)
+          if (settled !== null) group.lastObservedHostSettledKey = settled
           return { ok: true, message: tempGroupStatusPayload(group) }
+        }
+        if (action === 'wait') {
+          return waitHostTempReviewers(tabId, request.wait ?? 45, signal)
+        }
+        if (action === 'round') {
+          const group = tempReviewers.activeForHost(tabId)
+          if (!group) return { ok: false, message: 'No active temporary PR reviewers for this session.' }
+          const folder = managedTabs.get(tabId)?.session.sessionCwd ?? currentTab.worktree?.path ?? currentTab.launchWorktreePath ?? group.projectPath
+          return advanceGroupTempReviewers(group, folder, request.head ?? '', request.base, request.text)
+        }
+        if (action === 'finish') {
+          const group = tempReviewers.latestForHost(tabId)
+          if (!group) return { ok: false, message: 'No temporary PR reviewers have been started for this session.' }
+          return finishGroupTempReviewers(group, 'approved')
         }
         if (action === 'stop') {
           const group = tempReviewers.activeForHost(tabId)
@@ -4609,15 +4768,9 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
               ? { ok: true, message: tempGroupStatusPayload(latest) }
               : { ok: true, message: JSON.stringify({ done: true, outcome: 'stopped', group: null }) }
           }
-          const seats = tempReviewers.endGroup(group.id, 'stopped', 'Stopped by host session.')
-          await teardownTempReviewerSeats(seats)
-          const payload = tempGroupStatusPayload(group)
-          tempReviewers.forgetEnded(group.id)
-          tempGroupSnapshots.delete(group.id)
-          broadcastState()
-          return { ok: true, message: payload }
+          return finishGroupTempReviewers(group, 'stopped')
         }
-        return { ok: false, message: 'Unknown pr-reviewers action; expected start, status, wait, or stop.' }
+        return { ok: false, message: 'Unknown pr-reviewers action; expected start, status, wait, round, finish, or stop.' }
       }
       case 'pr-start': {
         // Like a meeting join: only what the person typed in this conversation starts a loop.
@@ -4645,26 +4798,20 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           const group = tempSeat ? tempSeat.group : tempHost!
           if (group.stage === 'ended') return { ok: false, message: 'This temporary review group is no longer active.' }
           try {
-            const api = await githubCliApi(app.getPath('userData'))
             if (tempSeat) {
-              const message = await readSeatFeedbackPage(tempSeat.group, tempSeat.seat, request.page, {
-                refreshSnapshot: async () => {
-                  const fresh = await refreshTempGroupFromGithub(tempSeat.group, true)
-                  if (!fresh && tempSeat.group.stage !== 'ended') throw new Error('Failed to refresh pull request snapshot')
-                },
-                readPage: (cursor) => readPrFeedbackPage(api, group.repository, group.prNumber, cursor),
-              })
-              return { ok: true, message }
+              return { ok: true, message: readGroupStateForSeat(tempSeat.group, tempSeat.seat, request.page) }
             }
-            return { ok: true, message: await readPrFeedbackPage(api, group.repository, group.prNumber, request.page) }
-          } catch {
-            return { ok: false, message: 'The page could not be read. If the PR changed, restart pr-read from page one.' }
+            return { ok: true, message: tempGroupStatusPayload(group) }
+          } catch (error) {
+            return { ok: false, message: error instanceof Error ? error.message : 'The page could not be read; restart pr-read from page 1.' }
           }
         }
         if (command === 'pr-review' && tempSeat) {
-          const binding = callerSession?.bindingDiagnostic
-          if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady) {
-            return { ok: false, message: 'PR reviews require one verified foreground CLI session.' }
+          if (!currentTab.cli) {
+            const binding = callerSession?.bindingDiagnostic
+            if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady) {
+              return { ok: false, message: 'PR reviews require one verified foreground CLI session.' }
+            }
           }
           let parsed: unknown
           try { parsed = JSON.parse(request.text) } catch { return { ok: false, message: 'The review file must be JSON: {"body": "...", "comments": [...], "approve": false}.' } }
@@ -4678,7 +4825,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           }
           const comments = Array.isArray(fields.comments) ? fields.comments as Array<{ path: string; line: number; body: string }> : fields.comments === undefined ? [] : null
           if (!comments) return { ok: false, message: '"comments" must be an array.' }
-          const res = await submitTempSeatReview(tempSeat.group, tempSeat.seat, request.sessionId, {
+          const res = await submitTempSeatReview(tempSeat.group, tempSeat.seat, {
             body: typeof fields.body === 'string' ? fields.body : '',
             approve: fields.approve,
             comments,
@@ -4749,36 +4896,27 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       case 'pr-reply': {
         const tempSeat = tempReviewers.seatByTabId(tabId)
         if (tempSeat) {
-          const binding = callerSession?.bindingDiagnostic
-          if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady) {
-            return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
-          }
-          const res = await submitTempSeatReply(tempSeat.group, tempSeat.seat, request.sessionId, request.to ?? '', request.text)
-          return { ok: res.ok, message: res.text }
-        }
-        const tempHost = tempReviewers.activeForHost(tabId)
-        if (tempHost) {
-          const callerId = request.sessionId ?? currentTab.lastSessionId
           if (!currentTab.cli) {
             const binding = callerSession?.bindingDiagnostic
             if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady) {
               return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
             }
           }
-          if (!callerId) return { ok: false, message: 'This session has no verified session ID for PR replies.' }
-          const posts = await ensurePrLoopPosts().catch(() => null)
-          if (!posts) return { ok: false, message: prPostsError ?? 'PR loops are not running in the desktop.' }
-          try {
-            const target = hostAuthorGrantTarget(tempHost, callerId)
-            const receipt = await posts.reply(target, callerId, { to: request.to ?? '', body: request.text }, () => tempHost.stage !== 'ended')
-            await refreshTempGroupFromGithub(tempHost, true).catch(() => null)
-            tempReviewers.wakeAll()
-            broadcastState()
-            return { ok: true, message: `Posted${receipt.url ? `: ${receipt.url}` : '.'}` }
-          } catch (error) {
-            broadcastState()
-            return { ok: false, message: error instanceof PrPostRejected ? error.message : 'The desktop could not post the reply.' }
+          const res = await submitTempSeatReply(tempSeat.group, tempSeat.seat, request.to ?? '', request.text)
+          return { ok: res.ok, message: res.text }
+        }
+        const tempHost = tempReviewers.activeForHost(tabId)
+        if (tempHost) {
+          if (!currentTab.cli) {
+            const binding = callerSession?.bindingDiagnostic
+            if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady) {
+              return { ok: false, message: 'PR replies require one verified foreground CLI session.' }
+            }
           }
+          const recorded = tempReviewers.recordHostReply(tempHost.id, request.to ?? 'conversation', request.text)
+          if (!recorded.ok) return { ok: false, message: recorded.error }
+          broadcastState()
+          return { ok: true, message: `Recorded reply (${recorded.entry.id}) on round ${recorded.entry.round}.` }
         }
         const binding = callerSession?.bindingDiagnostic
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
@@ -5030,11 +5168,12 @@ async function flushSessionName(tabId: string): Promise<void> {
  * its conversation, folder and browser data, and resumes when Resume (Restart) is chosen. */
 async function unloadSessionTab(tabId: string): Promise<DesktopState> {
   const requested=tabsState.tabs.find(tab=>tab.id===tabId)
-  if(requested&&!requested.remote&&requested.status!=='dormant')cancelHeldInput(tabId)
+  if(requested&&!requested.remote&&!requested.tempReviewer&&requested.status!=='dormant')cancelHeldInput(tabId)
   return queueTabTransition(tabId, async () => {
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab) throw new Error('This session tab no longer exists')
     if (tab.remote) throw new Error('A remote session cannot be unloaded')
+    if (tab.tempReviewer) throw new Error('Temporary PR reviewer sessions cannot be unloaded; use Stop reviewers or Dismiss instead')
     if (tab.status === 'dormant') return snapshot()
     const finishTools = await projectTools().releaseSession(tabId, true)
     if (!finishTools) return snapshot()
@@ -5138,7 +5277,6 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
         const seats = tempReviewers.endGroup(hostedTempGroup.id, 'stopped', 'Host session closed.')
         void teardownTempReviewerSeats(seats).finally(() => {
           tempReviewers.forgetEnded(hostedTempGroup.id)
-          tempGroupSnapshots.delete(hostedTempGroup.id)
           broadcastState()
         })
       }
@@ -7082,7 +7220,6 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
   if (!group) throw new Error('This temporary review group is no longer listed')
   if (action === 'dismiss-ended') {
     tempReviewers.forgetEnded(groupId)
-    tempGroupSnapshots.delete(groupId)
     broadcastState()
     return snapshot()
   }
@@ -7096,30 +7233,27 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : null
     if (
       !raw
+      || typeof raw.round !== 'number'
+      || !Number.isSafeInteger(raw.round)
       || typeof raw.head !== 'string'
       || typeof raw.base !== 'string'
       || typeof raw.rosterKey !== 'string'
-      || typeof raw.feedbackSignature !== 'string'
+      || typeof raw.stateSignature !== 'string'
       || typeof raw.approveAnyway !== 'boolean'
     ) {
       throw new Error('Refresh the approval status before confirming')
     }
-    const posts = await ensurePrLoopPosts()
-    await posts.reconcile()
-    const reader = tempReviewerReceiptReader()
-    if (!reader) throw new Error('PR review receipts are unavailable')
-    const api = await githubCliApi(app.getPath('userData'))
-    const freshSnapshot = await readGithubPull(api, group.repository, group.prNumber, { checks: false })
     const shown: TempReviewerConfirmTarget = {
       groupId,
+      round: raw.round,
       head: raw.head,
       base: raw.base,
       rosterKey: raw.rosterKey,
-      feedbackSignature: raw.feedbackSignature,
+      stateSignature: raw.stateSignature,
       approveAnyway: raw.approveAnyway,
       missingChecks: Array.isArray(raw.missingChecks) ? raw.missingChecks as TempReviewerConfirmTarget['missingChecks'] : [],
     }
-    const { seats } = tempReviewers.verifyAndConfirm(groupId, shown, freshSnapshot, reader)
+    const { seats } = tempReviewers.verifyAndConfirm(groupId, shown)
     await teardownTempReviewerSeats(seats)
     broadcastState()
     return snapshot()
@@ -7138,18 +7272,14 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
     await cleanupTempReviewerSeat(previous)
-    const api = await githubCliApi(app.getPath('userData'))
-    const freshSnapshot = await readGithubPull(api, group.repository, group.prNumber, { checks: false })
-    const applied = tempReviewers.applySnapshot(groupId, freshSnapshot, tempReviewerReceiptReader())
-    if (applied.ended) {
-      await teardownTempReviewerSeats([...group.requiredSeats.values()])
+    if (group.stage === 'ended') {
       broadcastState()
       return snapshot()
     }
     const reset = tempReviewers.resetSeatGeneration(groupId, payload)
     broadcastState()
     try {
-      await launchTempReviewerSeat(group, reset, profile, freshSnapshot)
+      await launchTempReviewerSeat(group, reset, profile)
     } catch (error) {
       tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
       broadcastState()

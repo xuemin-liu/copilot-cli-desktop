@@ -94,7 +94,11 @@ test('initialize opens a session and agrees a protocol version; everything else 
   assert.equal((await rpc('not-a-session', 'tools/list')).status, 404, 'an unknown session starts over')
   assert.equal((await rpc(init.sessionId, 'notifications/initialized', {}, null)).status, 202)
   const tools = ((await rpc(init.sessionId, 'tools/list')).body as { result: { tools: Array<{ name: string }> } }).result.tools
-  assert.deepEqual(tools.map((entry) => entry.name), ['meeting_join', 'meeting_next', 'meeting_reply', 'meeting_show', 'meeting_leave', 'meeting_start', 'meeting_round', 'meeting_propose_close', 'meeting_end', 'meeting_status'])
+  assert.deepEqual(tools.map((entry) => entry.name), [
+    'meeting_join', 'meeting_next', 'meeting_reply', 'meeting_show', 'meeting_leave',
+    'meeting_start', 'meeting_round', 'meeting_propose_close', 'meeting_end', 'meeting_status',
+    'pr_reviewers_start', 'pr_reviewers_wait', 'pr_reviewers_round', 'pr_reviewers_finish',
+  ])
   assert.deepEqual(((await rpc(init.sessionId, 'ping')).body as { result: unknown }).result, {})
   assert.equal(((await rpc(init.sessionId, 'resources/list')).body as { error: { code: number } }).error.code, -32601)
 })
@@ -742,4 +746,68 @@ test('a join by id retried in the same session, its first answer lost, gets the 
   const invited = (await rpc(undefined, 'initialize', {})).sessionId!
   await tool(invited, 'meeting_join', { invitation: token })
   assert.equal((await tool(invited, 'meeting_join', { meeting: 'K7QF' })).text, `Joined meeting K7QF. ${FIRST_MESSAGE}`)
+})
+
+test('pr_reviewers_* MCP tools drive forge-agnostic PR review rounds and preserve hostKey ownership across reconnections', async () => {
+  const { deps, rpc, tool } = meeting()
+  const hostKey = '7'.repeat(64)
+  const recorded: string[] = []
+  deps.prReviewersStart = async (opts) => {
+    recorded.push(`start:${opts.folder ?? ''}:${opts.pr ?? ''}:${opts.prUrl ?? ''}:${opts.head ?? ''}:${opts.base ?? ''}`)
+    return { ok: true, message: JSON.stringify({ done: false, round: 1, hostKey }), hostKey }
+  }
+  deps.prReviewersWait = async (key, _tag, waitSeconds) => {
+    if (key !== hostKey) return { ok: false, message: 'Invalid host_key.' }
+    recorded.push(`wait:${waitSeconds}`)
+    return { ok: true, message: JSON.stringify({ done: false, allApproved: false, round: 1 }) }
+  }
+  deps.prReviewersRound = async (key, _tag, opts) => {
+    if (key !== hostKey) return { ok: false, message: 'Invalid host_key.' }
+    recorded.push(`round:${opts.head}:${opts.summary}`)
+    return { ok: true, message: JSON.stringify({ done: false, round: 2 }) }
+  }
+  deps.prReviewersFinish = async (key, _tag, outcome) => {
+    if (key !== hostKey) return { ok: false, message: 'Invalid host_key.' }
+    recorded.push(`finish:${outcome}`)
+    return { ok: true, message: JSON.stringify({ done: true, outcome }) }
+  }
+
+  const hostSession = (await rpc(undefined, 'initialize', { clientInfo: { name: 'antigravity-cli' } })).sessionId!
+  const started = await tool(hostSession, 'pr_reviewers_start', {
+    folder: 'D:\\daq-service',
+    pr: 12,
+    pr_url: 'http://omaha:3001/daq/daq-service/pulls/12',
+    head: 'a'.repeat(40),
+    base: 'b'.repeat(40),
+    context: 'PR #12 summary',
+  })
+  assert.equal(started.isError, false)
+  assert.equal((JSON.parse(started.text) as { hostKey: string }).hostKey, hostKey)
+
+  const waited = await tool(hostSession, 'pr_reviewers_wait', { wait_seconds: 99 })
+  assert.equal(waited.isError, false)
+
+  // Another unrelated MCP session without hostKey cannot hijack or finish the group:
+  const strangerSession = (await rpc(undefined, 'initialize', { clientInfo: { name: 'codex' } })).sessionId!
+  const hijacked = await tool(strangerSession, 'pr_reviewers_finish', { outcome: 'stopped' })
+  assert.equal(hijacked.isError, true)
+  assert.match(hijacked.text, /Invalid host_key/)
+
+  // A reconnected host MCP session recovers ownership by passing host_key:
+  const reconnected = (await rpc(undefined, 'initialize', { clientInfo: { name: 'antigravity-cli' } })).sessionId!
+  const rounded = await tool(reconnected, 'pr_reviewers_round', {
+    host_key: hostKey,
+    head: 'c'.repeat(40),
+    summary: '🤖 Fixed buffer wrap.',
+  })
+  assert.equal(rounded.isError, false)
+  const finished = await tool(reconnected, 'pr_reviewers_finish', { outcome: 'approved' })
+  assert.equal(finished.isError, false)
+
+  assert.deepEqual(recorded, [
+    `start:D:\\daq-service:12:http://omaha:3001/daq/daq-service/pulls/12:${'a'.repeat(40)}:${'b'.repeat(40)}`,
+    'wait:50',
+    `round:${'c'.repeat(40)}:🤖 Fixed buffer wrap.`,
+    'finish:approved',
+  ])
 })

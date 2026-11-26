@@ -6,6 +6,7 @@ import type { TempReviewerConfirmTarget, TempReviewerGroupView, TempReviewerSeat
 export interface ReviewerBarProps {
   groups: readonly TempReviewerGroupView[]
   activeTabId: string | null
+  activeProfileId?: string | null
   peekTabId: string | null
   onPeek(tabId: string | null): void
   onError(message: string): void
@@ -24,6 +25,7 @@ const VERDICT_LABEL: Record<TempReviewerSeatVerdict, string> = {
 }
 
 const OUTCOME_LABEL: Record<NonNullable<TempReviewerGroupView['outcome']>, string> = {
+  approved: 'Approved',
   confirmed: 'Approval confirmed',
   merged: 'PR merged',
   closed: 'PR closed',
@@ -39,11 +41,12 @@ export function reviewerConfirmButtonLabel(target: TempReviewerConfirmTarget): s
   return details ? `Approve anyway (missing: ${details})` : 'Approve anyway'
 }
 
-export function ReviewerBar({ groups, activeTabId, peekTabId, onPeek, onError }: ReviewerBarProps): JSX.Element | null {
+export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekTabId, onPeek, onError }: ReviewerBarProps): JSX.Element | null {
   const [busyGroupId, setBusyGroupId] = useState<string | null>(null)
-  if (!activeTabId) return null
+  if (!activeTabId && !activeProfileId) return null
   const shown = groups.filter((group) => (
-    group.hostTabId === activeTabId || group.seats.some((seat) => seat.tabId === activeTabId)
+    (activeTabId !== null && (group.hostTabId === activeTabId || group.seats.some((seat) => seat.tabId === activeTabId)))
+    || (group.hostTabId === null && activeProfileId !== null && group.profileId === activeProfileId)
   ))
   if (shown.length === 0) return null
 
@@ -74,23 +77,29 @@ export function ReviewerBar({ groups, activeTabId, peekTabId, onPeek, onError }:
           <section
             key={group.id}
             className={`meeting-bar reviewer-bar reviewer-bar-${ended ? 'ended' : group.confirmTarget ? 'ready' : 'active'}`}
-            aria-label={`Temporary PR reviewers for #${group.prNumber}`}
+            aria-label={`Temporary PR reviewers for ${group.prLabel}`}
           >
-            <button
-              type="button"
-              className="meeting-bar-button reviewer-bar-pr"
-              title={`Open ${group.prUrl}`}
-              onClick={() => {
-                void window.copilotDesktop.openExternalUrl(group.prUrl)
-                  .catch((error: unknown) => onError(error instanceof Error ? error.message : String(error)))
-              }}
-            >
-              PR #{group.prNumber}
-            </button>
+            {group.prUrl ? (
+              <button
+                type="button"
+                className="meeting-bar-button reviewer-bar-pr"
+                title={`Open ${group.prUrl}`}
+                onClick={() => {
+                  void window.copilotDesktop.openExternalUrl(group.prUrl!)
+                    .catch((error: unknown) => onError(error instanceof Error ? error.message : String(error)))
+                }}
+              >
+                {group.prLabel}
+              </button>
+            ) : (
+              <span className="reviewer-bar-pr" title={group.repository}>
+                {group.prLabel}
+              </span>
+            )}
             <span className="reviewer-bar-meta">
-              <code>{group.head.slice(0, 7)}</code> · {stageSummary}
+              <code>{group.head.slice(0, 7)}</code> · R{group.round} · {stageSummary}
             </span>
-            <ul className="reviewer-bar-seats" aria-label={`Reviewer seats for PR #${group.prNumber}`}>
+            <ul className="reviewer-bar-seats" aria-label={`Reviewer seats for ${group.prLabel}`}>
               {group.seats.map((seat) => {
                 const peeking = seat.tabId !== null && peekTabId === seat.tabId
                 const canPeek = seat.tabId !== null
@@ -162,7 +171,7 @@ export function ReviewerBar({ groups, activeTabId, peekTabId, onPeek, onError }:
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label={`Dismiss temporary reviewers for PR #${group.prNumber}`}
+                  aria-label={`Dismiss temporary reviewers for ${group.prLabel}`}
                   onClick={() => runAction(group.id, 'dismiss-ended')}
                 >
                   ×

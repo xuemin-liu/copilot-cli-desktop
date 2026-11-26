@@ -194,6 +194,86 @@ async function ensureCommitIn(runner: GitRunner, cwd: string, prefix: readonly s
   if (!await present()) throw new Error('The pull request\'s base commit could not be fetched; the next check tries again')
 }
 
+async function ensureAgnosticCommit(
+  runner: GitRunner,
+  cwd: string,
+  prefix: readonly string[],
+  origin: string,
+  sha: string,
+  prNumber: number | null,
+): Promise<void> {
+  const present = async (): Promise<boolean> =>
+    git(runner, cwd, [...prefix, 'cat-file', '-e', `${sha}^{commit}`], 'read').then(() => true, () => false)
+  if (await present()) return
+  const trimmedOrigin = origin.trim()
+  if (trimmedOrigin) {
+    await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, sha], 'network').catch(() => {})
+    if (await present()) return
+    if (prNumber !== null && Number.isSafeInteger(prNumber) && prNumber >= 1) {
+      for (const refSpec of [`+refs/pull/${prNumber}/head`, `+refs/merge-requests/${prNumber}/head`]) {
+        await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, refSpec], 'network').catch(() => {})
+        if (await present()) return
+      }
+    }
+    await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin], 'network').catch(() => {})
+  }
+  if (!await present()) {
+    throw new Error(`Commit ${sha.slice(0, 12)} is not in this local repository and could not be fetched from origin. Fetch the pull request branch in your session first, then try again.`)
+  }
+}
+
+/**
+ * Forge-agnostic worktree setup for temporary PR reviewers (works with GitHub, Gitea, GitLab, Bitbucket, Azure DevOps,
+ * or purely local Git repositories). Uses commits already in the local Git object database first and falls back to
+ * fetching from `origin` only when a revision is missing locally.
+ */
+export async function prepareAgnosticReviewWorktree(
+  runner: GitRunner,
+  project: string,
+  origin: string,
+  area: ReviewerArea,
+  head: string,
+  base: string,
+  prNumber: number | null = null,
+): Promise<void> {
+  if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
+  area.project = resolve(project)
+  await ensureAgnosticCommit(runner, area.project, [], origin, head, prNumber)
+  await ensureAgnosticCommit(runner, area.project, [], origin, base, null)
+  await git(runner, area.project, ['update-ref', area.ref, head], 'write')
+  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, head])
+  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read')
+  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read')
+}
+
+/**
+ * Forge-agnostic detached checkout refresh when a temporary reviewer group advances to a new round or revision.
+ * Refuses to overwrite a dirty reviewer worktree so local changes are preserved for inspection.
+ */
+export async function refreshAgnosticReviewWorktree(
+  runner: GitRunner,
+  area: Pick<ReviewerArea, 'gitdir' | 'checkout' | 'root' | 'ref'>,
+  origin: string,
+  head: string,
+  base: string,
+  prNumber: number | null = null,
+): Promise<string> {
+  if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
+  const current = await git(runner, area.root, reviewGit(area, ['rev-parse', '--verify', '--quiet', 'HEAD']), 'read').catch(() => '')
+  if (current) {
+    const status = await git(runner, area.root, reviewGit(area, ['status', '--porcelain=v1', '--untracked-files=normal']), 'read')
+    if (status) throw new Error('The reviewer\'s checkout has changes; inspect it before the review continues')
+  }
+  await ensureAgnosticCommit(runner, area.root, reviewGit(area, []), origin, base, null)
+  await ensureAgnosticCommit(runner, area.root, reviewGit(area, []), origin, head, prNumber)
+  if (REVIEW_REF.test(area.ref)) {
+    await git(runner, area.root, reviewGit(area, ['update-ref', area.ref, head]), 'write')
+  }
+  if (current === head) return head
+  await git(runner, area.root, reviewGit(area, ['checkout', '--quiet', '--detach', head]))
+  return head
+}
+
 /** What the reviewer checkout points at now, checked to be clean. */
 export async function reviewCheckoutState(runner: GitRunner, area: Pick<ReviewerArea, 'gitdir' | 'checkout' | 'root'>): Promise<{ head: string; clean: boolean }> {
   const head = await git(runner, area.root, reviewGit(area, ['rev-parse', '--verify', 'HEAD']), 'read')

@@ -85,7 +85,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
       {side && layout.single && <nav className="compact-session-switch" aria-label="Visible terminal">
         {[main, side].map(tab => tab && <button type="button" key={tab.id} aria-pressed={tab.id === activeTabId} onClick={() => onActivate(tab.id)}>{tab.sideChat ? 'Side chat: ' : ''}{tab.title}</button>)}
       </nav>}
-      {tabs.length === 0 && (
+      {!main && !side && (
         <div className="empty-state">
           <p>No sessions are open.</p>
           <button type="button" onClick={onCreate}>Start a session</button>
@@ -122,7 +122,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.tempReviewer ? (
                 <>
-                  <span className="side-chat-badge" title={`Temporary reviewer for ${tab.tempReviewer.repository} #${tab.tempReviewer.prNumber}`}>Temp reviewer</span>
+                  <span className="side-chat-badge" title={`Temporary reviewer for ${tab.tempReviewer.repository} ${tab.tempReviewer.prLabel}`}>Temp reviewer</span>
                   {onClearPeek && peekTabId === tab.id && (
                     <button type="button" className="meeting-bar-button" onClick={onClearPeek}
                       aria-label={`Hide ${tab.title}`} title="Hide reviewer pane — keep the review running in the background">Hide</button>
@@ -135,7 +135,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                   title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
                   onClick={() => onFork(tab)}><SideChatIcon /></button>
               )}
-              {!tab.remote && (
+              {!tab.remote && !tab.tempReviewer && (
                 <button type="button" className="icon-button session-restart" disabled={busy} onClick={() => onRestart(tab.id)}
                   aria-label={`Restart ${tab.title}`}
                   title="Restart this session with its saved settings, keeping the same conversation">↻</button>

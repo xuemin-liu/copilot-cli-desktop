@@ -84,18 +84,18 @@ export function App(): JSX.Element {
   const [peekReviewerByHost, setPeekReviewerByHost] = useState<Readonly<Record<string, string | null>>>({})
   const openRegularTabCount = regularTabCount(state)
   const canOpenTab = canOpenSessionTab(state.resolution, openRegularTabCount, state.maxSessionTabs)
-  const { hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost)
+  const { peekKey, hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost, state.activeProfileId)
   const updatePeekReviewer = useCallback((nextPeekTabId: string | null): void => {
-    if (!peekHostTabId) return
-    setPeekReviewerByHost((prev) => ({ ...prev, [peekHostTabId]: nextPeekTabId }))
+    if (!peekKey) return
+    setPeekReviewerByHost((prev) => ({ ...prev, [peekKey]: nextPeekTabId }))
     const activeTabObj = state.tabs.find((tab) => tab.id === state.activeTabId)
-    if (activeTabObj?.tempReviewer?.hostTabId === peekHostTabId) {
+    if (activeTabObj?.tempReviewer) {
       const targetTabId = nextPeekTabId ?? peekHostTabId
-      if (targetTabId !== state.activeTabId) {
+      if (targetTabId && targetTabId !== state.activeTabId) {
         void window.copilotDesktop.activateTab(targetTabId).catch((error: unknown) => setOperationError(errorMessage(error)))
       }
     }
-  }, [peekHostTabId, state.activeTabId, state.tabs])
+  }, [peekKey, peekHostTabId, state.activeTabId, state.tabs])
   const newSessionProfile = inputDialog?.kind === 'new-session'
     ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
     : null
@@ -519,6 +519,7 @@ export function App(): JSX.Element {
           <ReviewerBar
             groups={state.tempReviewerGroups ?? []}
             activeTabId={state.activeTabId}
+            activeProfileId={state.activeProfileId}
             peekTabId={activePeekTabId}
             onPeek={updatePeekReviewer}
             onError={setOperationError}

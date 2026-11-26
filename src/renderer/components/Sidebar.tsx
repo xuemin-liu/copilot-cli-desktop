@@ -399,9 +399,9 @@ export function Sidebar({
     {openActionsTabId === tab.id && <div className="sidebar-session-actions" role="group" aria-label={`Actions for ${tab.title}`}>
         <button type="button" className="icon-button" aria-label={`Open ${tab.title} in new window`} title="Open in new window"
           onClick={() => { setOpenActionsTabId(null); onPopOutTab(tab.id) }}>↗</button>
-        {!tab.remote && <button type="button" className="icon-button session-restart" disabled={busy}
+        {!tab.remote && !tab.tempReviewer && <button type="button" className="icon-button session-restart" disabled={busy}
           aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => { setOpenActionsTabId(null); onRestartTab(tab.id) }}>↻</button>}
-        {!tab.remote && tab.status !== 'dormant' && <button type="button" className="icon-button session-unload" disabled={busy}
+        {!tab.remote && !tab.tempReviewer && tab.status !== 'dormant' && <button type="button" className="icon-button session-unload" disabled={busy}
           aria-label={`Unload ${tab.title}`} title="Unload session: stop it to free its memory and keep the tab to resume later"
           onClick={() => { setOpenActionsTabId(null); onUnloadTab(tab.id) }}>☾</button>}
         <button type="button" className="icon-button session-close" aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
@@ -411,7 +411,11 @@ export function Sidebar({
     </div>
   }
   const renderSessionWithReviewers = (tab: DesktopSessionTab, wsName?: string): JSX.Element => {
-    const childReviewers = tabs.filter((candidate) => candidate.tempReviewer?.hostTabId === tab.id)
+    const firstInWorkspace = regularTabs.find((candidate) => candidate.workspaceProfileId === tab.workspaceProfileId)?.id === tab.id
+    const childReviewers = tabs.filter((candidate) => (
+      candidate.tempReviewer?.hostTabId === tab.id
+      || (candidate.tempReviewer?.hostTabId === null && candidate.workspaceProfileId === tab.workspaceProfileId && firstInWorkspace)
+    ))
     if (childReviewers.length === 0) return sessionButton(tab, wsName)
     return (
       <div key={tab.id} className="sidebar-session-with-reviewers">
