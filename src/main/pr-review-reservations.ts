@@ -25,6 +25,13 @@ export interface ReviewReservation {
   taskId: string | null
   createdAt: number
   kept: boolean
+  /**
+   * When the removal began that found Git had taken the worktree out of the project while it had no changes, and only
+   * deleting its folder failed (a file still held open, on Windows). What was in the folder before then is the
+   * desktop's to clear, not the person's; anything saved, moved or changed there from then on is not. Set only from such a removal: a kept record without it is the
+   * person's for as long as its folder exists.
+   */
+  detachedAt?: number
   /** Trusted restart-recovery record for syncing a rotated Codex OAuth refresh token before deleting the seat home. */
   codexAuthSync?: PersistedCodexAuthSync | null
 }
@@ -53,7 +60,9 @@ export class ReviewReservations {
     if (!UUID.test(record.launchId) || basename(record.root) !== record.launchId) throw new Error('Invalid reviewer folder')
     const held = this.holder(record.repository, record.number, record.reviewer)
     if (held) throw new Error(held.kept
-      ? `An earlier review of PR #${record.number} left changes in its worktree (${held.checkout}); look at it and remove it first.`
+      ? held.detachedAt !== undefined
+        ? `The folder of an earlier review of PR #${record.number} is still in use and could not be deleted (${held.root}); close what has it open, then try again.`
+        : `An earlier review of PR #${record.number} left changes in its worktree (${held.checkout}); look at it and remove it first.`
       : `PR #${record.number} already has a review starting or running.`)
     this.records.set(record.launchId, { ...record, taskId: null, createdAt: this.now(), kept: false })
     try { await this.save() } catch (error) { this.records.delete(record.launchId); throw error }
@@ -72,9 +81,20 @@ export class ReviewReservations {
     }
     await this.save()
   }
-  async keep(launchId: string): Promise<void> {
-    const r = this.records.get(launchId); if (!r || r.kept) return
-    this.records.set(launchId, { ...r, kept: true }); await this.save()
+  /**
+   * Keeps the record with its folder. `detachedAt` is given when a clean removal took the worktree out and only the
+   * folder stayed: the time that removal began, so nothing saved from then on counts as the desktop's leftover.
+   */
+  async keep(launchId: string, detachedAt?: number): Promise<void> {
+    const detached = detachedAt !== undefined && Number.isFinite(detachedAt)
+    const r = this.records.get(launchId); if (!r || (r.kept && (r.detachedAt !== undefined || !detached))) return
+    this.records.set(launchId, { ...r, kept: true, ...(detached ? { detachedAt } : {}) }); await this.save()
+  }
+  /** The leftover folder turned out to hold something saved after the removal: the record is the person's again. */
+  async undetach(launchId: string): Promise<void> {
+    const r = this.records.get(launchId); if (!r || r.detachedAt === undefined) return
+    const { detachedAt: _removed, ...rest } = r
+    this.records.set(launchId, rest); await this.save()
   }
   async release(launchId: string): Promise<void> {
     if (!this.records.delete(launchId)) return
@@ -106,5 +126,6 @@ function valid(value: unknown): value is ReviewReservation {
     && typeof v.reviewer === 'string' && typeof v.project === 'string' && typeof v.root === 'string' && basename(v.root) === v.launchId
     && typeof v.checkout === 'string' && typeof v.ref === 'string' && v.ref === `refs/desktop-review/${v.launchId}`
     && (v.taskId === null || typeof v.taskId === 'string') && Number.isFinite(v.createdAt) && typeof v.kept === 'boolean'
+    && (v.detachedAt === undefined || (typeof v.detachedAt === 'number' && Number.isFinite(v.detachedAt)))
     && (v.codexAuthSync === undefined || v.codexAuthSync === null || validCodexAuthSync(v.codexAuthSync, v.root))
 }

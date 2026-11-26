@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, renameSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
 import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
@@ -180,6 +181,178 @@ test('a credential in the project\'s own Git config refuses the review, named by
     const kinds = await projectCredentialSettings(f.runner, project)
     assert.deepEqual(kinds.sort(), ['a URL rewrite with a user name or token', 'a credential helper', 'a remote URL with a user name or token', 'an http extraHeader'].sort())
     assert.doesNotMatch(kinds.join(' '), /SECRET/)
+  } finally { f.cleanup() }
+})
+
+test('a folder a clean removal left behind goes on a later try, also with its .git file; an unrecorded one is not touched', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    // What a removal that failed part-way can leave on Windows: the project no longer registers the worktree, but its
+    // folder is still there, with the worktree's .git file (a handle held on it) and other files.
+    const leftover = async (): Promise<Awaited<ReturnType<typeof createReviewerArea>>> => {
+      const area = await createReviewerArea(join(f.root, 'reviewers'))
+      await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+      const marker = readFileSync(join(area.checkout, '.git'), 'utf8')
+      rmSync(join(area.checkout, '.git'))
+      f.plain(project, 'worktree', 'prune')
+      writeFileSync(join(area.checkout, '.git'), marker)
+      await new Promise((done) => setTimeout(done, 30))
+      return area
+    }
+    // Without a record that Git detached it while clean, an unregistered folder with a .git file is left alone.
+    const unknown = await leftover()
+    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner), { outcome: 'kept', reason: 'unregistered' })
+    assert.ok(existsSync(join(unknown.checkout, 'a.txt')))
+    // With that record, the same state is cleared: folder and ref.
+    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
+    assert.equal(existsSync(unknown.root), false)
+    assert.throws(() => f.plain(project, 'rev-parse', '--verify', unknown.ref), 'its ref goes with it')
+    // A file saved in the leftover folder after the removal is the person's: nothing is deleted.
+    const noted = await leftover()
+    const removedAt = Date.now()
+    await new Promise((done) => setTimeout(done, 30))
+    mkdirSync(join(noted.checkout, 'notes'))
+    writeFileSync(join(noted.checkout, 'notes', 'recovery.txt'), 'saved after the worktree was removed')
+    const keptNote = await removeReviewerAreaDetailed(noted, f.runner, { detachedAt: removedAt })
+    assert.equal(keptNote.outcome === 'kept' && keptNote.reason, 'dirty')
+    assert.match(keptNote.outcome === 'kept' ? keptNote.detail ?? '' : '', /recovery\.txt was saved after/)
+    assert.ok(existsSync(join(noted.checkout, 'notes', 'recovery.txt')))
+    // So is a file moved in afterwards, although a move keeps the file's own creation and write times.
+    const movedInto = await leftover()
+    writeFileSync(join(f.root, 'old-note.txt'), 'written long before')
+    await new Promise((done) => setTimeout(done, 30))
+    const movedCutoff = Date.now()
+    await new Promise((done) => setTimeout(done, 30))
+    renameSync(join(f.root, 'old-note.txt'), join(movedInto.checkout, 'old-note.txt'))
+    assert.ok(statSync(join(movedInto.checkout, 'old-note.txt')).mtimeMs < movedCutoff, 'the move kept the write time')
+    const keptMoved = await removeReviewerAreaDetailed(movedInto, f.runner, { detachedAt: movedCutoff })
+    assert.equal(keptMoved.outcome === 'kept' && keptMoved.reason, 'dirty')
+    assert.ok(existsSync(join(movedInto.checkout, 'old-note.txt')))
+    // Git gives a later review's worktree the entry name this one had ("checkout"). The old pointer then names an
+    // entry that exists but belongs to the other checkout: still stale, and the other review is not touched.
+    const first = await leftover()
+    const second = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, second, { head, base }, 7)
+    assert.equal(readFileSync(join(first.checkout, '.git'), 'utf8'), readFileSync(join(second.checkout, '.git'), 'utf8'), 'Git reused the entry')
+    assert.deepEqual(await removeReviewerAreaDetailed(first, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
+    assert.equal(f.plain(second.checkout, 'rev-parse', 'HEAD').trim(), head)
+    // The entry's own checkout is real Git metadata even with the record.
+    assert.equal((await removeReviewerAreaDetailed(second, f.runner)).outcome, 'removed')
+    // A repository someone made of the leftover folder is real Git metadata: the record does not let it go.
+    const recovered = await leftover()
+    rmSync(join(recovered.checkout, '.git'))
+    f.plain(recovered.checkout, 'init', '-q')
+    f.plain(recovered.checkout, 'add', '-A'); f.plain(recovered.checkout, 'commit', '-qm', 'recovered by the person')
+    assert.deepEqual(await removeReviewerAreaDetailed(recovered, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
+    assert.match(f.plain(recovered.checkout, 'log', '--oneline'), /recovered by the person/)
+    // So is a .git file that points anywhere but a missing entry of this project's own worktrees folder.
+    const foreign = await leftover()
+    writeFileSync(join(foreign.checkout, '.git'), `gitdir: ${join(f.root, 'not-the-project', 'worktrees', 'gone')}\n`)
+    assert.deepEqual(await removeReviewerAreaDetailed(foreign, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
+    assert.ok(existsSync(join(foreign.checkout, 'a.txt')))
+    // The record does not weaken the path guard: a checkout that is not this review's own folder is never removed.
+    const linked = await leftover()
+    const elsewhere = join(f.root, 'elsewhere'); mkdirSync(elsewhere); writeFileSync(join(elsewhere, 'mine.txt'), 'the person\'s')
+    rmSync(linked.checkout, { recursive: true, force: true })
+    let linkMade = true
+    try { symlinkSync(elsewhere, linked.checkout, 'junction') } catch { linkMade = false }
+    if (linkMade) {
+      assert.deepEqual(await removeReviewerAreaDetailed(linked, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
+      assert.ok(existsSync(join(elsewhere, 'mine.txt')))
+    }
+    // A worktree still registered goes through the usual check even with the record: changes keep it.
+    const dirty = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, dirty, { head, base }, 7)
+    writeFileSync(join(dirty.checkout, 'reviewer-notes.txt'), 'kept for the person')
+    assert.deepEqual(await removeReviewerAreaDetailed(dirty, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'dirty' })
+    assert.ok(existsSync(join(dirty.checkout, 'reviewer-notes.txt')))
+  } finally { f.cleanup() }
+})
+
+test('a clean worktree whose folder cannot be deleted is reported as detached, and goes once the folder is free', { skip: process.platform !== 'win32' }, async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  let holder: ChildProcess | null = null
+  try {
+    const { upstream, project, base, head } = repos(f)
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+    // A process whose working folder is the checkout (a reviewer's leftover child) keeps Windows from deleting it.
+    holder = spawn(process.execPath, ['-e', 'process.stdout.write("up");setInterval(()=>{},1000)'], { cwd: area.checkout, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((done, fail) => { holder!.stdout!.once('data', () => done()); holder!.once('error', fail) })
+    await new Promise((done) => setTimeout(done, 30))
+    const started = Date.now()
+    // A note saved after Git took the worktree out, while the removal is still going on, is not its leftover.
+    const savingRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        const result = await f.runner.run(req)
+        if (req.args[0] === 'worktree' && req.args[1] === 'remove' && existsSync(area.checkout) && !existsSync(join(area.checkout, 'during.txt'))) {
+          writeFileSync(join(area.checkout, 'during.txt'), 'saved while the removal was running')
+        }
+        return result
+      },
+    } as unknown as typeof f.runner
+    const held = await removeReviewerAreaDetailed(area, savingRunner, { retryDelaysMs: [5, 5], folderRetries: 1 })
+    assert.ok(Date.now() - started < 20_000, 'a held folder is given up on quickly')
+    const cutoff = held.outcome === 'kept' ? held.detachedAt : undefined
+    assert.ok(typeof cutoff === 'number' && cutoff >= started && cutoff <= statSync(join(area.checkout, 'during.txt')).mtimeMs, 'the cutoff is from before Git was asked')
+    assert.equal(held.outcome, 'kept')
+    assert.equal(held.outcome === 'kept' && held.reason, 'detached', 'Git took the clean worktree out; only the folder stayed')
+    assert.ok(existsSync(area.checkout))
+    assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), new RegExp(basename(area.root)))
+    const exited = new Promise<void>((done) => holder!.once('exit', () => done()))
+    holder.kill(); await exited; holder = null
+    const withNote = await removeReviewerAreaDetailed(area, f.runner, { detachedAt: cutoff })
+    assert.equal(withNote.outcome === 'kept' && withNote.reason, 'dirty', 'the note saved during the removal keeps the folder')
+    assert.ok(existsSync(join(area.checkout, 'during.txt')))
+    // Once the person has taken their note, what the removal left goes.
+    rmSync(join(area.checkout, 'during.txt'))
+    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detachedAt: cutoff }), { outcome: 'removed' })
+    assert.equal(existsSync(area.root), false)
+  } finally { holder?.kill(); f.cleanup() }
+})
+
+test('a kept reservation records a detached removal, keeps it across a restart, and never loses it', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const path = join(f.root, 'reservations.json')
+    const store = new ReviewReservations(path)
+    const mk = (n: number): { launchId: string; root: string } => { const a = planReviewerArea(join(f.root, 'reviewers')); return { launchId: basename(a.root), root: a.root } }
+    const a = mk(1), b = mk(2)
+    for (const [r, number] of [[a, 1], [b, 2]] as const) {
+      await store.reserve({ launchId: r.launchId, repository: 'o/r', number, reviewer: 'x', project: f.root, root: r.root, checkout: join(r.root, 'checkout'), ref: `refs/desktop-review/${r.launchId}` })
+    }
+    // Kept for the person (changes, or an outcome nobody recorded): not detached.
+    await store.keep(a.launchId)
+    assert.equal(store.holder('o/r', 1, 'x')?.kept, true)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, undefined)
+    // A later clean removal that only left the folder upgrades it; a plain keep after that does not take it back.
+    await store.keep(a.launchId, 1_000)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, 1_000)
+    await store.keep(a.launchId)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, 1_000)
+    await store.keep(b.launchId, 2_000)
+    const reread = new ReviewReservations(path)
+    assert.equal(reread.holder('o/r', 1, 'x')?.detachedAt, 1_000)
+    assert.equal(reread.holder('o/r', 2, 'x')?.detachedAt, 2_000)
+    // A new start of the same review says what is in the way: changes for the person, or a folder still in use.
+    const again = mk(3)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 1, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /still in use and could not be deleted/)
+    const c = mk(4)
+    await store.reserve({ launchId: c.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: c.root, checkout: join(c.root, 'checkout'), ref: `refs/desktop-review/${c.launchId}` })
+    await store.keep(c.launchId)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /left changes in its worktree/)
+    // Something saved in the leftover folder later makes the record the person's again, with the message for changes.
+    await store.undetach(b.launchId)
+    assert.equal(store.holder('o/r', 2, 'x')?.kept, true)
+    assert.equal(store.holder('o/r', 2, 'x')?.detachedAt, undefined)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 2, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /left changes in its worktree/)
+    // A record whose time is not a number is not trusted at all.
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>[]
+    raw[0]!.detachedAt = 'yes'
+    writeFileSync(path, JSON.stringify(raw))
+    const tampered = new ReviewReservations(path)
+    assert.equal(tampered.list().length, 2)
   } finally { f.cleanup() }
 })
 
