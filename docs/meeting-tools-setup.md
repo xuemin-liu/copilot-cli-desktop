@@ -19,8 +19,9 @@ This page is the one-time setup per agent. How meetings work is in the [README](
 The port can be changed by starting the desktop with the environment variable `COPILOT_DESKTOP_MEETING_MCP_PORT` set; then
 use that port below. If the port is taken (on Windows, Hyper-V and WSL can reserve a range that includes it), the desktop
 serves the tools on a free port the system picks instead, and its log names that port. Use the address the meeting bar
-shows: an agent set up with `47391`, or with a fallback port from an earlier run, cannot connect, and a fallback port can
-change each time the desktop restarts. To keep one address, set `COPILOT_DESKTOP_MEETING_MCP_PORT` to a port that is free.
+shows, or before any meeting is open, the one **File → Host a Meeting from an Outside Agent…** shows: an agent set up
+with `47391`, or with a fallback port from an earlier run, cannot connect, and a fallback port can change each time the
+desktop restarts. To keep one address, set `COPILOT_DESKTOP_MEETING_MCP_PORT` to a port that is free.
 Only if no port at all can be had does the desktop leave the tools out of its invitations, and agents use the helper
 instead (see [Without the tools](#without-the-tools)).
 

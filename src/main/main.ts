@@ -7431,7 +7431,9 @@ async function inviteHostFromMenu(): Promise<void> {
     type: 'question' as const,
     title: 'Host a meeting from an outside agent',
     message: 'Let an outside agent, such as Claude Code, host a review meeting?',
-    detail: 'You get an invitation to paste into the agent. It starts the meeting and answers the reviewers you add. To let it attach its uncommitted changes, pick its project folder.',
+    // With no meeting open there is no meeting bar to show the address, and a short invitation needs the agent to reach it.
+    detail: 'You get an invitation to paste into the agent. It starts the meeting and answers the reviewers you add. To let it attach its uncommitted changes, pick its project folder.'
+      + (guestMcp.usesFallbackPort() ? `\n\nThe usual port for the meeting tools was taken, so this run serves them at ${guestMcp.url()}. An agent set up with another address needs this one, and it can change when the desktop restarts.` : ''),
     buttons: ['Pick a Project Folder…', 'No Changes', 'Cancel'],
     defaultId: 0,
     cancelId: 2,
