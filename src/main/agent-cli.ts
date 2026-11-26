@@ -242,20 +242,21 @@ export function antigravityDataRoot(env: NodeJS.ProcessEnv = process.env): strin
  * Whether Claude Code has one of these folders recorded as trusted (`projects[<folder>].hasTrustDialogAccepted` in its
  * `.claude.json`). An interactive session in a folder it does not trust stops at "Do you trust this folder?", and a
  * worktree takes its trust from its main repository's folder. Anything that cannot be read counts as not trusted.
+ *
+ * Claude Code looks a folder up under one exact key: its path with forward slashes, letter case as the folder is
+ * spelled. A record under another spelling (backslashes, or a drive letter in the other case) is one it does not find,
+ * so it does not count here either; a folder given with backslashes is asked about under its forward-slash key.
  */
 export async function claudeProjectTrusted(folders: readonly (string | null | undefined)[], env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  const spelling = (folder: string): string => {
-    const plain = folder.replace(/\\/g, '/').replace(/\/+$/, '')
-    return process.platform === 'win32' ? plain.toLowerCase() : plain
-  }
-  const wanted = new Set(folders.filter((folder): folder is string => typeof folder === 'string' && folder.trim() !== '').map(spelling))
+  const key = (folder: string): string => folder.replace(/\\/g, '/').replace(/\/+$/, '')
+  const wanted = new Set(folders.filter((folder): folder is string => typeof folder === 'string' && folder.trim() !== '').map(key))
   if (!wanted.size) return false
   const file = env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, '.claude.json') : join(homedir(), '.claude.json')
   try {
     const projects = (JSON.parse(await readFile(file, 'utf8')) as { projects?: unknown }).projects
     if (!projects || typeof projects !== 'object') return false
     return Object.entries(projects as Record<string, unknown>).some(([folder, value]) => (
-      wanted.has(spelling(folder)) && (value as { hasTrustDialogAccepted?: unknown } | null)?.hasTrustDialogAccepted === true
+      wanted.has(folder) && (value as { hasTrustDialogAccepted?: unknown } | null)?.hasTrustDialogAccepted === true
     ))
   } catch { return false }
 }
