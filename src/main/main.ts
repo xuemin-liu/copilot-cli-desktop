@@ -189,6 +189,7 @@ import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree, resolveProjectWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
+import { loopbackPeerPid } from './loopback-peer.js'
 import { MeetingGrants, type GrantAnswer, type GrantQuestion } from './meeting-grants.js'
 import { hostPath, isSameOrInside, samePath } from './host-path.js'
 import { desktopPosixPath } from './posix-executables.js'
@@ -2566,6 +2567,20 @@ function meetingTabTag(tabId: string): string {
 
 function meetingTabTagsFolder(): string { return join(guestRoot(), 'tabs') }
 
+/** Match Antigravity's shared MCP connection to the tab whose process opened it. */
+async function antigravityMeetingTabTag(clientPort: number, serverPort: number): Promise<string | null> {
+  const candidates = tabsState.tabs.flatMap((tab) => {
+    if (tab.cli !== 'antigravity' || tab.remote || tab.sideChat || tab.tempReviewer) return []
+    const session = managedTabs.get(tab.id)?.session
+    const pid = session?.processId
+    return session && pid ? [{ id: tab.id, session, pid }] : []
+  })
+  const pid = await loopbackPeerPid(clientPort, serverPort, candidates.map((candidate) => candidate.pid))
+  const owner = candidates.find((candidate) => candidate.pid === pid)
+  if (!owner || managedTabs.get(owner.id)?.session !== owner.session || owner.session.processId !== pid) return null
+  return meetingTabTag(owner.id)
+}
+
 /**
  * Flags that point a Claude Code or Codex tab at the meeting tools by its tagged address. They name the server the setup
  * guide names, so they take the place of the person's own entry for this process only. Antigravity reads one shared file.
@@ -4628,7 +4643,7 @@ const meetingControl = new MeetingControlServer(handleMeetingCommand, {
 }, writeGuestEndpoint)
 
 // Start MCP before tabs can connect. The meeting hub tracks when restored meetings are ready to join.
-const guestMcp = new GuestMcpServer(guestMailbox, guestDeps, () => broadcastState())
+const guestMcp = new GuestMcpServer(guestMailbox, guestDeps, () => broadcastState(), antigravityMeetingTabTag)
 
 async function startGuestMcp(): Promise<void> {
   const configured = Number(process.env.COPILOT_DESKTOP_MEETING_MCP_PORT ?? DEFAULT_GUEST_MCP_PORT)

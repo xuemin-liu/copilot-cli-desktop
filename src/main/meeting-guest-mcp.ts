@@ -242,7 +242,10 @@ const rpcError = (id: unknown, code: number, message: string): unknown => ({ jso
 const toolText = (text: string, isError = false): unknown => ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) })
 
 /** One JSON-RPC message from an MCP client. `sessionId` is its `Mcp-Session-Id` header. */
-export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: GuestMailbox, deps: GuestDeps, sessionId: string | undefined, message: unknown, signal?: AbortSignal, desktopTag: string | null = null): Promise<McpAnswer> {
+export async function handleMcpMessage(
+  sessions: GuestMcpSessions, mailbox: GuestMailbox, deps: GuestDeps, sessionId: string | undefined, message: unknown,
+  signal?: AbortSignal, desktopTag: string | null = null, antigravityTabTag?: () => Promise<string | null>,
+): Promise<McpAnswer> {
   if (!isRecord(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
     // A response or something else that is not a request: nothing to answer.
     if (isRecord(message) && message.jsonrpc === '2.0' && ('result' in message || 'error' in message)) return { status: 202 }
@@ -276,6 +279,12 @@ export async function handleMcpMessage(sessions: GuestMcpSessions, mailbox: Gues
       const thread = isRecord(params._meta) ? params._meta.threadId : null
       if (seat && session.desktopTag !== null) mailbox.setDesktopTag(seat, session.desktopTag)
       if (seat && isCodexClient(session.client) && typeof thread === 'string' && CODEX_THREAD_PATTERN.test(thread)) mailbox.setCodexThread(seat, thread)
+      // Antigravity shares one MCP URL across tabs. Resolve its connection only when it gets a meeting seat.
+      if (seat && session.desktopTag === null && antigravityTabTag && /^antigravity(?:[-_ ](?:cli|client))?$/i.test(session.client ?? '')
+        && (name === 'meeting_join' || name === 'meeting_start') && isRecord(result) && !result.isError && seat.closed === null) {
+        const tag = await antigravityTabTag().catch(() => null)
+        if (tag !== null && session.seatId === seat.id && seat.closed === null) mailbox.setDesktopTag(seat, tag)
+      }
       return { status: 200, body: { jsonrpc: '2.0', id, result: withWakeRequest(sessions, session, mailbox, seat, name, result) } }
     }
     default: return { status: 200, body: rpcError(id, -32601, `Method not found: ${method}`) }
@@ -502,7 +511,12 @@ export class GuestMcpServer {
   private port = 0
   readonly sessions = new GuestMcpSessions()
 
-  constructor(private readonly mailbox: GuestMailbox, private readonly deps: GuestDeps, private readonly changed: () => void = () => {}) {}
+  constructor(
+    private readonly mailbox: GuestMailbox,
+    private readonly deps: GuestDeps,
+    private readonly changed: () => void = () => {},
+    private readonly antigravityTabTag?: (clientPort: number, serverPort: number) => Promise<string | null>,
+  ) {}
 
   /** The port it listens on, or null when that port is taken (the helper still works then). */
   listen(port: number): Promise<number | null> {
@@ -555,7 +569,12 @@ export class GuestMcpServer {
       try { message = JSON.parse(raw.toString('utf8')) } catch { send(400, rpcError(null, -32700, 'Parse error')); return }
       if (Array.isArray(message)) { send(400, rpcError(null, -32600, 'Batches are not supported')); return }
       const desktopTag = new URL(request.url ?? '', 'http://127.0.0.1').searchParams.get('tab')
-      const answer = await handleMcpMessage(this.sessions, this.mailbox, this.deps, sessionId, message, gone.signal, desktopTag)
+      const clientPort = request.socket.remotePort
+      const identifyTab = this.antigravityTabTag
+      const lookup = identifyTab && request.socket.remoteAddress === '127.0.0.1' && clientPort !== undefined
+        ? () => identifyTab(clientPort, this.port)
+        : undefined
+      const answer = await handleMcpMessage(this.sessions, this.mailbox, this.deps, sessionId, message, gone.signal, desktopTag, lookup)
       send(answer.status, answer.body, answer.sessionId ? { 'mcp-session-id': answer.sessionId } : {})
     } catch {
       send(500, rpcError(null, -32603, 'The desktop could not handle the request'))

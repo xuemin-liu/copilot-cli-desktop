@@ -6,6 +6,7 @@ import { MeetingHub, realMeetingTimers } from './meeting.js'
 import { meetingWaitingOn } from './meeting-contact.js'
 import { GuestMailbox, GUEST_PAGE_CHARS, GUEST_STAY_IN_TURN, guestDeliveryText, type GuestDeps } from './meeting-guests.js'
 import { agentName, GUEST_MCP_TOOLS, GuestMcpServer, GuestMcpSessions, handleMcpMessage, type McpAnswer } from './meeting-guest-mcp.js'
+import { loopbackPeerPid } from './loopback-peer.js'
 import { roundPaths } from './meeting-messages.js'
 
 const MEETINGS = join('C:', 'meetings')
@@ -238,6 +239,43 @@ test('the tag in the address a desktop tab launched its agent with goes on the s
     assert.equal(mailbox.views().find((view) => view.name === 'Tagged')!.desktopTag, tag, 'main reads it from the views')
     assert.equal(await joinFrom('/mcp?tab=not-a-tag', 'Malformed'), null)
     assert.equal(await joinFrom('/mcp', 'Untagged'), null)
+  } finally {
+    await server.close()
+  }
+})
+
+test('the shared Antigravity endpoint associates host and reviewer seats with the tab that owns the socket', {
+  skip: !['win32', 'darwin', 'linux'].includes(process.platform),
+}, async () => {
+  const { mailbox, deps } = meeting()
+  const tag = '0123456789abcdef0123456789abcdef'
+  let tabPids = [process.pid, process.ppid]
+  let lookups = 0
+  const server = new GuestMcpServer(mailbox, { ...deps, isOpen: () => true, join: () => null }, undefined, async (clientPort, serverPort) => {
+    lookups++
+    return await loopbackPeerPid(clientPort, serverPort, tabPids) === process.pid ? tag : null
+  })
+  const port = (await server.listen(0))!
+  const json = { 'content-type': 'application/json' }
+  const callFrom = async (client: string, tool: string, args: Record<string, unknown>): Promise<void> => {
+    const init = await http(port, 'POST', json, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: client } } }))
+    const headers = { ...json, 'mcp-session-id': String(init.headers['mcp-session-id']) }
+    const response = await http(port, 'POST', headers, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }))
+    assert.equal(response.status, 200)
+    assert.equal(JSON.parse(response.body).result.isError, undefined)
+  }
+  try {
+    await callFrom('antigravity-client', 'meeting_start', { name: 'Host', topic: 'Review plan', post: 'Plan' })
+    await callFrom('antigravity-cli', 'meeting_join', { name: 'Reviewer', meeting: 'K7QF' })
+    tabPids = [process.ppid]
+    await callFrom('antigravity-client', 'meeting_join', { name: 'Outside Antigravity', meeting: 'K7QF' })
+    await callFrom('claude-code', 'meeting_join', { name: 'Outside Claude', meeting: 'K7QF' })
+    assert.equal(lookups, 3)
+    const seats = new Map(mailbox.views().map((seat) => [seat.name, seat.desktopTag]))
+    assert.equal(seats.get('Host'), tag)
+    assert.equal(seats.get('Reviewer'), tag)
+    assert.equal(seats.get('Outside Antigravity'), null)
+    assert.equal(seats.get('Outside Claude'), null)
   } finally {
     await server.close()
   }
