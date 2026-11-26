@@ -5162,8 +5162,12 @@ async function startGuestMcp(): Promise<void> {
   const port = Number.isInteger(configured) && configured >= 0 && configured <= 65535 ? configured : DEFAULT_GUEST_MCP_PORT
   // Claude Code tabs of an earlier run pointed at these; this run gives its tabs new tags.
   await rm(meetingTabTagsFolder(), { recursive: true, force: true }).catch(() => {})
-  if (await guestMcp.listen(port) === null) {
-    await writeAppLog(`The meeting tools could not listen on port ${port}; outside agents can still use the helper.`).catch(() => {})
+  // A taken port used to leave the tools off for the whole run, which also left temporary PR reviewers unavailable.
+  const listening = await guestMcp.listenPreferring(port)
+  if (listening === null) {
+    await writeAppLog(`The meeting tools could not listen on port ${port} or on any free port; outside agents can still use the helper.`).catch(() => {})
+  } else if (listening.fallback) {
+    await writeAppLog(`Port ${port} was taken, so the meeting tools listen on port ${listening.port}; tabs started now get that address.`).catch(() => {})
   }
 }
 
