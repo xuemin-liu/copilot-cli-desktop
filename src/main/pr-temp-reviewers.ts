@@ -369,18 +369,30 @@ export function reviewerHelperDirAccess(
 /**
  * Whether a non-Copilot reviewer runs in its CLI's one-shot mode. Claude Code's (`-p`) prints nothing until its final
  * answer, so its hidden reviewer tab would stay blank for the whole review. It runs interactively instead, where its
- * work shows in the tab. An interactive seat does not exit when its review is posted and reports no idle state, so it
- * settles by its receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at
- * the latest by the round timer.
+ * work shows in the tab, but only when Claude Code already trusts the project (`claudeProjectTrusted`): otherwise the
+ * interactive session would stop at its workspace trust question, which one-shot mode skips, and a hidden seat cannot
+ * answer. An interactive seat does not exit when its review is posted and reports no idle state, so it settles by its
+ * receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at the latest by the
+ * round timer.
  */
-export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean): boolean {
-  return reviewerAllowAll && cli !== 'claude'
+export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
+  return reviewerAllowAll && (cli !== 'claude' || !claudeTrustsProject)
+}
+
+/** Whether these Claude Code arguments start it in bypass-permissions mode, by either spelling of the flag. */
+export function claudeBypassesPermissions(args: readonly string[]): boolean {
+  return args.some((arg, index) => (
+    arg === '--dangerously-skip-permissions'
+    || arg === '--permission-mode=bypassPermissions'
+    || (arg === '--permission-mode' && args[index + 1] === 'bypassPermissions')
+  ))
 }
 
 /**
- * The running seats whose review can only be found by asking the PR host: those of a non-Copilot CLI that runs
+ * The running seats whose review may only be found by asking the PR host: those of a non-Copilot CLI that can run
  * interactively, in a group that is under way. A one-shot seat is checked when it exits, and a Copilot seat when it
- * goes idle.
+ * goes idle. Claude Code counts whenever allow-all is on, although it runs one-shot in a project it does not trust:
+ * asking early about a seat that will also be checked at its exit costs a request and changes nothing.
  */
 export function interactiveSeatsToReconcile(
   groups: readonly TempReviewerGroup[],
@@ -390,7 +402,7 @@ export function interactiveSeatsToReconcile(
   for (const group of groups) {
     if (group.stage !== 'active') continue
     for (const seat of group.requiredSeats.values()) {
-      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, reviewerAllowAll)) continue
+      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, reviewerAllowAll, true)) continue
       found.push({ group, seat })
     }
   }

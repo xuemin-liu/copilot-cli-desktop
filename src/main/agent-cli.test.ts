@@ -12,6 +12,7 @@ import {
   antigravityDataRoot,
   antigravitySessionStored,
   buildAgentCliArgs,
+  claudeProjectTrusted,
   claudeSessionStored,
   codexAcceptsMcpOverride,
   resolveAgentCli,
@@ -539,4 +540,30 @@ test('AntigravitySessionDiscovery skips a conversation another tab claimed and s
     assert.equal(await discovery.find(), null)
     assert.equal(polls, 3)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('claudeProjectTrusted reads trust for a project folder from Claude Code\'s own record, by either path spelling', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-trust-'))
+  try {
+    const env = { CLAUDE_CONFIG_DIR: dir }
+    const project = join(dir, 'Work', 'project')
+    // No record yet: not trusted.
+    assert.equal(await claudeProjectTrusted([project], env), false)
+    await writeFile(join(dir, '.claude.json'), JSON.stringify({ projects: {
+      [project.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true },
+      [join(dir, 'declined')]: { hasTrustDialogAccepted: false },
+      [join(dir, 'odd')]: { hasTrustDialogAccepted: 'true' },
+    } }))
+    assert.equal(await claudeProjectTrusted([project], env), true)
+    assert.equal(await claudeProjectTrusted([`${project}${process.platform === 'win32' ? '\\' : '/'}`], env), true, 'a trailing separator is the same folder')
+    // A worktree is trusted through its main repository's folder, given beside it.
+    assert.equal(await claudeProjectTrusted([join(dir, 'worktree'), null, project], env), true)
+    assert.equal(await claudeProjectTrusted([join(dir, 'declined')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'odd')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'Work')], env), false, 'a parent folder is not the project')
+    assert.equal(await claudeProjectTrusted([null, undefined, ''], env), false)
+    // An unreadable record counts as not trusted.
+    await writeFile(join(dir, '.claude.json'), '{ not json')
+    assert.equal(await claudeProjectTrusted([project], env), false)
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })

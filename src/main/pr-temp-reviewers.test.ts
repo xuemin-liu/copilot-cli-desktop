@@ -19,6 +19,7 @@ import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
+  claudeBypassesPermissions,
   interactiveSeatsToReconcile,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
@@ -237,7 +238,19 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
 
   // Claude Code's one-shot mode prints nothing until it ends, so it stays interactive; the others run one-shot with allow-all.
-  assert.equal(otherCliReviewerOneShot('claude', true), false)
+  assert.equal(otherCliReviewerOneShot('claude', true, true), false)
+  // In a project Claude Code does not trust, interactive would stop at its trust question: it stays one-shot.
+  assert.equal(otherCliReviewerOneShot('claude', true, false), true)
+  assert.equal(otherCliReviewerOneShot('claude', true), true)
+  assert.equal(otherCliReviewerOneShot('claude', false, true), false)
+  assert.equal(otherCliReviewerOneShot('codex', true, true), true)
+  // Bypass mode is recognised by either spelling, wherever the arguments came from.
+  assert.equal(claudeBypassesPermissions(['--model', 'x', '--dangerously-skip-permissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode', 'bypassPermissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode=bypassPermissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode', 'acceptEdits']), false)
+  assert.equal(claudeBypassesPermissions(['--model', 'bypassPermissions']), false)
+  assert.equal(claudeBypassesPermissions([]), false)
   assert.equal(otherCliReviewerOneShot('codex', true), true)
   assert.equal(otherCliReviewerOneShot('antigravity', true), true)
   assert.equal(otherCliReviewerOneShot('codex', false), false)

@@ -140,7 +140,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeProjectTrusted, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
@@ -160,6 +160,7 @@ import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
+  claudeBypassesPermissions,
   interactiveSeatsToReconcile,
   buildReviewerBrief,
   CLAUDE_REVIEWER_SETTINGS_FILE,
@@ -4201,7 +4202,13 @@ async function launchTempReviewerSeat(
     const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
     const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
-    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, allowAllArgs.includes('--dangerously-skip-permissions'))
+    // Claude Code runs interactively (its work shows in the tab) only where it will not stop at its workspace trust
+    // question: the reviewer checkout is a worktree, which takes its trust from the project's main repository folder.
+    const claudeTrustsProject = cli === 'claude' && allowAll && await claudeProjectTrusted([
+      group.projectPath,
+      area.commonDir && basename(area.commonDir) === '.git' ? dirname(area.commonDir) : null,
+    ])
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, cli === 'claude' && claudeBypassesPermissions(configArgs))
     if (helperAccess.settings !== null) {
       await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
     }
@@ -4228,7 +4235,7 @@ async function launchTempReviewerSeat(
       generation: seat.generation,
       prompt,
       help,
-      oneShot: otherCliReviewerOneShot(cli, allowAll),
+      oneShot: otherCliReviewerOneShot(cli, allowAll, claudeTrustsProject),
       resumeSessionId: verifiedResumeId,
     })
     if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
