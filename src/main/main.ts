@@ -160,6 +160,7 @@ import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
+  interactiveSeatsToReconcile,
   buildReviewerBrief,
   CLAUDE_REVIEWER_SETTINGS_FILE,
   cleanupReviewerSeatCredentials,
@@ -3916,8 +3917,32 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
   })
 }
 
+let interactiveSeatReconciler: NodeJS.Timeout | null = null
+let reconcilingInteractiveSeats = false
+/**
+ * An interactive reviewer seat does not exit when its review is posted and reports no idle state, so once a minute the
+ * PR host is asked whether the review of each such running seat is there. Nothing found changes nothing: the seat keeps
+ * running until its receipt, a later check or the round timer.
+ */
+function ensureInteractiveSeatReconciler(): void {
+  if (interactiveSeatReconciler) return
+  interactiveSeatReconciler = setInterval(() => {
+    if (reconcilingInteractiveSeats || shuttingDown()) return
+    reconcilingInteractiveSeats = true
+    void (async () => {
+      try {
+        for (const { group, seat } of interactiveSeatsToReconcile(tempReviewers.list(), desktopConfig.reviewerAllowAll)) {
+          await reconcileTempReviewerSeatEvidence(group, seat, 'idle', { expectedRound: group.round, expectedGeneration: seat.generation }).catch(() => {})
+        }
+      } finally { reconcilingInteractiveSeats = false }
+    })()
+  }, 60_000)
+  interactiveSeatReconciler.unref?.()
+}
+
 function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSeat): void {
   clearTempSeatTimer(seat)
+  ensureInteractiveSeatReconciler()
   const expectedGen = seat.generation
   const expectedRound = group.round
   const timeoutMs = configuredTempReviewerTimeoutMs()
@@ -4176,7 +4201,7 @@ async function launchTempReviewerSeat(
     const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
     const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
-    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath)
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, allowAllArgs.includes('--dangerously-skip-permissions'))
     if (helperAccess.settings !== null) {
       await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
     }

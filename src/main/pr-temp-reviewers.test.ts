@@ -19,6 +19,7 @@ import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
+  interactiveSeatsToReconcile,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -240,6 +241,26 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.equal(otherCliReviewerOneShot('codex', true), true)
   assert.equal(otherCliReviewerOneShot('antigravity', true), true)
   assert.equal(otherCliReviewerOneShot('codex', false), false)
+
+  // With --dangerously-skip-permissions, the interactive session's bypass notice is answered in the same settings file.
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --settings <file-or-json>', '/tmp/helper', '/tmp/helper/claude-settings.json', true),
+    { args: ['--settings', '/tmp/helper/claude-settings.json'], settings: '{"permissions":{"additionalDirectories":["/tmp/helper"]},"skipDangerousModePermissionPrompt":true}' },
+  )
+  assert.equal(reviewerHelperDirAccess('claude', '  --settings <file-or-json>', '/tmp/helper', '/tmp/x.json', false).settings, '{"permissions":{"additionalDirectories":["/tmp/helper"]}}')
+  assert.deepEqual(reviewerHelperDirAccess('codex', '  --add-dir <dir>', '/tmp/helper', '/tmp/x.json', true), { args: ['--add-dir', '/tmp/helper'], settings: null })
+
+  // Only running seats of an interactive non-Copilot CLI, in a group under way, are asked about at the PR host.
+  const seatOf = (cli: string, lifecycle: string): unknown => ({ cli, lifecycle })
+  const groupOf = (stage: string, seats: unknown[]): unknown => ({ stage, requiredSeats: new Map(seats.map((s) => [(s as { cli: string }).cli, s])) })
+  const groups = [
+    groupOf('active', [seatOf('claude', 'running'), seatOf('codex', 'running'), seatOf('antigravity', 'running'), seatOf('copilot', 'running')]),
+    groupOf('active', [seatOf('claude', 'approved')]),
+    groupOf('starting', [seatOf('claude', 'running')]),
+    groupOf('ended', [seatOf('claude', 'running')]),
+  ] as Parameters<typeof interactiveSeatsToReconcile>[0]
+  assert.deepEqual(interactiveSeatsToReconcile(groups, true).map(({ seat }) => seat.cli), ['claude'])
+  assert.deepEqual(interactiveSeatsToReconcile(groups, false).map(({ seat }) => seat.cli), ['claude', 'codex', 'antigravity'])
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {

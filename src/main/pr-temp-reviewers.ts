@@ -341,17 +341,26 @@ export const CLAUDE_REVIEWER_SETTINGS_FILE = 'claude-settings.json'
  * new for each seat, so a hidden session would wait there forever. The same folder named in a settings file
  * (`permissions.additionalDirectories`) is granted without the prompt. `settings` is that file's content to write at
  * `settingsPath` before launch, or null when no file is needed.
+ *
+ * `bypassPermissions` says the launch carries `--dangerously-skip-permissions`. An interactive Claude Code session then
+ * shows its "Bypass Permissions mode" notice, with "No, exit" as the default, unless acceptance is recorded in a
+ * settings file; the person already agreed to that flag in the desktop's own consent for hidden reviewers, so the same
+ * file records it and the hidden session does not wait there on a computer where Claude Code has not been used so.
  */
 export function reviewerHelperDirAccess(
   cli: Exclude<ReviewerCli, 'copilot'>,
   help: string | null,
   helper: string,
   settingsPath: string,
+  bypassPermissions = false,
 ): { args: string[]; settings: string | null } {
   if (cli === 'claude' && help && helpListsFlag(help, '--settings')) {
     return {
       args: ['--settings', settingsPath],
-      settings: JSON.stringify({ permissions: { additionalDirectories: [helper] } }),
+      settings: JSON.stringify({
+        permissions: { additionalDirectories: [helper] },
+        ...(bypassPermissions ? { skipDangerousModePermissionPrompt: true } : {}),
+      }),
     }
   }
   return { args: help && helpListsFlag(help, '--add-dir') ? ['--add-dir', helper] : [], settings: null }
@@ -360,11 +369,32 @@ export function reviewerHelperDirAccess(
 /**
  * Whether a non-Copilot reviewer runs in its CLI's one-shot mode. Claude Code's (`-p`) prints nothing until its final
  * answer, so its hidden reviewer tab would stay blank for the whole review. It runs interactively instead, where its
- * work shows in the tab, and its seat settles by its receipt, the PR host's evidence or the round timer rather than
- * by its exit.
+ * work shows in the tab. An interactive seat does not exit when its review is posted and reports no idle state, so it
+ * settles by its receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at
+ * the latest by the round timer.
  */
 export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean): boolean {
   return reviewerAllowAll && cli !== 'claude'
+}
+
+/**
+ * The running seats whose review can only be found by asking the PR host: those of a non-Copilot CLI that runs
+ * interactively, in a group that is under way. A one-shot seat is checked when it exits, and a Copilot seat when it
+ * goes idle.
+ */
+export function interactiveSeatsToReconcile(
+  groups: readonly TempReviewerGroup[],
+  reviewerAllowAll: boolean,
+): { group: TempReviewerGroup; seat: TempReviewerSeat }[] {
+  const found: { group: TempReviewerGroup; seat: TempReviewerSeat }[] = []
+  for (const group of groups) {
+    if (group.stage !== 'active') continue
+    for (const seat of group.requiredSeats.values()) {
+      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, reviewerAllowAll)) continue
+      found.push({ group, seat })
+    }
+  }
+  return found
 }
 
 /**
