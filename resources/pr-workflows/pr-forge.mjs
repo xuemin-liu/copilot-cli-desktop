@@ -250,19 +250,63 @@ export function resolveForgeEndpoint({
   }
 }
 
-export function readForgeCredentials(endpoint) {
+function matchConfiguredEnvOrigin(endpoint, envVarNames) {
+  const configured = envVarNames
+    .map((name) => String(process.env[name] ?? '').trim())
+    .filter((v) => v.length > 0)
+  if (configured.length === 0) return 'unbound'
+  for (const raw of configured) {
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        if (new URL(raw).origin.toLowerCase() === String(endpoint.httpOrigin ?? '').toLowerCase()) return 'matches'
+      } catch {
+        // Malformed URL cannot match.
+      }
+    } else {
+      const normalized = raw.replace(/^\/+|\/+$/g, '').toLowerCase()
+      if (normalized === String(endpoint.host ?? '').toLowerCase() || normalized === String(endpoint.hostname ?? '').toLowerCase()) {
+        return 'matches'
+      }
+    }
+  }
+  return 'mismatches'
+}
+
+function readEnvForgeCredential(endpoint) {
   if (endpoint.forge === 'gitea') {
-    const envTok = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN || ''
-    if (envTok.trim()) return { kind: 'token', token: envTok.trim() }
+    const envTok = (process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN || '').trim()
+    if (!envTok) return { cred: null, binding: 'unbound' }
+    return {
+      cred: { kind: 'token', token: envTok },
+      binding: matchConfiguredEnvOrigin(endpoint, ['GITEA_URL', 'GITEA_HOST', 'FORGEJO_URL', 'FORGEJO_HOST']),
+    }
   }
   if (endpoint.forge === 'gitlab') {
-    const envTok = process.env.GITLAB_TOKEN || ''
-    if (envTok.trim()) return { kind: 'gitlab-token', token: envTok.trim() }
+    const envTok = (process.env.GITLAB_TOKEN || '').trim()
+    if (!envTok) return { cred: null, binding: 'unbound' }
+    return {
+      cred: { kind: 'gitlab-token', token: envTok },
+      binding: matchConfiguredEnvOrigin(endpoint, ['GITLAB_URL', 'GITLAB_HOST']),
+    }
   }
   if (endpoint.forge === 'github') {
-    const envTok = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || ''
-    if (envTok.trim()) return { kind: 'bearer', token: envTok.trim() }
+    const envTok = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
+    if (!envTok) return { cred: null, binding: 'unbound' }
+    return {
+      cred: { kind: 'bearer', token: envTok },
+      binding: matchConfiguredEnvOrigin(endpoint, ['GH_HOST']),
+    }
   }
+  return { cred: null, binding: 'unbound' }
+}
+
+export function readForgeCredentials(endpoint) {
+  const envResult = readEnvForgeCredential(endpoint)
+  // 1. An env token explicitly bound to this exact origin/host wins immediately.
+  if (envResult.binding === 'matches' && envResult.cred) {
+    return envResult.cred
+  }
+  // 2. Otherwise prefer host-scoped `git credential fill` so a second forge instance never receives another host's ambient token.
   try {
     const out = execFileSync('git', ['credential', 'fill'], {
       cwd: endpoint.cwd,
@@ -279,18 +323,24 @@ export function readForgeCredentials(endpoint) {
     }
     const username = fields.get('username') ?? ''
     const password = fields.get('password') ?? ''
-    if (!password) return null
-    if (endpoint.forge === 'gitlab') {
-      return username && username !== 'oauth2'
+    if (password) {
+      if (endpoint.forge === 'gitlab') {
+        return username && username !== 'oauth2'
+          ? { kind: 'basic', basic: Buffer.from(`${username}:${password}`, 'utf8').toString('base64') }
+          : { kind: 'gitlab-token', token: password }
+      }
+      return username
         ? { kind: 'basic', basic: Buffer.from(`${username}:${password}`, 'utf8').toString('base64') }
-        : { kind: 'gitlab-token', token: password }
+        : { kind: 'token', token: password }
     }
-    return username
-      ? { kind: 'basic', basic: Buffer.from(`${username}:${password}`, 'utf8').toString('base64') }
-      : { kind: 'token', token: password }
   } catch {
-    return null
+    // Fall through to unbound ambient env token below if git credential fill failed or returned nothing.
   }
+  // 3. Fall back to an unbound ambient env token ONLY when no host-scoped Git credential exists and no conflicting origin/host env var is set.
+  if (envResult.binding === 'unbound' && envResult.cred) {
+    return envResult.cred
+  }
+  return null
 }
 
 function buildAuthHeaders(cred) {

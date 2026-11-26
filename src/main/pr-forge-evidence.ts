@@ -232,20 +232,69 @@ async function readHostBoundGitCredentials(
     : { authorization: `token ${password}` }
 }
 
+function matchConfiguredEnvOrigin(
+  endpoint: Pick<ParsedForgeEndpoint, 'httpOrigin' | 'host' | 'hostname'>,
+  envVarNames: readonly string[],
+): 'matches' | 'mismatches' | 'unbound' {
+  const configured = envVarNames
+    .map((name) => process.env[name]?.trim() ?? '')
+    .filter((v) => v.length > 0)
+  if (configured.length === 0) return 'unbound'
+  for (const raw of configured) {
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        if (new URL(raw).origin.toLowerCase() === endpoint.httpOrigin.toLowerCase()) return 'matches'
+      } catch {
+        // Malformed URL cannot match.
+      }
+    } else {
+      const normalized = raw.replace(/^\/+|\/+$/g, '').toLowerCase()
+      if (normalized === endpoint.host.toLowerCase() || normalized === endpoint.hostname.toLowerCase()) {
+        return 'matches'
+      }
+    }
+  }
+  return 'mismatches'
+}
+
+function readEnvForgeCredentials(
+  endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'httpOrigin' | 'host' | 'hostname'>,
+): { headers: Record<string, string>; binding: 'matches' | 'mismatches' | 'unbound' } {
+  if (endpoint.forge === 'gitea') {
+    const tok = (process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN || '').trim()
+    if (!tok) return { headers: {}, binding: 'unbound' }
+    const binding = matchConfiguredEnvOrigin(endpoint, ['GITEA_URL', 'GITEA_HOST', 'FORGEJO_URL', 'FORGEJO_HOST'])
+    return { headers: { authorization: `token ${tok}` }, binding }
+  }
+  if (endpoint.forge === 'gitlab') {
+    const tok = (process.env.GITLAB_TOKEN || '').trim()
+    if (!tok) return { headers: {}, binding: 'unbound' }
+    const binding = matchConfiguredEnvOrigin(endpoint, ['GITLAB_URL', 'GITLAB_HOST'])
+    return { headers: { 'private-token': tok }, binding }
+  }
+  return { headers: {}, binding: 'unbound' }
+}
+
 async function readCredentialsViaGit(
   runner: GitRunner | null,
   cwd: string,
-  endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'protocol' | 'host'>,
+  endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'protocol' | 'host' | 'hostname' | 'httpOrigin'>,
 ): Promise<Record<string, string>> {
-  if (endpoint.forge === 'gitea' || endpoint.forge === 'probe') {
-    const tok = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN
-    if (tok?.trim()) return { authorization: `token ${tok.trim()}` }
+  const envCred = readEnvForgeCredentials(endpoint)
+  // 1. An env token explicitly bound to this exact origin/host wins immediately.
+  if (envCred.binding === 'matches' && Object.keys(envCred.headers).length > 0) {
+    return envCred.headers
   }
-  if (endpoint.forge === 'gitlab' || endpoint.forge === 'probe') {
-    const tok = process.env.GITLAB_TOKEN
-    if (tok?.trim() && endpoint.forge === 'gitlab') return { 'private-token': tok.trim() }
+  // 2. Otherwise prefer host-scoped `git credential fill` so a second forge instance never receives another host's ambient token.
+  const hostBound = await readHostBoundGitCredentials(runner, cwd, endpoint)
+  if (Object.keys(hostBound).length > 0) {
+    return hostBound
   }
-  return readHostBoundGitCredentials(runner, cwd, endpoint)
+  // 3. Fall back to an unbound ambient env token ONLY when no host-scoped Git credential exists and no conflicting host/origin env var is set.
+  if (envCred.binding === 'unbound' && Object.keys(envCred.headers).length > 0) {
+    return envCred.headers
+  }
+  return {}
 }
 
 async function safeForgeFetchResponse(httpOrigin: string, apiPath: string, authHeaders: Record<string, string>, timeoutMs = 25_000): Promise<{ data: unknown; headers: Headers }> {

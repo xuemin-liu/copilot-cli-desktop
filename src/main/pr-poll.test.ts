@@ -1471,13 +1471,15 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     }
 
     // Gitea REQUIRE_SIGNIN_VIEW=true: first /api/v1/version probe is unauthenticated (gets 403), then retries ONLY with host-bound
-    // `git credential fill` credential (NEVER process-wide GITEA_TOKEN!) and resolves to 'gitea'!
-    const signinAuthSeen: Array<string | undefined> = []
+    // `git credential fill` credential (NEVER process-wide GITEA_TOKEN!), AND subsequent evidence reads (`fetchForgePullEvidence` + `pr-poll.mjs`)
+    // ALSO use the host-scoped Git credential instead of leaking ambient `GITEA_TOKEN`!
+    const signinVersionAuthSeen: Array<string | undefined> = []
+    const signinEvidenceAuthSeen: Array<{ path: string; authorization: string | undefined }> = []
     const expectedBasic = `Basic ${Buffer.from('alice:host-bound-secret', 'utf8').toString('base64')}`
     const signinGiteaServer = createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
       if (url.pathname === '/api/v1/version') {
-        signinAuthSeen.push(req.headers.authorization)
+        signinVersionAuthSeen.push(req.headers.authorization)
         if (req.headers.authorization === expectedBasic) {
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ version: '1.22.0' }))
@@ -1487,12 +1489,41 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         res.end(JSON.stringify({ message: 'Only signed in user is allowed to call APIs.' }))
         return
       }
+      signinEvidenceAuthSeen.push({ path: url.pathname, authorization: req.headers.authorization })
+      if (req.headers.authorization !== expectedBasic) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Host-bound credential required; ambient token rejected.' }))
+        return
+      }
+      if (url.pathname === '/api/v1/user') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ id: 7, login: 'alice' }))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/service/pulls/12') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          number: 12,
+          state: 'open',
+          merged: false,
+          user: { id: 7, login: 'alice' },
+          head: { ref: 'feat/p', sha: HEAD_1, repo: { id: 1, full_name: 'daq/service' } },
+          base: { ref: 'main', sha: BASE_1, repo: { id: 1, full_name: 'daq/service' } },
+        }))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/service/pulls/12/reviews' || url.pathname === '/api/v1/repos/daq/service/issues/12/comments') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify([]))
+        return
+      }
       res.writeHead(404, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ message: 'Not Found' }))
     })
     const signinPort = await listenServer(signinGiteaServer)
     const prevGitCfgGlobal = process.env.GIT_CONFIG_GLOBAL
     const prevGitCfgNoSys = process.env.GIT_CONFIG_NOSYSTEM
+    const prevGiteaUrl = process.env.GITEA_URL
     try {
       const credsFile = join(emptyGhCfg, 'git-creds').replace(/\\/g, '/')
       const gitCfgFile = join(emptyGhCfg, 'gitconfig')
@@ -1501,10 +1532,12 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
       process.env.GIT_CONFIG_GLOBAL = gitCfgFile
       process.env.GIT_CONFIG_NOSYSTEM = '1'
       const signinOrigin = `http://127.0.0.1:${signinPort}`
+      const signinPrUrl = `${signinOrigin}/daq/service/pulls/12`
+      const signinGitOrigin = `${signinOrigin}/daq/service.git`
       const signinEp = resolveTrustedForgeEndpoint({
-        origin: `${signinOrigin}/daq/service.git`,
+        origin: signinGitOrigin,
         prNumber: 12,
-        prUrl: `${signinOrigin}/daq/service/pulls/12`,
+        prUrl: signinPrUrl,
       })
       assert.equal(signinEp?.forge, 'probe')
       const verifiedSignin = await resolveVerifiedForgeKind({
@@ -1513,8 +1546,59 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         runner: {} as GitRunner,
       })
       assert.equal(verifiedSignin?.forge, 'gitea', 'REQUIRE_SIGNIN_VIEW Gitea recovers via host-bound git credential after 403')
-      assert.deepEqual(signinAuthSeen, [undefined, expectedBasic], 'first probe unauthenticated, retry uses host-bound git credential only (never GITEA_TOKEN)')
+      assert.deepEqual(signinVersionAuthSeen, [undefined, expectedBasic], 'first probe unauthenticated, retry uses host-bound git credential only (never GITEA_TOKEN)')
+
+      // Desktop evidence read ALSO sends host-bound git credential (NEVER ambient GITEA_TOKEN):
+      const privateSnap = await fetchForgePullEvidence({
+        endpoint: verifiedSignin!,
+        userDataDir: emptyGhCfg,
+        projectCwd: emptyGhCfg,
+        runner: {} as GitRunner,
+      })
+      assert.equal(privateSnap.head, HEAD_1)
+      assert.ok(signinEvidenceAuthSeen.length >= 3)
+      for (const reqSeen of signinEvidenceAuthSeen) {
+        assert.equal(reqSeen.authorization, expectedBasic, `Desktop evidence GET ${reqSeen.path} used host-bound git credential, never ambient GITEA_TOKEN`)
+      }
+
+      // Standalone pr-poll.mjs ALSO prefers host-bound git credential over ambient GITEA_TOKEN:
+      const beforePollCount = signinEvidenceAuthSeen.length
+      const privatePollRes = await runNodeScript(
+        PR_POLL,
+        ['12', join(emptyGhCfg, 'private-gitea-state.json'), '--pr-url', signinPrUrl, '--origin', signinGitOrigin, '--snapshot'],
+        {
+          env: {
+            GIT_CONFIG_GLOBAL: gitCfgFile,
+            GIT_CONFIG_NOSYSTEM: '1',
+            GITEA_TOKEN: 'gitea_secret_never_leak',
+          },
+        },
+      )
+      assert.equal(privatePollRes.code, 0, privatePollRes.stderr)
+      assert.ok(signinEvidenceAuthSeen.length > beforePollCount)
+      for (const reqSeen of signinEvidenceAuthSeen.slice(beforePollCount)) {
+        assert.equal(reqSeen.authorization, expectedBasic, `pr-poll.mjs GET ${reqSeen.path} used host-bound git credential, never ambient GITEA_TOKEN`)
+      }
+
+      // When GITEA_URL explicitly binds GITEA_TOKEN to a different origin and NO git credential exists for this host, GITEA_TOKEN MUST NOT be sent!
+      writeFileSync(credsFile, '')
+      process.env.GITEA_URL = 'https://other-gitea.corp.example'
+      const beforeMismatchCount = signinEvidenceAuthSeen.length
+      await assert.rejects(
+        fetchForgePullEvidence({
+          endpoint: verifiedSignin!,
+          userDataDir: emptyGhCfg,
+          projectCwd: emptyGhCfg,
+          runner: {} as GitRunner,
+        }),
+        /failed \(401\)/,
+      )
+      for (const reqSeen of signinEvidenceAuthSeen.slice(beforeMismatchCount)) {
+        assert.equal(reqSeen.authorization, undefined, `mismatched GITEA_URL prevented leaking GITEA_TOKEN to ${reqSeen.path}`)
+      }
     } finally {
+      if (prevGiteaUrl === undefined) delete process.env.GITEA_URL
+      else process.env.GITEA_URL = prevGiteaUrl
       if (prevGitCfgGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
       else process.env.GIT_CONFIG_GLOBAL = prevGitCfgGlobal
       if (prevGitCfgNoSys === undefined) delete process.env.GIT_CONFIG_NOSYSTEM
