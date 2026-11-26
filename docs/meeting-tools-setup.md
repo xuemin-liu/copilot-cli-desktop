@@ -17,7 +17,12 @@ This page is the one-time setup per agent. How meetings work is in the [README](
   on this computer, and refuses requests a web page could send.
 
 The port can be changed by starting the desktop with the environment variable `COPILOT_DESKTOP_MEETING_MCP_PORT` set; then
-use that port below. If the port is taken, the desktop leaves the tools out of its invitations, and agents use the helper
+use that port below. If the port is taken (on Windows, Hyper-V and WSL can reserve a range that includes it), the desktop
+serves the tools on a free port the system picks instead, and its log names that port. Use the address the meeting bar
+shows, or before any meeting is open, the one **File → Host a Meeting from an Outside Agent…** shows: an agent set up
+with `47391`, or with a fallback port from an earlier run, cannot connect, and a fallback port can change each time the
+desktop restarts. To keep one address, set `COPILOT_DESKTOP_MEETING_MCP_PORT` to a port that is free.
+Only if no port at all can be had does the desktop leave the tools out of its invitations, and agents use the helper
 instead (see [Without the tools](#without-the-tools)).
 
 ## Claude Code (CLI and desktop app) — tested
@@ -227,7 +232,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 
 | What you see | Why, and what to do |
 | --- | --- |
-| "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the port is taken (its log says so). Start or update the desktop. |
+| "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the agent has an old address: when port 47391 is taken the desktop uses another port (its log and the meeting bar name it), which can change on restart. Start or update the desktop, and give the agent the address on the meeting bar. |
 | The agent does not list the tools | The server was added after the session started: start a new session. In Codex, see the experimental flag above. |
 | The tools still say an invitation is required after updating | Reconnect the meeting MCP server or start a new agent session to refresh its cached tool descriptions. Check that the running desktop is 0.1.78 or later. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
@@ -235,4 +240,4 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | A notification that an agent stopped checking in, or **no contact since** on the meeting bar | The agent ended its turn and could not be woken, or is stuck on something like a permission prompt. Tell it to call `meeting_next` until the meeting is closed. **Last contact …, message delivered** means it was handed a message and has not answered: it may still be working. Once a wake-up brought no answer from it either, it counts as stopped and you are notified. |
 | "Too many wrong meeting ids in the last minute" | Five joins in the last minute named a meeting that is not open. Check the id on the meeting bar and try again a minute later. |
 | "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
-| The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |
+| The invitation has no meeting-tools section | The desktop is not serving the tools: it could not listen on any port (its log says so). Use the helper, or restart the desktop. |

@@ -1398,6 +1398,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     workflowDeliveryError: deliveryError??(meetingDeliveryNotices.size?`${meetingDeliveryNotices.size} meeting handoff(s) are waiting: ${[...meetingDeliveryNotices.values()][0]}. Other handoffs and recovery controls remain available.`:null),
     workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
+    meetingToolsFallback: guestMcp.usesFallbackPort(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
     desktopControlReadyTabIds: state.tabs.filter(tab => desktopControl?.isRegistered(tab.id)).map(tab => tab.id),
     ...(desktopControl ? { desktopControl: Object.fromEntries(state.tabs.map(tab => [tab.id, desktopControl!.view(tab.id)])) } : {}),
@@ -5610,8 +5611,12 @@ async function startGuestMcp(): Promise<void> {
   const port = Number.isInteger(configured) && configured >= 0 && configured <= 65535 ? configured : DEFAULT_GUEST_MCP_PORT
   // Claude Code tabs of an earlier run pointed at these; this run gives its tabs new tags.
   await rm(meetingTabTagsFolder(), { recursive: true, force: true }).catch(() => {})
-  if (await guestMcp.listen(port) === null) {
-    await writeAppLog(`The meeting tools could not listen on port ${port}; outside agents can still use the helper.`).catch(() => {})
+  // A taken port used to leave the tools off for the whole run, which also left temporary PR reviewers unavailable.
+  const listening = await guestMcp.listenPreferring(port)
+  if (listening === null) {
+    await writeAppLog(`The meeting tools could not listen on port ${port} or on any free port; outside agents can still use the helper.`).catch(() => {})
+  } else if (listening.fallback) {
+    await writeAppLog(`Port ${port} was taken, so the meeting tools listen on port ${listening.port}; tabs started now get that address.`).catch(() => {})
   }
 }
 
@@ -8388,7 +8393,9 @@ async function inviteHostFromMenu(): Promise<void> {
     type: 'question' as const,
     title: 'Host a meeting from an outside agent',
     message: 'Let an outside agent, such as Claude Code, host a review meeting?',
-    detail: 'You get an invitation to paste into the agent. It starts the meeting and answers the reviewers you add. To let it attach its uncommitted changes, pick its project folder.',
+    // With no meeting open there is no meeting bar to show the address, and a short invitation needs the agent to reach it.
+    detail: 'You get an invitation to paste into the agent. It starts the meeting and answers the reviewers you add. To let it attach its uncommitted changes, pick its project folder.'
+      + (guestMcp.usesFallbackPort() ? `\n\nThe usual port for the meeting tools was taken, so this run serves them at ${guestMcp.url()}. An agent set up with another address needs this one, and it can change when the desktop restarts.` : ''),
     buttons: ['Pick a Project Folder…', 'No Changes', 'Cancel'],
     defaultId: 0,
     cancelId: 2,

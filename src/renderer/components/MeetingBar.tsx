@@ -13,6 +13,8 @@ export interface MeetingBarProps {
   now?: number
   /** Where agents reach the meeting tools over MCP; null when they are not served (the helper still works). */
   toolsUrl?: string | null
+  /** The tools are on a fallback port this run, so an agent set up earlier may have a stale address. */
+  toolsFallback?: boolean
 }
 
 /**
@@ -73,7 +75,7 @@ export function formatMeetingCost(cost: MeetingView['cost'], withGuests = false)
  * The meetings the active session hosts or takes part in, with the person's controls: add a session, invite an outside
  * agent, remove a guest, open the transcript, let a paused meeting go on, stop it.
  */
-export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow, toolsUrl = null }: MeetingBarProps): JSX.Element | null {
+export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow, toolsUrl = null, toolsFallback = false }: MeetingBarProps): JSX.Element | null {
   const [clock, setClock] = useState(() => Date.now())
   const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && (meeting.hostGuest || meeting.participants.some((participant) => participant.guest)))
   useEffect(() => {
@@ -213,6 +215,7 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
                     <button type="button" className="meeting-bar-button"
                       onClick={() => { void window.copilotDesktop.copyText(meetingToolsSetup(toolsUrl)).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error))) }}>Copy</button>
                     {' '}Other agents take <code>{toolsUrl}</code> as a streamable HTTP server in their settings.
+                    {toolsFallback && ' The usual port was taken, so this run uses another one, which can change when the desktop restarts: give agents set up with an older address this one.'}
                   </span>
                 )}
               </div>

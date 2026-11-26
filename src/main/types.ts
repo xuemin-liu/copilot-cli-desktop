@@ -282,6 +282,8 @@ export interface DesktopState {
   tempReviewerGroups?: TempReviewerGroupView[]
   /** Where outside agents reach the meeting tools over MCP; null when the port was taken. Runtime-only. */
   meetingToolsUrl?: string | null
+  /** The tools listen on a port the OS picked because the usual one was taken; it can change when the desktop restarts. */
+  meetingToolsFallback?: boolean
   /** Desktop control is allowed in Settings on this platform. Runtime-only. */
   desktopControlAllowed?: boolean
   /** Sessions that started with desktop control's helper, so the person can turn it on for them. Runtime-only. */
