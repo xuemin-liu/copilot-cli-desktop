@@ -194,7 +194,7 @@ async function ensureCommitIn(runner: GitRunner, cwd: string, prefix: readonly s
   if (!await present()) throw new Error('The pull request\'s base commit could not be fetched; the next check tries again')
 }
 
-const REPO_AGENT_EXEC_CONFIG_RE = /^(?:\.mcp\.json|\.claude\/settings(?:\.local)?\.json|\.claude\/hooks\/|\.codex\/config\.toml|\.github\/copilot\/settings(?:\.local)?\.json|\.gemini\/settings\.json)(?:$|\/)/i
+const REPO_AGENT_EXEC_CONFIG_RE = /^(?:\.mcp\.json|\.vscode\/mcp\.json|\.claude\/settings(?:\.local)?\.json|\.claude\/hooks|\.codex\/config\.toml|\.codex\/hooks\.json|\.github\/copilot\/settings(?:\.local)?\.json|\.github\/hooks|\.gemini\/settings\.json)(?:$|\/)/i
 
 async function isOnOriginBranch(
   runner: GitRunner,

@@ -134,7 +134,7 @@ try {
   $meetingJson = $meetingBody | ConvertTo-Json -Compress
   $meetingBytes = [System.Text.Encoding]::UTF8.GetBytes($(if ($meetingJson) { $meetingJson } else { '{}' }))
   $meetingHeaders = @{ Authorization = 'Bearer ' + $meetingControl.token }
-  $meetingTimeout = $(if ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'wait' -or $meetingBody.action -eq 'start')) { 90 } else { 30 })
+  $meetingTimeout = $(if ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'wait' -or $meetingBody.action -eq 'start' -or $meetingBody.action -eq 'round')) { 90 } else { 30 })
   $meetingResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ('http://127.0.0.1:' + $meetingControl.port + '/' + $Command) -Headers $meetingHeaders -ContentType 'application/json; charset=utf-8' -Body $meetingBytes -TimeoutSec $meetingTimeout -MaximumRedirection 0
   $meetingResult = [System.Text.Encoding]::UTF8.GetString($meetingResponse.RawContentStream.ToArray()) | ConvertFrom-Json
   [Console]::Out.WriteLine($meetingResult.message)
@@ -244,7 +244,7 @@ fi
 work=$(mktemp -d) || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$work"; if [ -n "$task_report" ]; then rm -f -- "$task_report"; fi' EXIT
 max_time=30
-if [ "$command" = pr-reviewers ] && { [ "$action" = wait ] || [ "$action" = start ]; }; then max_time=90; fi
+if [ "$command" = pr-reviewers ] && { [ "$action" = wait ] || [ "$action" = start ] || [ "$action" = round ]; }; then max_time=90; fi
 {
   printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = %s\nmax-redirs = 0\n' "$max_time"
   printf 'header = "Authorization: Bearer %s"\n' "$token"
