@@ -143,8 +143,8 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
-import { provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCliChoice } from './session-cli.js'
+import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
+import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import {
   buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
@@ -1930,7 +1930,7 @@ async function buildSessionSpawnPlan(
     { ...inheritedEnvironment, ...configuredEnvironment },
     resolution.pathAdditions,
   )
-  if (!connectSessionId) {
+  if (!connectSessionId && shouldProvisionCliSkills('copilot', environment as NodeJS.ProcessEnv)) {
     await provisionPrWorkflowSkillsForCli('copilot', bundledPrWorkflows().tools, environment as NodeJS.ProcessEnv).catch(async (error) => {
       await writeAppLog(`Could not provision PR workflow skills for Copilot CLI: ${String(error)}`).catch(() => {})
     })
@@ -2294,6 +2294,16 @@ function activateWorkspace(folder: string, options: { general?: boolean } = {}):
   })
 }
 
+function isScriptedDevLaunch(): boolean {
+  return !app.isPackaged && !existsSync(join(app.getAppPath(), 'resources', 'pr-workflows'))
+}
+
+function shouldProvisionCliSkills(cli: SessionCli, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1') return false
+  if (isScriptedDevLaunch()) return cliHasExplicitEnvOverride(cli, env)
+  return true
+}
+
 function bundledPrWorkflows(): { tools: string; state: string } {
   const devRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
   const appPathCandidate = join(app.getAppPath(), 'resources', 'pr-workflows')
@@ -2522,9 +2532,11 @@ async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResoluti
   if (resolution.version !== null) {
     const prWorkflows = bundledPrWorkflows()
     await mkdir(prWorkflows.state, { recursive: true, mode: 0o700 }).catch(() => {})
-    await provisionPrWorkflowSkillsForCli(cli, prWorkflows.tools, process.env).catch(async (error) => {
-      await writeAppLog(`Could not provision PR workflow skills for ${sessionCliLabel(cli)}: ${String(error)}`).catch(() => {})
-    })
+    if (shouldProvisionCliSkills(cli, process.env)) {
+      await provisionPrWorkflowSkillsForCli(cli, prWorkflows.tools, process.env).catch(async (error) => {
+        await writeAppLog(`Could not provision PR workflow skills for ${sessionCliLabel(cli)}: ${String(error)}`).catch(() => {})
+      })
+    }
     if (cli === 'antigravity') {
       const url = guestMcp.url()
       if (url !== null) {
@@ -8394,11 +8406,15 @@ if (!app.requestSingleInstanceLock()) {
     credentialStore = new SecureCredentialStore(protectedCredentialPath(), protectedStorage(safeStorage), (message) => void writeAppLog(message))
 
     await startGuestMcp()
-    await provisionExistingCliPrWorkflowSkills(bundledPrWorkflows().tools, process.env).catch((error) => {
-      void writeAppLog(`Could not provision PR workflow skills at startup: ${String(error)}`).catch(() => {})
-    })
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'
+    if (!packageSmokeTest) {
+      await provisionExistingCliPrWorkflowSkills(bundledPrWorkflows().tools, process.env, undefined, {
+        onlyExplicitEnvOverrides: isScriptedDevLaunch(),
+      }).catch((error) => {
+        void writeAppLog(`Could not provision PR workflow skills at startup: ${String(error)}`).catch(() => {})
+      })
+    }
     mainWindow = createWindow(!startHidden, packageSmokeTest
       ? {
         didFinishLoad: () => {

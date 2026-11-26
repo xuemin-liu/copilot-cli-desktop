@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import {
+  cliHasExplicitEnvOverride,
   cliSkillsLocations,
   MANAGED_SKILL_MARKER_FILE,
   PR_WORKFLOW_SKILL_NAMES,
@@ -157,4 +158,56 @@ test('provisionExistingCliPrWorkflowSkills only provisions CLIs whose config dir
   }
   await assert.rejects(stat(join(root, '.codex-missing')), { code: 'ENOENT' })
   await assert.rejects(stat(join(root, '.gemini-missing')), { code: 'ENOENT' })
+})
+
+test('allocates suffixed backup paths on repeated unmanaged replacements and supports onlyExplicitEnvOverrides', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pr-workflow-skills-multi-backup-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+
+  const codexHome = join(root, 'codex-home')
+  const reviewDir = join(codexHome, 'skills', 'review-pr')
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(reviewDir, 'SKILL.md'), '# First unmanaged install\n', 'utf8')
+  await writeFile(join(reviewDir, 'helper-a.py'), 'a = 1\n', 'utf8')
+
+  await provisionPrWorkflowSkillsForCli('codex', BUNDLED_PR_TOOLS, { CODEX_HOME: codexHome }, root)
+  assert.equal(await readFile(join(codexHome, '.copilot-desktop-skill-backups', 'review-pr', 'SKILL.md'), 'utf8'), '# First unmanaged install\n')
+
+  // Simulate user replacing skills/review-pr with a brand-new unmanaged directory (no .copilot-desktop-managed.json).
+  await rm(reviewDir, { recursive: true, force: true })
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(reviewDir, 'SKILL.md'), '# Second unmanaged install\n', 'utf8')
+  await writeFile(join(reviewDir, 'helper-b.py'), 'b = 2\n', 'utf8')
+
+  await provisionPrWorkflowSkillsForCli('codex', BUNDLED_PR_TOOLS, { CODEX_HOME: codexHome }, root)
+  assert.equal(
+    await readFile(join(codexHome, '.copilot-desktop-skill-backups', 'review-pr', 'SKILL.md'), 'utf8'),
+    '# First unmanaged install\n',
+    'first backup remains untouched',
+  )
+  assert.equal(
+    await readFile(join(codexHome, '.copilot-desktop-skill-backups', 'review-pr-2', 'SKILL.md'), 'utf8'),
+    '# Second unmanaged install\n',
+    'second unmanaged replacement is backed up to review-pr-2 instead of being deleted unbacked',
+  )
+  assert.equal(
+    await readFile(join(codexHome, '.copilot-desktop-skill-backups', 'review-pr-2', 'helper-b.py'), 'utf8'),
+    'b = 2\n',
+  )
+
+  // Verify onlyExplicitEnvOverrides leaves non-overridden home directories untouched.
+  const hostHome = join(root, 'host-home')
+  await mkdir(join(hostHome, '.claude'), { recursive: true })
+  await mkdir(join(hostHome, '.copilot'), { recursive: true })
+  assert.equal(cliHasExplicitEnvOverride('copilot', { COPILOT_HOME: join(hostHome, '.copilot') }), true)
+  assert.equal(cliHasExplicitEnvOverride('claude', { COPILOT_HOME: join(hostHome, '.copilot') }), false)
+
+  await provisionExistingCliPrWorkflowSkills(
+    BUNDLED_PR_TOOLS,
+    { COPILOT_HOME: join(hostHome, '.copilot') },
+    hostHome,
+    { onlyExplicitEnvOverrides: true },
+  )
+  assert.ok((await stat(join(hostHome, '.copilot', 'skills', 'review-and-fix-pr', 'SKILL.md'))).isFile())
+  await assert.rejects(stat(join(hostHome, '.claude', 'skills')), { code: 'ENOENT' })
 })

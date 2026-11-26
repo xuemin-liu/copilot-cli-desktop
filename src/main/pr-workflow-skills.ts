@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { cp, lstat, mkdir, readdir, readFile, readlink, rm, stat, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -21,6 +21,13 @@ export interface CliSkillsLocations {
   baseDir: string
   skillsDir: string
   backupsDir: string
+}
+
+export function cliHasExplicitEnvOverride(cli: SessionCli, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (cli === 'copilot') return Boolean(env.COPILOT_HOME?.trim())
+  if (cli === 'claude') return Boolean(env.CLAUDE_CONFIG_DIR?.trim())
+  if (cli === 'codex') return Boolean(env.CODEX_HOME?.trim())
+  return Boolean(env.ANTIGRAVITY_GEMINI_DIR?.trim())
 }
 
 function sha256Hex(content: string): string {
@@ -106,6 +113,25 @@ async function writeManagedSkill(
   await writeFileAtomic(join(skillDir, MANAGED_SKILL_MARKER_FILE), `${JSON.stringify(marker, null, 2)}\n`)
 }
 
+async function allocateBackupPath(backupsDir: string, baseName: string): Promise<string> {
+  const firstCandidate = join(backupsDir, baseName)
+  const firstStat = await lstat(firstCandidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+  if (!firstStat) return firstCandidate
+
+  for (let suffix = 2; suffix <= 1000; suffix += 1) {
+    const candidate = join(backupsDir, `${baseName}-${suffix}`)
+    const candidateStat = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (!candidateStat) return candidate
+  }
+  return join(backupsDir, `${baseName}-${randomUUID()}`)
+}
+
 async function provisionSingleSkill(
   locations: CliSkillsLocations,
   skillName: PrWorkflowSkillName,
@@ -127,9 +153,8 @@ async function provisionSingleSkill(
 
   if (existingStat.isSymbolicLink()) {
     const target = await readlink(skillDir).catch(() => '')
-    const symlinkBackupDir = join(locations.backupsDir, skillName)
-    const backupExists = await lstat(symlinkBackupDir).then(() => true, () => false)
-    if (!backupExists && target) {
+    if (target) {
+      const symlinkBackupDir = await allocateBackupPath(locations.backupsDir, skillName)
       await mkdir(symlinkBackupDir, { recursive: true })
       await writeFileAtomic(join(symlinkBackupDir, 'symlink-target.txt'), `${target}\n`)
     }
@@ -139,12 +164,9 @@ async function provisionSingleSkill(
   }
 
   if (!existingStat.isDirectory()) {
-    const fileBackupPath = join(locations.backupsDir, `${skillName}.bak`)
-    const backupExists = await lstat(fileBackupPath).then(() => true, () => false)
-    if (!backupExists) {
-      await mkdir(locations.backupsDir, { recursive: true })
-      await cp(skillDir, fileBackupPath)
-    }
+    await mkdir(locations.backupsDir, { recursive: true })
+    const fileBackupPath = await allocateBackupPath(locations.backupsDir, `${skillName}.bak`)
+    await cp(skillDir, fileBackupPath)
     await rm(skillDir, { force: true })
     await writeManagedSkill(skillDir, skillName, sourceContent, sourceSha256)
     return
@@ -177,16 +199,16 @@ async function provisionSingleSkill(
   }
 
   // Pre-existing directory without a Desktop marker (e.g. an older GitHub-only review-pr/fix-pr install):
-  // back it up once outside `skills/` so no CLI loads the backup as a duplicate skill, remove stale sibling
-  // files/scripts inside `skills/<name>`, and install Desktop's forge-agnostic skill.
-  const entries = await readdir(skillDir).catch(() => [] as string[])
+  // back it up to a non-colliding path outside `skills/` so no CLI loads the backup as a duplicate skill
+  // and no user files are ever deleted unbacked, then install Desktop's forge-agnostic skill.
+  const entries = await readdir(skillDir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return [] as string[]
+    throw error
+  })
   if (entries.length > 0 && !(entries.length === 1 && entries[0] === 'SKILL.md' && existingContent === sourceContent)) {
-    const backupDir = join(locations.backupsDir, skillName)
-    const backupExists = await lstat(backupDir).then(() => true, () => false)
-    if (!backupExists) {
-      await mkdir(locations.backupsDir, { recursive: true })
-      await cp(skillDir, backupDir, { recursive: true, verbatimSymlinks: true })
-    }
+    await mkdir(locations.backupsDir, { recursive: true })
+    const backupDir = await allocateBackupPath(locations.backupsDir, skillName)
+    await cp(skillDir, backupDir, { recursive: true, verbatimSymlinks: true })
     await rm(skillDir, { recursive: true, force: true })
   }
   await writeManagedSkill(skillDir, skillName, sourceContent, sourceSha256)
@@ -229,8 +251,10 @@ export async function provisionExistingCliPrWorkflowSkills(
   prToolsDir: string,
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
+  options: { onlyExplicitEnvOverrides?: boolean } = {},
 ): Promise<void> {
   await Promise.all(SESSION_CLIS.map(async (cli) => {
+    if (options.onlyExplicitEnvOverrides && !cliHasExplicitEnvOverride(cli, env)) return
     const { baseDir } = cliSkillsLocations(cli, env, home)
     const exists = await stat(baseDir).then((info) => info.isDirectory(), () => false)
     if (!exists) return
