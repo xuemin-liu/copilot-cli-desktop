@@ -1356,6 +1356,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     workflowDeliveryError: deliveryError??(meetingDeliveryNotices.size?`${meetingDeliveryNotices.size} meeting handoff(s) are waiting: ${[...meetingDeliveryNotices.values()][0]}. Other handoffs and recovery controls remain available.`:null),
     workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
+    meetingToolsFallback: guestMcp.usesFallbackPort(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
     desktopControlReadyTabIds: state.tabs.filter(tab => desktopControl?.isRegistered(tab.id)).map(tab => tab.id),
     ...(desktopControl ? { desktopControl: Object.fromEntries(state.tabs.map(tab => [tab.id, desktopControl!.view(tab.id)])) } : {}),

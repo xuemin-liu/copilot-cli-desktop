@@ -328,6 +328,7 @@ test('a taken preferred port falls back to a free one so the tools stay on', asy
     const listening = await server.listenPreferring(taken)
     assert.ok(listening, 'it listens somewhere')
     assert.equal(listening.fallback, true)
+    assert.equal(server.usesFallbackPort(), true, 'the meeting bar is told the address is a fallback')
     assert.notEqual(listening.port, taken)
     assert.equal(server.url(), `http://127.0.0.1:${listening.port}/mcp`)
     const answer = await http(listening.port, 'POST', { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }))
@@ -346,6 +347,7 @@ test('a free preferred port is used as is', async () => {
   const server = new GuestMcpServer(new GuestMailbox(realTimers), meeting().deps)
   try {
     assert.deepEqual(await server.listenPreferring(free), { port: free, fallback: false })
+    assert.equal(server.usesFallbackPort(), false)
   } finally {
     await server.close()
   }
