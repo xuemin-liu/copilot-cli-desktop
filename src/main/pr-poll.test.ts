@@ -355,37 +355,51 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       { env },
     )
 
-    // 4b. Edit made BETWEEN --snapshot and --mark MUST NOT be silently swallowed by --mark!
+    // 4b. Overlapping snapshots with identical numeric watermarks MUST NOT swallow edits made between Snapshot 1 and Snapshot 2!
     const snapBeforeRace = await runNodeScript(
       PR_POLL,
       ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
       { env },
     )
     assert.equal(snapBeforeRace.code, 0, snapBeforeRace.stderr)
+    const snap1Id = JSON.parse(snapBeforeRace.stdout).snapshotId as string
+    assert.ok(snap1Id, 'snapshot includes a unique snapshotId')
     reviews[0] = {
       ...reviews[0],
       body: 'Blocking: [Claude Code] edited between snapshot and mark',
       updated_at: '2026-11-26T00:02:30Z',
     }
-    await runNodeScript(
+    // Fetch a SECOND overlapping status snapshot BEFORE marking the first boundary!
+    const overlappingStatusSnap = await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
       { env },
     )
+    assert.equal(overlappingStatusSnap.code, 0, overlappingStatusSnap.stderr)
+    const snap2Id = JSON.parse(overlappingStatusSnap.stdout).snapshotId as string
+    assert.notEqual(snap2Id, snap1Id)
+
+    // Marking the first boundary (with --snapshot-id snap1Id) records snap1's versions, NOT snap2's!
+    const markSnap1 = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1, '--snapshot-id', snap1Id],
+      { env },
+    )
+    assert.equal(markSnap1.code, 0, markSnap1.stderr)
     const afterRacePoll = await runNodeScript(
       PR_POLL,
       ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin],
       { env },
     )
     assert.equal(afterRacePoll.code, 0, afterRacePoll.stderr)
-    assert.notEqual(afterRacePoll.stdout.trim(), 'NO_CHANGE', 'edit made between snapshot and mark must still wake next poll')
+    assert.notEqual(afterRacePoll.stdout.trim(), 'NO_CHANGE', 'edit made between overlapping snapshots must still wake next poll')
     const afterRaceJson = JSON.parse(afterRacePoll.stdout)
     assert.equal(afterRaceJson.edited, true)
     assert.match(afterRaceJson.newReviews[0].body, /edited between snapshot and mark/)
-    // Now mark the delivered edited version and verify subsequent poll returns NO_CHANGE:
+    // Now mark the delivered edited observation by its snapshotId and verify subsequent poll returns NO_CHANGE:
     await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1, '--snapshot-id', String(afterRaceJson.snapshotId)],
       { env },
     )
     const postRaceClean = await runNodeScript(
@@ -1306,9 +1320,16 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
   })
   assert.deepEqual(groupedNoReceipt, { verdict: 'findings', claimedKeys: ['inline:81'] }, 'inherits reviewer tag attribution from eligible parentReviewId without requiring a receipt')
 
-  // GitHub Enterprise detection supports host-pinned /api/v3/meta probing AND token-only GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN config (without GH_HOST or hosts.yml)!
+  // Forge discovery MUST send ZERO Authorization headers (never leaking GH_ENTERPRISE_TOKEN / GITEA_TOKEN / GITLAB_TOKEN to unverified hosts),
+  // AND host-bound ghConfigMayKnowHost MUST NOT admit unrelated hosts solely because a global Enterprise token is present!
+  const probeAuthHeadersSeen: Array<{ path: string; authorization: string | undefined; privateToken: string | undefined }> = []
   const gheServer = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    probeAuthHeadersSeen.push({
+      path: url.pathname,
+      authorization: req.headers.authorization,
+      privateToken: typeof req.headers['private-token'] === 'string' ? req.headers['private-token'] : undefined,
+    })
     if (url.pathname === '/api/v3/meta') {
       res.writeHead(200, {
         'content-type': 'application/json',
@@ -1326,25 +1347,30 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
     GH_ENTERPRISE_TOKEN: process.env.GH_ENTERPRISE_TOKEN,
     GITHUB_ENTERPRISE_TOKEN: process.env.GITHUB_ENTERPRISE_TOKEN,
+    GITEA_TOKEN: process.env.GITEA_TOKEN,
+    GITLAB_TOKEN: process.env.GITLAB_TOKEN,
     APPDATA: process.env.APPDATA,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
   }
   const emptyGhCfg = mkdtempSync(join(tmpdir(), 'empty-gh-cfg-'))
   try {
     delete process.env.GH_HOST
-    delete process.env.GH_ENTERPRISE_TOKEN
-    delete process.env.GITHUB_ENTERPRISE_TOKEN
+    process.env.GH_ENTERPRISE_TOKEN = 'ghp_enterprise_secret_never_leak'
+    process.env.GITHUB_ENTERPRISE_TOKEN = 'ghp_enterprise_alt_never_leak'
+    process.env.GITEA_TOKEN = 'gitea_secret_never_leak'
+    process.env.GITLAB_TOKEN = 'gitlab_secret_never_leak'
     process.env.GH_CONFIG_DIR = emptyGhCfg
     process.env.APPDATA = emptyGhCfg
     process.env.XDG_CONFIG_HOME = emptyGhCfg
-    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), false)
 
-    process.env.GH_ENTERPRISE_TOKEN = 'ghp_enterprise_only'
-    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), true, 'recognizes GH_ENTERPRISE_TOKEN without GH_HOST or hosts.yml')
-    delete process.env.GH_ENTERPRISE_TOKEN
-    process.env.GITHUB_ENTERPRISE_TOKEN = 'ghp_enterprise_alt'
-    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), true, 'recognizes GITHUB_ENTERPRISE_TOKEN without GH_HOST or hosts.yml')
+    // Presence of global GH_ENTERPRISE_TOKEN MUST NOT admit arbitrary hosts in ghConfigMayKnowHost without GH_HOST or hosts.yml!
+    assert.equal(ghConfigMayKnowHost('unrelated.corp.example'), false, 'global Enterprise token does not admit unrelated host')
+    process.env.GH_HOST = 'ghe.corp.example'
+    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), true, 'explicit GH_HOST admits only the matching host')
+    assert.equal(ghConfigMayKnowHost('unrelated.corp.example'), false)
+    delete process.env.GH_HOST
 
+    // Unauthenticated host-pinned /api/v3/meta probe identifies GitHub Enterprise WITHOUT sending any Authorization / Private-Token header!
     const gheOrigin = `http://127.0.0.1:${ghePort}`
     const gheProbeEp = resolveTrustedForgeEndpoint({
       origin: `${gheOrigin}/org/repo.git`,
@@ -1353,7 +1379,12 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     })
     assert.equal(gheProbeEp?.forge, 'probe')
     const verifiedGhe = await resolveVerifiedForgeKind({ endpoint: gheProbeEp!, projectCwd: tmpdir(), runner: null })
-    assert.equal(verifiedGhe?.forge, 'github', 'host-pinned /api/v3/meta probe identifies GitHub Enterprise')
+    assert.equal(verifiedGhe?.forge, 'github', 'host-pinned unauthenticated /api/v3/meta probe identifies GitHub Enterprise')
+    assert.ok(probeAuthHeadersSeen.length >= 2, 'probed /api/v1/version and /api/v3/meta')
+    for (const seen of probeAuthHeadersSeen) {
+      assert.equal(seen.authorization, undefined, `discovery probe ${seen.path} sent no Authorization header`)
+      assert.equal(seen.privateToken, undefined, `discovery probe ${seen.path} sent no Private-Token header`)
+    }
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k]

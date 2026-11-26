@@ -29,6 +29,7 @@ const VALUE_OPTIONS = new Set([
   '--through',
   '--head',
   '--base',
+  '--snapshot-id',
   '--max',
   '--allow-approver',
   '--require-tag',
@@ -146,9 +147,27 @@ async function evaluateOnce({ prArg, stateFile }) {
     next.headSha = nextHeadSha
     next.baseSha = nextBaseSha
     const prevVersions = typeof state.versions === 'object' && state.versions !== null ? state.versions : {}
-    const deliveredVersions = flag('--mark') && typeof state.lastDeliveredVersions === 'object' && state.lastDeliveredVersions !== null
-      ? state.lastDeliveredVersions
-      : null
+    const pendingSnapshots = Array.isArray(state.pendingSnapshots)
+      ? state.pendingSnapshots.filter((entry) => entry && typeof entry.id === 'string' && typeof entry.versions === 'object' && entry.versions !== null)
+      : []
+    const requestedSnapshotId = option('--snapshot-id')
+    let deliveredVersions = null
+    let remainingSnapshots = pendingSnapshots
+    if (flag('--mark')) {
+      if (requestedSnapshotId !== undefined) {
+        const idx = pendingSnapshots.findIndex((entry) => entry.id === requestedSnapshotId)
+        if (idx < 0) {
+          const err = new Error(`Unknown --snapshot-id "${requestedSnapshotId}"`)
+          err.exitCode = 2
+          throw err
+        }
+        deliveredVersions = pendingSnapshots[idx].versions
+        remainingSnapshots = pendingSnapshots.slice(idx + 1)
+      } else if (pendingSnapshots.length > 0) {
+        deliveredVersions = pendingSnapshots[0].versions
+        remainingSnapshots = pendingSnapshots.slice(1)
+      }
+    }
     next.versions = flag('--init')
       ? {
           reviews: buildLiveVersionMap(reviews),
@@ -160,6 +179,11 @@ async function evaluateOnce({ prArg, stateFile }) {
           inline: buildVersionMap(inline, next.maxInlineId, prevVersions.inline, deliveredVersions?.inline ?? null),
           issue: buildVersionMap(issue, next.maxIssueId, prevVersions.issue, deliveredVersions?.issue ?? null),
         }
+    if (flag('--init') || remainingSnapshots.length === 0) {
+      delete next.pendingSnapshots
+    } else {
+      next.pendingSnapshots = remainingSnapshots
+    }
     delete next.lastDeliveredVersions
     writeStateAtomically(next)
     return JSON.stringify({
@@ -234,16 +258,25 @@ async function evaluateOnce({ prArg, stateFile }) {
       })
     : { approvalForHead: false, approvedTags: [], missingTags: requiredTags, approvingItems: [] }
 
-  // Record the exact version hashes delivered to the caller so a later --mark records the handled snapshot,
-  // never silently swallowing edits made between snapshot/poll and --mark!
+  // Assign a unique identity to each delivered snapshot and append its version hashes so overlapping snapshots
+  // cannot overwrite the observation that a caller is still handling before calling --mark [--snapshot-id <id>].
+  const snapshotId = randomUUID()
+  const deliveredEntry = {
+    id: snapshotId,
+    versions: {
+      reviews: buildLiveVersionMap(reviews),
+      inline: buildLiveVersionMap(inline),
+      issue: buildLiveVersionMap(issue),
+    },
+  }
+  const existingPending = Array.isArray(state.pendingSnapshots)
+    ? state.pendingSnapshots.filter((entry) => entry && typeof entry.id === 'string' && typeof entry.versions === 'object' && entry.versions !== null)
+    : []
+  const nextPending = [...existingPending, deliveredEntry].slice(-32)
   try {
     writeStateAtomically({
       ...state,
-      lastDeliveredVersions: {
-        reviews: buildLiveVersionMap(reviews),
-        inline: buildLiveVersionMap(inline),
-        issue: buildLiveVersionMap(issue),
-      },
+      pendingSnapshots: nextPending,
     })
   } catch {
     // Ignore if stateFile's directory is read-only during a standalone --snapshot.
@@ -266,6 +299,7 @@ async function evaluateOnce({ prArg, stateFile }) {
 
   return JSON.stringify(
     {
+      snapshotId,
       ...(flag('--snapshot') ? { localChecksAllowed } : {}),
       forge: snapshot.forge,
       prState: meta.state,

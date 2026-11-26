@@ -385,10 +385,9 @@ async function probeGitHubEnterpriseEndpoint(
   httpOrigin: string,
   timeoutMs = 6_000,
 ): Promise<{ status: 'matched' } | { status: 'absent' } | { status: 'error'; reason: string }> {
-  const token = (process.env.GH_ENTERPRISE_TOKEN || process.env.GITHUB_ENTERPRISE_TOKEN || '').trim()
+  // Forge discovery MUST stay unauthenticated so global credentials are never sent to an unverified host.
   const headers: Record<string, string> = {
     accept: 'application/vnd.github+json',
-    ...(token ? { authorization: `Bearer ${token}` } : {}),
   }
   let res: Response
   try {
@@ -442,8 +441,9 @@ export function ghConfigMayKnowHost(hostname: string): boolean {
   ) {
     return false
   }
+  // Only host-bound gh configuration (`GH_HOST` or `hosts.yml`) admits a host to `gh auth status`;
+  // global `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` is used only AFTER host-pinned `/api/v3/meta` confirmation.
   if (process.env.GH_HOST?.trim().toLowerCase() === lower) return true
-  if (process.env.GH_ENTERPRISE_TOKEN?.trim() || process.env.GITHUB_ENTERPRISE_TOKEN?.trim()) return true
   const candidates = [
     process.env.GH_CONFIG_DIR ? join(process.env.GH_CONFIG_DIR, 'hosts.yml') : null,
     process.env.APPDATA ? join(process.env.APPDATA, 'GitHub CLI', 'hosts.yml') : null,
@@ -539,8 +539,8 @@ export async function resolveVerifiedForgeKind(options: {
 
   const probeErrors: string[] = []
 
-  const giteaAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitea' })
-  const giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', giteaAuth, 6_000)
+  // Keep forge discovery unauthenticated so process-wide credentials are never sent to an unverified host.
+  const giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', {}, 6_000)
   if (giteaProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitea')
     return { ...endpoint, forge: 'gitea' }
@@ -562,8 +562,7 @@ export async function resolveVerifiedForgeKind(options: {
     return { ...endpoint, forge: 'github' }
   }
 
-  const gitlabAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitlab' })
-  const gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', gitlabAuth, 6_000)
+  const gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', {}, 6_000)
   if (gitlabProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitlab')
     return { ...endpoint, forge: 'gitlab' }
