@@ -1,7 +1,7 @@
 import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
 import { githubRemoteRepository, type GithubSnapshot } from './workflow-github.js'
@@ -53,9 +53,51 @@ async function realPath(path: string): Promise<string> {
   try { return realpathSync.native(path) } catch { return resolve(path) }
 }
 
+/**
+ * Whether the checkout's `.git` is only what a removed worktree of this project left: a file (not a repository's
+ * folder) that points into the project's own `worktrees` folder at an entry that no longer exists. Anything else is
+ * real Git metadata and is not the desktop's to delete.
+ */
+async function staleWorktreePointer(runner: GitRunner, project: string, checkout: string): Promise<boolean> {
+  const marker = join(checkout, '.git')
+  const info = await lstat(marker).catch(() => null)
+  if (!info?.isFile() || info.size > 4096) return false
+  const pointed = /^gitdir: (.+?)\r?\n?$/.exec(await readFile(marker, 'utf8').catch(() => ''))?.[1]
+  if (!pointed) return false
+  const target = resolve(checkout, pointed)
+  if (await lstat(target).then(() => true, () => false)) {
+    // Every reviewer checkout is a folder named "checkout", so Git gives a later review's worktree the entry name this
+    // one had. The entry is this checkout's own only if it points back here; one that belongs to another checkout
+    // leaves this pointer as stale as a missing one.
+    const back = (await readFile(join(target, 'gitdir'), 'utf8').catch(() => '')).trim()
+    if (!back || samePath(await realPath(resolve(target, back)), await realPath(marker))) return false
+  }
+  const common = (await git(runner, project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read').catch(() => '')).trim()
+  return common !== '' && samePath(dirname(target), join(await realPath(common), 'worktrees'))
+}
+
+/**
+ * The first file in a leftover checkout that was made, written, or changed in any other way (moved in or renamed, which
+ * keeps a file's creation and write times) at or after `since`, or null. Folders' own times are not looked at (deleting
+ * part of a folder changes them), and links are not followed.
+ */
+async function savedAfter(checkout: string, since: number): Promise<string | null> {
+  const pending = [checkout]
+  while (pending.length) {
+    const dir = pending.pop() as string
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) { pending.push(path); continue }
+      const info = await lstat(path)
+      if (Math.max(info.mtimeMs, info.birthtimeMs, info.ctimeMs) >= since) return path
+    }
+  }
+  return null
+}
+
 export type ReviewerAreaRemovalResult =
   | { outcome: 'removed' }
-  | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner'; detail?: string }
+  | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner' | 'detached'; detail?: string; detachedAt?: number }
 
 const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
 
@@ -66,12 +108,24 @@ const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
  *   non-ignored files return `{ outcome: 'kept', reason: 'dirty' }` immediately.
  * - Retries `git worktree remove -- <checkout>` (never `--force`) across short delays when clean so transient Windows
  *   child process handle locks release cleanly instead of leaving stale worktrees behind.
+ * - When Git took the clean worktree out of the project and only deleting the folder failed, reports
+ *   `{ outcome: 'kept', reason: 'detached', detachedAt }`: nothing of the person's is in what was left when this
+ *   removal began (`detachedAt`, taken before Git is asked). A caller records it and passes it on a later try, which lets the folder go although the project no longer registers
+ *   it, also when a failed removal left the worktree's own, now stale, `.git` file behind. Two things still keep it:
+ *   any other `.git` there (a repository someone made of the leftover folder, say: 'unregistered'), and a file saved,
+ *   changed or moved into the checkout since `detachedAt` ('dirty'). `folderRetries` bounds how long deleting a folder that is still held
+ *   open is tried.
  */
 export async function removeReviewerAreaDetailed(
   area: Pick<ReviewerArea, 'root' | 'checkout' | 'project' | 'ref'>,
   runner?: GitRunner | null,
-  options?: { retryDelaysMs?: readonly number[] },
+  options?: { retryDelaysMs?: readonly number[]; detachedAt?: number; folderRetries?: number },
 ): Promise<ReviewerAreaRemovalResult> {
+  // Whether Git is known to have taken this worktree out while it was clean: recorded by an earlier try, or done below.
+  // Taken before Git is asked: whatever is saved in the checkout from here on is not this removal's leftover.
+  const startedAt = Date.now()
+  const detachedAt = options?.detachedAt
+  let detached = detachedAt !== undefined
   if (area.project) {
     if (!runner) return { outcome: 'kept', reason: 'no-runner' }
     let listed: string
@@ -92,8 +146,14 @@ export async function removeReviewerAreaDetailed(
     let registered = false
     for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
     // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
-    if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) {
-      return { outcome: 'kept', reason: 'unregistered' }
+    if (!registered && await lstat(join(area.checkout, '.git')).then(() => true, () => false)) {
+      if (!detached || !await staleWorktreePointer(runner, area.project, area.checkout)) return { outcome: 'kept', reason: 'unregistered' }
+    }
+    // What the earlier removal left is the desktop's; a file that came after it is not, so nothing is deleted then.
+    if (!registered && !missing && detachedAt !== undefined) {
+      const later = await savedAfter(area.checkout, detachedAt).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)))
+      if (later instanceof Error) return { outcome: 'kept', reason: 'detached', detail: later.message, detachedAt }
+      if (later !== null) return { outcome: 'kept', reason: 'dirty', detail: `${later} was saved after the worktree was removed` }
     }
     if (registered) {
       if (!missing) {
@@ -146,13 +206,16 @@ export async function removeReviewerAreaDetailed(
       if (!removedWorktree) {
         return { outcome: 'kept', reason: 'git-failed', ...(lastDetail ? { detail: lastDetail } : {}) }
       }
+      // Git removes a worktree only while it has no changes (never --force here), so what may be left is not the person's.
+      detached = true
     }
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   try {
-    await rm(area.root, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 })
+    await rm(area.root, { recursive: true, force: true, maxRetries: options?.folderRetries ?? 6, retryDelay: 200 })
   } catch (error) {
-    return { outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }
+    const detail = error instanceof Error ? error.message : String(error)
+    return detached ? { outcome: 'kept', reason: 'detached', detail, detachedAt: detachedAt ?? startedAt } : { outcome: 'kept', reason: 'git-failed', detail }
   }
   return { outcome: 'removed' }
 }

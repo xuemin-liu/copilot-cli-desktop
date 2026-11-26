@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 import {
   clearForgeProbeCacheForTests,
   fetchForgePullEvidence,
+  ghPagedItems,
   ghConfigMayKnowHost,
   ghEnterpriseChildEnv,
   hashSeatReceiptToken,
@@ -1812,4 +1813,18 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     await closeServer(gheServer)
     rmSync(emptyGhCfg, { recursive: true, force: true })
   }
+})
+
+test('ghPagedItems reads the items out of a gh api --paginate --slurp result, which is an array of pages', () => {
+  // The real shape: one array per request, here two pages of reviews.
+  const slurped = [[{ id: 6079401408, body: 'Approved at abc [Claude Code]' }, { id: 6079408851, body: '[Codex CLI] **Blocking**' }], [{ id: 6079513017, body: 'third' }]]
+  assert.deepEqual(ghPagedItems(slurped).map((item) => (item as { id: number }).id), [6079401408, 6079408851, 6079513017])
+  // One page, and no items at all.
+  assert.deepEqual(ghPagedItems([[{ id: 1 }]]), [{ id: 1 }])
+  assert.deepEqual(ghPagedItems([[]]), [])
+  assert.deepEqual(ghPagedItems([]), [])
+  // A list that is already the items stays as it is; anything else is no items.
+  assert.deepEqual(ghPagedItems([{ id: 1 }, { id: 2 }]), [{ id: 1 }, { id: 2 }])
+  assert.deepEqual(ghPagedItems(null), [])
+  assert.deepEqual(ghPagedItems({ message: 'Not Found' }), [])
 })

@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -985,6 +985,20 @@ function sameRealPath(a:string,b:string):boolean{
 }
 let sweeping=false
 /**
+ * Before a review is reserved: clears an earlier, kept hold on the same review that a clean removal left without its
+ * worktree (`detached`), so a retry is not refused for a folder that only could not be deleted. A hold that may be the
+ * person's (kept for changes, or of unknown outcome), a running launch, or a Codex credential still to sync is left alone.
+ */
+async function clearDetachedReviewHold(store:ReviewReservations,repository:string,number:number,reviewer:string):Promise<void>{
+  const held=store.holder(repository,number,reviewer)
+  if(!held||!held.kept||held.detachedAt===undefined||held.codexAuthSync||reviewLaunches.has(held.launchId))return
+  // One short try: a folder still held open is reported at once rather than waited on.
+  const removal=await removeReviewerAreaDetailed(held,await meetingGitRunner(),{detachedAt:held.detachedAt,folderRetries:1}).catch(()=>null)
+  if(removal?.outcome==='removed')await store.release(held.launchId).catch(()=>{})
+  // Something was saved in the leftover folder since: it is the person's again, and the reservation says so.
+  else if(removal?.outcome==='kept'&&removal.reason==='dirty')await store.undetach(held.launchId).catch(()=>{})
+}
+/**
  * A review that ended (merged, closed, stopped, or a start that failed) and whose tab is gone leaves its worktree in
  * the person's project, its ref, its Copilot home and a dead session's token: remove them, by the record that says
  * they are this desktop's. A worktree with changes is kept for the person, and said so once.
@@ -996,8 +1010,9 @@ async function sweepReviewerAreas():Promise<void>{
   try{
     for(const record of store.list()){
       // A kept worktree is the person's until they remove it; then its ref and folder go, and the PR can be reviewed again.
+      // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
-      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&existsSync(record.checkout)))continue
+      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
@@ -1005,10 +1020,12 @@ async function sweepReviewerAreas():Promise<void>{
       if(open)continue
       const credOutcome = await recoverSweptReviewerCredentials(record, store)
       if (credOutcome === 'retry-sync') continue
-      if (record.kept && existsSync(record.checkout)) continue
-      const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
+      if (record.kept && record.detachedAt === undefined && existsSync(record.checkout)) continue
+      const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),record.detachedAt!==undefined?{detachedAt:record.detachedAt,folderRetries:1}:undefined).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
       if(record.taskId)reviewerTasks.delete(record.taskId)
-      if(outcome==='removed')await store.release(record.launchId)
+      if(removal.outcome==='removed')await store.release(record.launchId)
+      else if(removal.reason==='detached')await store.keep(record.launchId,removal.detachedAt)
+      else if(record.detachedAt!==undefined&&removal.reason==='dirty'){await store.undetach(record.launchId);workflowNotice=`Files were saved in the leftover review folder of PR #${record.number}, so it was kept: ${record.checkout}. Look at it, then delete the folder.`;broadcastState()}
       else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of PR #${record.number} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
     }
   }finally{sweeping=false}
@@ -1044,6 +1061,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
   if(credentials.length)throw new Error(`${profile.name}'s own Git config holds ${credentials.join(' and ')}, which the sandboxed reviewer could read. Move it to your global Git config or a credential manager, then ask again.`)
   // Recorded before anything is made: a second start of this review is refused, and a crash leaves nothing unaccounted for.
   const area=planReviewerArea(reviewerAreaBase()),launchId=basename(area.root)
+  await clearDetachedReviewHold(store,pull.repository,pull.number,String(me.id))
   await store.reserve({launchId,repository:pull.repository,number:pull.number,reviewer:String(me.id),project:resolve(profile.path),root:area.root,checkout:area.checkout,ref:area.ref})
   reviewLaunches.add(launchId)
   let tabId:string|null=null
@@ -1087,9 +1105,9 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
     // A session that started keeps its folder while its tab is open, so the person can look at it; the sweep takes it
     // out after. An unused folder goes now, and its record with it.
     if(!tabId){
-      const outcome=await removeReviewerArea(area,runner).catch(()=>'kept' as const)
-      if(outcome==='removed')await store.release(launchId).catch(()=>{})
-      else await store.keep(launchId).catch(()=>{})
+      const removal=await removeReviewerAreaDetailed(area,runner).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
+      if(removal.outcome==='removed')await store.release(launchId).catch(()=>{})
+      else await store.keep(launchId,removal.reason==='detached'?removal.detachedAt:undefined).catch(()=>{})
     }
     throw error
   }finally{reviewLaunches.delete(launchId)}
@@ -3762,7 +3780,7 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
   if (removal.outcome === 'removed') {
     await store?.release(seat.launchId).catch(() => {})
   } else if (seat.launchId) {
-    await store?.keep(seat.launchId).catch(() => {})
+    await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
     seat.keptCheckoutPath = area.checkout
     const group = tempReviewers.group(seat.groupId)
     const msg = removal.reason === 'dirty'
@@ -4001,6 +4019,7 @@ async function launchTempReviewerSeat(
   seat.launchId = launchId
   seat.area = area
   if (!reusingExistingArea) {
+    await clearDetachedReviewHold(store, group.repository, group.prNumber ?? 1, `temp:${group.id}:${seat.cli}`)
     await store.reserve({
       launchId,
       repository: group.repository,
@@ -4315,9 +4334,9 @@ async function launchTempReviewerSeat(
     }
     await cleanupReviewerSeatCredentials(area)
     await store.setCodexAuthSync(launchId, null).catch(() => {})
-    const removal = await removeReviewerAreaDetailed(area, runner).catch(() => ({ outcome: 'kept' as const, reason: 'git-failed' as const }))
+    const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
     if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
-    else await store.keep(launchId).catch(() => {})
+    else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
     if (seat.generation === expectedGeneration) seat.area = null
     throw error
   } finally {

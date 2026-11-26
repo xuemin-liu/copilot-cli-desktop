@@ -571,6 +571,15 @@ function checkGhEnterpriseAuth(hostname: string, protocol: 'http' | 'https' = 'h
   })
 }
 
+/**
+ * The items of a paged `gh api --paginate --slurp` read. `--slurp` answers an array of pages, each page the array one
+ * request returned, so the items are one level down. A result that is already a list of items is returned as it is.
+ */
+export function ghPagedItems(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return []
+  return value.every((page) => Array.isArray(page)) ? value.flat() : value
+}
+
 function runGhEnterpriseJson(hostname: string, apiPath: string, paginate = false): Promise<unknown> {
   return new Promise((resolveJson, rejectJson) => {
     const args = ['api', '--hostname', hostname, ...(paginate ? ['--paginate', '--slurp'] : []), apiPath]
@@ -703,9 +712,9 @@ export async function fetchForgePullEvidence(options: {
       ;[pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
         api(root) as Promise<Record<string, unknown>>,
         api('user').catch(() => null) as Promise<{ id?: number; login?: string } | null>,
-        api(`${root}/reviews?per_page=100`, true) as Promise<unknown[]>,
-        api(`${root}/comments?per_page=100`, true) as Promise<unknown[]>,
-        api(`repos/${endpoint.repoPath}/issues/${endpoint.prNumber}/comments?per_page=100`, true) as Promise<unknown[]>,
+        api(`${root}/reviews?per_page=100`, true).then(ghPagedItems),
+        api(`${root}/comments?per_page=100`, true).then(ghPagedItems),
+        api(`repos/${endpoint.repoPath}/issues/${endpoint.prNumber}/comments?per_page=100`, true).then(ghPagedItems),
       ])
     } else {
       ;[pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
