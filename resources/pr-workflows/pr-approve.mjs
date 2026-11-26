@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import {
   forgeFetchJson,
+  forgePaginateArray,
   readForgeCredentials,
   resolveForgeEndpoint,
   SHA_RE,
@@ -91,7 +92,7 @@ async function main() {
     if (pull.merged || String(pull.state).toLowerCase() !== 'open' || String(pull.head?.sha).toLowerCase() !== head || String(pull.base?.sha).toLowerCase() !== base) {
       throw new Error('PR closed or changed on Gitea/Forgejo. Reassess before approving.')
     }
-    const { data: reviews } = await forgeFetchJson(endpoint, `${repoApi}/pulls/${endpoint.prNumber}/reviews?limit=50`, { cred })
+    const reviews = await forgePaginateArray(endpoint, `${repoApi}/pulls/${endpoint.prNumber}/reviews`, cred)
     const existing = Array.isArray(reviews)
       ? reviews.find((r) => r.user?.id === actor.id && String(r.commit_id ?? '').toLowerCase() === head && r.body === body)
       : null
@@ -123,12 +124,28 @@ async function main() {
     forgeFetchJson(endpoint, '/api/v4/user', { cred }),
     forgeFetchJson(endpoint, mrApi, { cred }),
   ])
+  const targetBranch = typeof mr.target_branch === 'string' ? mr.target_branch.trim() : ''
+  const targetProjSpec = Number.isSafeInteger(mr.target_project_id) && mr.target_project_id !== mr.source_project_id
+    ? String(mr.target_project_id)
+    : encodedProject
+  let targetBranchTipSha = ''
+  if (targetBranch) {
+    const { data: branchObj } = await forgeFetchJson(
+      endpoint,
+      `/api/v4/projects/${targetProjSpec}/repository/branches/${encodeURIComponent(targetBranch)}`,
+      { cred },
+    )
+    const commitId = branchObj?.commit?.id
+    if (typeof commitId === 'string' && SHA_RE.test(commitId.trim())) {
+      targetBranchTipSha = commitId.trim().toLowerCase()
+    }
+  }
   const mrHead = String(mr.diff_refs?.head_sha ?? mr.sha ?? '').toLowerCase()
-  const mrBase = String(mr.diff_refs?.base_sha ?? '').toLowerCase()
+  const mrBase = targetBranchTipSha || String(mr.diff_refs?.base_sha ?? '').toLowerCase()
   if (String(mr.state).toLowerCase() !== 'opened' || mrHead !== head || mrBase !== base) {
     throw new Error('Merge request closed or changed on GitLab. Reassess before approving.')
   }
-  const { data: notes } = await forgeFetchJson(endpoint, `${mrApi}/notes?per_page=100`, { cred })
+  const notes = await forgePaginateArray(endpoint, `${mrApi}/notes`, cred)
   const existing = Array.isArray(notes) ? notes.find((n) => n.author?.id === actor.id && n.body === body) : null
   const created = existing ?? (await forgeFetchJson(endpoint, `${mrApi}/notes`, {
     method: 'POST',

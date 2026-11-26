@@ -19,6 +19,12 @@ import {
 
 interface PrForgeModule {
   evaluateRevisionApprovals: (opts: Record<string, unknown>) => { approvalForHead: boolean }
+  forgePaginateArray: (
+    endpoint: { forge: string; httpOrigin: string },
+    basePath: string,
+    cred: { kind: string; token: string } | null,
+    maxPages?: number,
+  ) => Promise<unknown[]>
   resolveForgeEndpoint: (opts: Record<string, unknown>) => {
     forge: string
     httpOrigin: string
@@ -77,6 +83,7 @@ function listenServer(server: Server): Promise<number> {
 }
 
 function closeServer(server: Server): Promise<void> {
+  server.closeAllConnections?.()
   return new Promise((resolveClose) => server.close(() => resolveClose()))
 }
 
@@ -515,11 +522,12 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
   }
 })
 
-test('pr-poll.mjs + pr-approve.mjs work end-to-end on GitLab REST v4 and refuse HTTP redirects', async () => {
+test('pr-poll.mjs + pr-approve.mjs + Desktop evidence work end-to-end on GitLab REST v4, bind target-branch tip moves with unchanged merge-base, and refuse HTTP redirects', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-poll-gitlab-'))
   const notes: Array<Record<string, unknown>> = []
   let nextNoteId = 700
   let redirectMode = false
+  let targetBranchTipSha = BASE_1
 
   const gitlabServer = createServer(async (req, res) => {
     if (redirectMode) {
@@ -537,6 +545,11 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on GitLab REST v4 and refuse 
       res.end(JSON.stringify({ id: 21, username: 'bob' }))
       return
     }
+    if (url.pathname === '/api/v4/projects/team%2Fsub%2Fapp/repository/branches/main') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ name: 'main', commit: { id: targetBranchTipSha } }))
+      return
+    }
     if (url.pathname === '/api/v4/projects/team%2Fsub%2Fapp/merge_requests/7') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
@@ -547,6 +560,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on GitLab REST v4 and refuse 
         source_project_id: 55,
         source_branch: 'feat/gl',
         target_branch: 'main',
+        // Merge-base (`diff_refs.base_sha`) stays at BASE_1 even when target branch `main` advances to BASE_2!
         diff_refs: { head_sha: HEAD_1, base_sha: BASE_1 },
       }))
       return
@@ -613,7 +627,74 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on GitLab REST v4 and refuse 
     assert.equal(snapRes.code, 0, snapRes.stderr)
     const snapJson = JSON.parse(snapRes.stdout)
     assert.equal(snapJson.forge, 'gitlab')
+    assert.equal(snapJson.baseSha, BASE_1)
+    assert.equal(snapJson.mergeBaseSha, BASE_1)
     assert.equal(snapJson.approvalForHead, true)
+
+    await runNodeScript(
+      PR_POLL,
+      ['7', stateFile, '--pr-url', mrUrl, '--origin', gitOrigin, '--mark', '--through', `0,0,${nextNoteId}`, '--head', HEAD_1, '--base', BASE_1],
+      { env },
+    )
+
+    // Target-only branch advance on GitLab (`main` tip moves BASE_1 -> BASE_2 while `diff_refs.head_sha` and `diff_refs.base_sha` stay unchanged!):
+    targetBranchTipSha = BASE_2
+    const targetAdvanceSnap = await runNodeScript(
+      PR_POLL,
+      ['7', stateFile, '--pr-url', mrUrl, '--origin', gitOrigin, '--snapshot', '--require-tag', '[Antigravity CLI]'],
+      { env },
+    )
+    assert.equal(targetAdvanceSnap.code, 0, targetAdvanceSnap.stderr)
+    const targetAdvanceJson = JSON.parse(targetAdvanceSnap.stdout)
+    assert.equal(targetAdvanceJson.baseSha, BASE_2, 'GitLab baseSha tracks live target branch tip')
+    assert.equal(targetAdvanceJson.mergeBaseSha, BASE_1, 'GitLab mergeBaseSha retains diff_refs.base_sha for diffing')
+    assert.equal(targetAdvanceJson.baseChanged, true)
+    assert.equal(targetAdvanceJson.approvalForHead, false, 'BASE_1 approval is invalidated when GitLab target branch tip advances to BASE_2')
+
+    // Desktop fetchForgePullEvidence also reports live target branch tip BASE_2 and rejects stale BASE_1 approval:
+    const prevGlTok = process.env.GITLAB_TOKEN
+    process.env.GITLAB_TOKEN = 'glpat-test'
+    try {
+      const glEp = resolveTrustedForgeEndpoint({ origin: gitOrigin, prNumber: 7, prUrl: mrUrl })
+      assert.equal(glEp?.forge, 'gitlab')
+      const glSnapshot = await fetchForgePullEvidence({ endpoint: glEp! as Parameters<typeof fetchForgePullEvidence>[0]['endpoint'], userDataDir: dir, projectCwd: dir, runner: null })
+      assert.equal(glSnapshot.base, BASE_2)
+      const staleVerify = verifySeatOutcomeFromSnapshot({
+        snapshot: glSnapshot,
+        cli: 'antigravity',
+        totalRequiredSeats: 1,
+        head: HEAD_1,
+        base: BASE_2,
+        baseMovedInGroup: true,
+        roundStartedAtMs: Date.parse('2026-11-26T00:59:00Z'),
+        marker: '🤖 ',
+        claimedEvidenceKeys: new Set(),
+      })
+      assert.equal(staleVerify, null, 'Desktop GitLab verification rejects approval bound to BASE_1 after target branch tip moves to BASE_2')
+    } finally {
+      if (prevGlTok === undefined) delete process.env.GITLAB_TOKEN
+      else process.env.GITLAB_TOKEN = prevGlTok
+    }
+
+    // pr-approve.mjs rejects stale BASE_1 and succeeds with live target branch tip BASE_2:
+    const staleGlApprove = await runNodeScript(
+      PR_APPROVE,
+      [mrUrl, '7', HEAD_1, BASE_1, noteFile, '--origin', gitOrigin],
+      { env },
+    )
+    assert.notEqual(staleGlApprove.code, 0)
+    const freshGlApprove = await runNodeScript(
+      PR_APPROVE,
+      [mrUrl, '7', HEAD_1, BASE_2, noteFile, '--origin', gitOrigin],
+      { env },
+    )
+    assert.equal(freshGlApprove.code, 0, freshGlApprove.stderr)
+    const reapprovedGlSnap = await runNodeScript(
+      PR_POLL,
+      ['7', stateFile, '--pr-url', mrUrl, '--origin', gitOrigin, '--snapshot', '--require-tag', '[Antigravity CLI]'],
+      { env },
+    )
+    assert.equal(JSON.parse(reapprovedGlSnap.stdout).approvalForHead, true)
 
     // Enable 302 redirect and verify pr-approve.mjs / pr-poll.mjs refuse redirects instead of following them:
     redirectMode = true
@@ -669,10 +750,164 @@ test('pr-seat-receipt.mjs posts seat-scoped token + metadata to loopback /pr-sea
 })
 
 test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged chatter, round acknowledgements, SSH custom ports, and unknown-host probing', async () => {
-  const { evaluateRevisionApprovals, resolveForgeEndpoint } = (await import(
+  const { evaluateRevisionApprovals, forgePaginateArray, resolveForgeEndpoint } = (await import(
     pathToFileURL(join(TOOLS_DIR, 'pr-forge.mjs')).href
   )) as PrForgeModule
   clearForgeProbeCacheForTests()
+
+  // Transient probe failure (503 / 401) MUST throw (never cache 'unsupported') AND recover cleanly on the next call without restarting Desktop!
+  let flakyProbeAttempt = 0
+  const flakyGiteaServer = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/api/v1/version') {
+      flakyProbeAttempt += 1
+      if (flakyProbeAttempt === 1) {
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Service temporarily unavailable' }))
+        return
+      }
+      if (flakyProbeAttempt === 2) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Unauthorized' }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: '1.22.1' }))
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ message: 'Not Found' }))
+  })
+  const flakyPort = await listenServer(flakyGiteaServer)
+  try {
+    const flakyOrigin = `http://127.0.0.1:${flakyPort}`
+    const flakyEp = resolveTrustedForgeEndpoint({
+      origin: `${flakyOrigin}/daq/service.git`,
+      prNumber: 12,
+      prUrl: `${flakyOrigin}/daq/service/pulls/12`,
+    })
+    assert.equal(flakyEp?.forge, 'probe')
+    await assert.rejects(
+      resolveVerifiedForgeKind({ endpoint: flakyEp!, projectCwd: tmpdir(), runner: null }),
+      /HTTP 503 on \/api\/v1\/version/,
+      'transient 503 throws instead of caching unsupported',
+    )
+    await assert.rejects(
+      resolveVerifiedForgeKind({ endpoint: flakyEp!, projectCwd: tmpdir(), runner: null }),
+      /HTTP 401 on \/api\/v1\/version/,
+      'auth error 401 throws instead of caching unsupported',
+    )
+    const recoveredForge = await resolveVerifiedForgeKind({ endpoint: flakyEp!, projectCwd: tmpdir(), runner: null })
+    assert.equal(recoveredForge?.forge, 'gitea', 'recovers to gitea on next attempt without restarting Desktop')
+  } finally {
+    await closeServer(flakyGiteaServer)
+  }
+
+  // Gitea pagination with MAX_RESPONSE_ITEMS < 50 (e.g. 1 item per page + Link rel="next") loads all pages AND throws if safety cap is exceeded!
+  let shortPageServerPort = 0
+  const shortPageServer = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const origin = `http://127.0.0.1:${shortPageServerPort}`
+    if (url.pathname === '/api/v1/version') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: '1.22.0' }))
+      return
+    }
+    if (url.pathname === '/api/v1/user') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ id: 7, login: 'alice' }))
+      return
+    }
+    if (url.pathname === '/api/v1/repos/daq/service/pulls/12') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        number: 12,
+        state: 'open',
+        merged: false,
+        user: { id: 7, login: 'alice' },
+        head: { ref: 'feat/p', sha: HEAD_1, repo: { id: 1, full_name: 'daq/service' } },
+        base: { ref: 'main', sha: BASE_1, repo: { id: 1, full_name: 'daq/service' } },
+      }))
+      return
+    }
+    if (url.pathname === '/api/v1/repos/daq/service/pulls/12/reviews') {
+      const page = Number(url.searchParams.get('page') ?? '1')
+      if (page === 1) {
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          link: `<${origin}/api/v1/repos/daq/service/pulls/12/reviews?limit=1&page=2>; rel="next", <${origin}/api/v1/repos/daq/service/pulls/12/reviews?limit=1&page=2>; rel="last"`,
+        })
+        res.end(JSON.stringify([
+          { id: 101, state: 'COMMENT', user: { id: 7, login: 'alice' }, body: 'Non-blocking: [Claude Code] page 1 item', commit_id: HEAD_1, comments_count: 0, submitted_at: '2026-11-26T00:00:00Z' },
+        ]))
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        link: `<${origin}/api/v1/repos/daq/service/pulls/12/reviews?limit=1&page=1>; rel="prev"`,
+      })
+      res.end(JSON.stringify([
+        { id: 102, state: 'COMMENT', user: { id: 7, login: 'alice' }, body: 'Blocking: [Claude Code] page 2 item despite page 1 length < 50', commit_id: HEAD_1, comments_count: 0, submitted_at: '2026-11-26T00:01:00Z' },
+      ]))
+      return
+    }
+    if (url.pathname === '/api/v1/repos/daq/service/issues/12/comments') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ message: 'Not Found' }))
+  })
+  shortPageServerPort = await listenServer(shortPageServer)
+  const shortDir = mkdtempSync(join(tmpdir(), 'gitea-short-page-'))
+  const prevGiteaTokShort = process.env.GITEA_TOKEN
+  process.env.GITEA_TOKEN = 'tok-short'
+  try {
+    const shortOrigin = `http://127.0.0.1:${shortPageServerPort}`
+    const shortPrUrl = `${shortOrigin}/daq/service/pulls/12`
+    const shortGitOrigin = `${shortOrigin}/daq/service.git`
+    const shortSnap = await runNodeScript(
+      PR_POLL,
+      ['12', join(shortDir, 'state.json'), '--pr-url', shortPrUrl, '--origin', shortGitOrigin, '--snapshot'],
+      { env: { GITEA_TOKEN: 'tok-short' } },
+    )
+    assert.equal(shortSnap.code, 0, shortSnap.stderr)
+    const shortJson = JSON.parse(shortSnap.stdout)
+    assert.deepEqual(
+      shortJson.newReviews.map((r: { id: number }) => r.id),
+      [101, 102],
+      'pr-poll.mjs follows Gitea Link rel="next" even when page 1 returns < 50 items',
+    )
+
+    const shortEp = await resolveVerifiedForgeKind({
+      endpoint: resolveTrustedForgeEndpoint({ origin: shortGitOrigin, prNumber: 12, prUrl: shortPrUrl })!,
+      projectCwd: shortDir,
+      runner: null,
+    })
+    const desktopShortSnap = await fetchForgePullEvidence({ endpoint: shortEp!, userDataDir: shortDir, projectCwd: shortDir, runner: null })
+    assert.deepEqual(
+      desktopShortSnap.items.filter((i) => i.kind === 'review').map((i) => i.id),
+      [101, 102],
+      'Desktop fetchForgePullEvidence follows Gitea Link rel="next" even when page 1 returns < 50 items',
+    )
+
+    // Exhausted safety cap when Link rel="next" still advertises more pages throws instead of returning incomplete evidence:
+    await assert.rejects(
+      forgePaginateArray(
+        { forge: 'gitea', httpOrigin: shortOrigin },
+        '/api/v1/repos/daq/service/pulls/12/reviews',
+        { kind: 'token', token: 'tok-short' },
+        1,
+      ),
+      /exceeded safety cap/,
+    )
+  } finally {
+    if (prevGiteaTokShort === undefined) delete process.env.GITEA_TOKEN
+    else process.env.GITEA_TOKEN = prevGiteaTokShort
+    await closeServer(shortPageServer)
+    rmSync(shortDir, { recursive: true, force: true })
+  }
   // Bitbucket (Cloud & Server) and Azure DevOps (Cloud & Server) return null in Desktop so seat receipts apply, and throw clearly in CLI helpers:
   for (const [origin, prUrl] of [
     ['https://bitbucket.org/workspace/repo.git', 'https://bitbucket.org/workspace/repo/pull-requests/5'],

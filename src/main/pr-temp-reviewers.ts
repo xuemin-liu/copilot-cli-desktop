@@ -332,6 +332,31 @@ export function buildCopilotOneShotReviewerArgs(
   return [...filtered, ...addDirs, '-p', prompt]
 }
 
+/** The file name, in a seat's helper folder, of the Claude Code settings that grant access to that folder. */
+export const CLAUDE_REVIEWER_SETTINGS_FILE = 'claude-settings.json'
+
+/**
+ * How a non-Copilot reviewer CLI is given its helper folder. An interactive Claude Code session stops at an
+ * "Adding a new directory" trust prompt for every `--add-dir` folder it has not worked in, and the helper folder is
+ * new for each seat, so a hidden session would wait there forever. The same folder named in a settings file
+ * (`permissions.additionalDirectories`) is granted without the prompt. `settings` is that file's content to write at
+ * `settingsPath` before launch, or null when no file is needed.
+ */
+export function reviewerHelperDirAccess(
+  cli: Exclude<ReviewerCli, 'copilot'>,
+  help: string | null,
+  helper: string,
+  settingsPath: string,
+): { args: string[]; settings: string | null } {
+  if (cli === 'claude' && help && helpListsFlag(help, '--settings')) {
+    return {
+      args: ['--settings', settingsPath],
+      settings: JSON.stringify({ permissions: { additionalDirectories: [helper] } }),
+    }
+  }
+  return { args: help && helpListsFlag(help, '--add-dir') ? ['--add-dir', helper] : [], settings: null }
+}
+
 /**
  * Builds the final CLI arguments for launching a non-Copilot temporary PR reviewer session (`claude`, `codex`, or
  * `antigravity`) with its initial review prompt. When `oneShot` is true (`reviewerAllowAll` enabled), uses each CLI's
@@ -1085,6 +1110,8 @@ export async function reconcileSeatWithEvidenceLoader(options: {
   group: TempReviewerGroup
   seat: TempReviewerSeat
   trigger: 'completed' | 'crashed' | 'receipt' | 'idle'
+  expectedRound?: number
+  expectedGeneration?: string
   isShuttingDown?: () => boolean
   onClearTimer?: (seat: TempReviewerSeat) => void
   onBroadcast?: () => void
@@ -1104,8 +1131,8 @@ export async function reconcileSeatWithEvidenceLoader(options: {
     loadEvidence,
   } = options
 
-  const expectedGen = seat.generation
-  const expectedRound = group.round
+  const expectedGen = options.expectedGeneration ?? seat.generation
+  const expectedRound = options.expectedRound ?? group.round
   const isGroupEnded = (): boolean => group.stage === 'ended'
   const isStillActiveInRound = (): boolean => (
     !isShuttingDown()

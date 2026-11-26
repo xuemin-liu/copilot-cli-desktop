@@ -160,6 +160,7 @@ import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
+  CLAUDE_REVIEWER_SETTINGS_FILE,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
   prReviewAndFixRequest,
@@ -168,6 +169,7 @@ import {
   repositoryLabelFromOrigin,
   resolveCopilotReviewerPreset,
   resolveOtherCliReviewerArgs,
+  reviewerHelperDirAccess,
   reviewerPromptLine,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
@@ -2161,7 +2163,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (session.activity === 'idle') {
       const idleSeat = tempReviewers.seatByTabId(id)
       if (idleSeat && idleSeat.group.stage !== 'ended' && idleSeat.seat.lifecycle === 'running') {
-        void reconcileTempReviewerSeatEvidence(idleSeat.group, idleSeat.seat, 'idle')
+        const expectedRound = idleSeat.group.round
+        const expectedGeneration = idleSeat.seat.generation
+        void reconcileTempReviewerSeatEvidence(idleSeat.group, idleSeat.seat, 'idle', { expectedRound, expectedGeneration })
       }
     }
   })
@@ -2191,14 +2195,23 @@ function wireSessionEvents(id: string, session: PtySession): void {
       if (status === 'approval-needed') { tempSeat.seat.needsAttention = true; tempReviewers.wakeAll() }
       else if (status === 'running') { tempSeat.seat.needsAttention = false }
       else if (!shuttingDown() && (status === 'crashed' || status === 'completed') && (tempSeat.seat.lifecycle === 'starting' || tempSeat.seat.lifecycle === 'running')) {
+        const expectedRound = tempSeat.group.round
+        const expectedGeneration = tempSeat.seat.generation
+        const eventArea = tempSeat.seat.area
+        const eventLaunchId = tempSeat.seat.launchId
         clearTempSeatTimer(tempSeat.seat)
         if (session.lastSessionId) tempSeat.seat.lastSessionId = session.lastSessionId
         const pidToKill = pidBeforeStatus ?? session.processId
         void (async () => {
           if (pidToKill && pidToKill > 1) await killProcessTree(pidToKill).catch(() => {})
-          await cleanupReviewerSeatCredentials(tempSeat.seat.area).catch(() => {})
-          if (tempSeat.seat.launchId) await reviewReservations()?.setCodexAuthSync(tempSeat.seat.launchId, null).catch(() => {})
-          await reconcileTempReviewerSeatEvidence(tempSeat.group, tempSeat.seat, status)
+          if (tempSeat.seat.generation === expectedGeneration) {
+            await cleanupReviewerSeatCredentials(eventArea).catch(() => {})
+            if (eventLaunchId) await reviewReservations()?.setCodexAuthSync(eventLaunchId, null).catch(() => {})
+          }
+          await reconcileTempReviewerSeatEvidence(tempSeat.group, tempSeat.seat, status, {
+            expectedRound,
+            expectedGeneration,
+          })
         })()
       }
     }
@@ -3813,7 +3826,11 @@ async function reconcileTempReviewerSeatEvidence(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   trigger: 'completed' | 'crashed' | 'receipt' | 'idle',
+  eventContext?: { expectedRound: number; expectedGeneration: string },
 ): Promise<MeetingResponse> {
+  // Snapshot the originating round & seat generation BEFORE waiting on the per-group verification queue!
+  const expectedRound = eventContext?.expectedRound ?? group.round
+  const expectedGeneration = eventContext?.expectedGeneration ?? seat.generation
   const prev = tempGroupVerifyQueues.get(group.id) ?? Promise.resolve()
   let result: MeetingResponse = { ok: false, message: 'Verification skipped.' }
   const next = prev.catch(() => {}).then(async () => {
@@ -3822,6 +3839,8 @@ async function reconcileTempReviewerSeatEvidence(
       group,
       seat,
       trigger,
+      expectedRound,
+      expectedGeneration,
       isShuttingDown: shuttingDown,
       onClearTimer: clearTempSeatTimer,
       onBroadcast: broadcastState,
@@ -3890,7 +3909,10 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
     remoteId,
     ...(itemType ? { itemType } : {}),
   }
-  return reconcileTempReviewerSeatEvidence(group, seat, 'receipt')
+  return reconcileTempReviewerSeatEvidence(group, seat, 'receipt', {
+    expectedRound: round,
+    expectedGeneration: generation,
+  })
 }
 
 function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSeat): void {
@@ -3914,7 +3936,10 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
         return
       }
       // Reconcile against PR host evidence first in case the reviewer already posted right before the deadline.
-      const checkRes = await reconcileTempReviewerSeatEvidence(group, seat, 'idle').catch(() => ({ ok: false }))
+      const checkRes = await reconcileTempReviewerSeatEvidence(group, seat, 'idle', {
+        expectedRound,
+        expectedGeneration: expectedGen,
+      }).catch(() => ({ ok: false }))
       if (checkRes.ok || !isSeatStillActive()) {
         return
       }
@@ -4149,9 +4174,12 @@ async function launchTempReviewerSeat(
     const help = await otherCliHelp(resolution)
     const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
-    const addDirArgs = help && helpListsFlag(help, '--add-dir')
-      ? ['--add-dir', area.helper]
-      : []
+    const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath)
+    if (helperAccess.settings !== null) {
+      await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
+    }
+    const addDirArgs = helperAccess.args
     const env: NodeJS.ProcessEnv = {
       ...withCopilotPathAdditions(process.env, resolution.pathAdditions),
       COPILOT_DESKTOP_PR_TOOLS: prWorkflows.tools,

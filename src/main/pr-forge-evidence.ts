@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { GitRunner } from './git-runner.js'
 import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
 import { githubCliApi } from './workflow-github.js'
@@ -193,6 +196,13 @@ async function readCredentialsViaGit(
   }
   if (!runner) return {}
   const credOut = await new Promise<string>((resolveOut) => {
+    let settled = false
+    const finish = (val: string): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(hardTimer)
+      resolveOut(val)
+    }
     const child = execFile(
       'git',
       ['credential', 'fill'],
@@ -200,10 +210,17 @@ async function readCredentialsViaGit(
         cwd,
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
         windowsHide: true,
-        timeout: 8_000,
+        timeout: 6_000,
       },
-      (err, stdout) => resolveOut(err ? '' : String(stdout)),
+      (err, stdout) => finish(err ? '' : String(stdout)),
     )
+    const hardTimer = setTimeout(() => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      try { child.kill('SIGKILL') } catch {}
+      finish('')
+    }, 7_000)
+    hardTimer.unref?.()
     child.stdin?.end(`protocol=${endpoint.protocol}\nhost=${endpoint.host}\n\n`)
   })
   if (!credOut) return {}
@@ -251,38 +268,179 @@ async function safeForgeGetJson(httpOrigin: string, apiPath: string, authHeaders
   return (await safeForgeFetchResponse(httpOrigin, apiPath, authHeaders, timeoutMs)).data
 }
 
+function parseNextPageFromHeaders(
+  headers: Headers,
+  httpOrigin: string,
+  totalLoaded: number,
+  currentPageCount: number,
+  requestedPageSize: number,
+): { hasMore: boolean; nextPath?: string; nextPage?: number } {
+  const linkHeader = headers.get('link')
+  if (linkHeader !== null) {
+    const linkPattern = /<([^>]+)>([^,]*)/g
+    let match: RegExpExecArray | null
+    while ((match = linkPattern.exec(linkHeader)) !== null) {
+      const target = match[1]!.trim()
+      const params = match[2]!
+      const relMatch = /;\s*rel=(?:"([^"]+)"|([^\s;]+))/i.exec(params)
+      const relTokens = (relMatch?.[1] ?? relMatch?.[2] ?? '').toLowerCase().split(/\s+/)
+      if (relTokens.includes('next')) {
+        const parsedNext = new URL(target, `${httpOrigin}/`)
+        if (parsedNext.origin.toLowerCase() !== httpOrigin.toLowerCase()) {
+          throw new Error(`Refusing cross-origin pagination Link target (${parsedNext.origin}) from ${httpOrigin}`)
+        }
+        return { hasMore: true, nextPath: `${parsedNext.pathname}${parsedNext.search}` }
+      }
+    }
+    return { hasMore: false }
+  }
+  if (headers.has('x-next-page')) {
+    const rawNext = headers.get('x-next-page')?.trim() ?? ''
+    if (/^[1-9]\d*$/.test(rawNext)) {
+      return { hasMore: true, nextPage: Number(rawNext) }
+    }
+    return { hasMore: false }
+  }
+  if (headers.has('x-hasmore')) {
+    return { hasMore: headers.get('x-hasmore')?.trim().toLowerCase() === 'true' }
+  }
+  if (headers.has('x-total-count')) {
+    const rawTotal = headers.get('x-total-count')?.trim() ?? ''
+    if (/^\d+$/.test(rawTotal)) {
+      return { hasMore: totalLoaded < Number(rawTotal) }
+    }
+  }
+  return { hasMore: currentPageCount >= requestedPageSize }
+}
+
 async function safeForgePaginateArray(
   httpOrigin: string,
   basePath: string,
   authHeaders: Record<string, string>,
   forge: 'gitea' | 'gitlab',
-  maxPages = 20,
+  maxPages = 50,
 ): Promise<unknown[]> {
   const results: unknown[] = []
-  for (let page = 1; page <= maxPages; page += 1) {
+  const requestedPageSize = forge === 'gitlab' ? 100 : 50
+  let nextExplicitPath: string | undefined
+  let nextPageNum = 1
+  for (let pageCount = 1; ; pageCount += 1) {
     const sep = basePath.includes('?') ? '&' : '?'
-    const pageParam = forge === 'gitlab' ? `per_page=100&page=${page}` : `limit=50&page=${page}`
-    const { data, headers } = await safeForgeFetchResponse(httpOrigin, `${basePath}${sep}${pageParam}`, authHeaders)
+    const defaultPageParam = forge === 'gitlab' ? `per_page=${requestedPageSize}&page=${nextPageNum}` : `limit=${requestedPageSize}&page=${nextPageNum}`
+    const requestPath = nextExplicitPath ?? `${basePath}${sep}${defaultPageParam}`
+    const { data, headers } = await safeForgeFetchResponse(httpOrigin, requestPath, authHeaders)
     if (!Array.isArray(data) || data.length === 0) break
     results.push(...data)
-    if (forge === 'gitlab') {
-      const nextPage = headers.get('x-next-page')
-      if (!nextPage || !/^\d+$/.test(nextPage.trim())) break
-    } else if (data.length < 50) {
-      break
+    const nextInfo = parseNextPageFromHeaders(headers, httpOrigin, results.length, data.length, requestedPageSize)
+    if (!nextInfo.hasMore) break
+    if (pageCount >= maxPages) {
+      throw new Error(`Forge pagination exceeded safety cap (${maxPages} pages) on ${basePath}; refusing incomplete PR evidence`)
     }
+    nextExplicitPath = nextInfo.nextPath
+    nextPageNum = nextInfo.nextPage ?? (nextPageNum + 1)
   }
   return results
 }
 
-function checkGhEnterpriseAuth(hostname: string): Promise<boolean> {
+async function probeVersionEndpoint(
+  httpOrigin: string,
+  apiPath: string,
+  authHeaders: Record<string, string>,
+  timeoutMs = 6_000,
+): Promise<{ status: 'matched' } | { status: 'absent' } | { status: 'error'; reason: string }> {
+  let res: Response
+  try {
+    const url = new URL(apiPath, `${httpOrigin}/`)
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { accept: 'application/json', ...authHeaders },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (err) {
+    return { status: 'error', reason: err instanceof Error ? err.message : String(err) }
+  }
+  if (res.status >= 300 && res.status < 400) {
+    return { status: 'error', reason: `HTTP ${res.status} redirect on ${apiPath}` }
+  }
+  if (res.status === 404 || res.status === 405 || res.status === 410 || res.status === 501) {
+    return { status: 'absent' }
+  }
+  if (!res.ok) {
+    return { status: 'error', reason: `HTTP ${res.status} on ${apiPath}` }
+  }
+  const text = await res.text().catch(() => '')
+  try {
+    const parsed = text.trim() ? JSON.parse(text) : null
+    if (parsed && typeof parsed === 'object' && typeof (parsed as { version?: unknown }).version === 'string' && (parsed as { version: string }).version.trim() !== '') {
+      return { status: 'matched' }
+    }
+  } catch {
+    // Non-JSON 200 (e.g. HTML web UI catch-all) indicates this API route is not present.
+  }
+  return { status: 'absent' }
+}
+
+function ghConfigMayKnowHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase()
+  if (
+    !lower
+    || lower === 'localhost'
+    || lower === '127.0.0.1'
+    || lower === '::1'
+    || lower === '[::1]'
+    || /^\d+\.\d+\.\d+\.\d+$/.test(lower)
+  ) {
+    return false
+  }
+  if (process.env.GH_HOST?.trim().toLowerCase() === lower) return true
+  const candidates = [
+    process.env.GH_CONFIG_DIR ? join(process.env.GH_CONFIG_DIR, 'hosts.yml') : null,
+    process.env.APPDATA ? join(process.env.APPDATA, 'GitHub CLI', 'hosts.yml') : null,
+    process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, 'gh', 'hosts.yml') : null,
+    join(homedir(), '.config', 'gh', 'hosts.yml'),
+  ].filter((p): p is string => Boolean(p))
+  for (const file of candidates) {
+    try {
+      if (existsSync(file) && readFileSync(file, 'utf8').toLowerCase().includes(lower)) {
+        return true
+      }
+    } catch {
+      // Ignore unreadable config candidate.
+    }
+  }
+  return false
+}
+
+function checkGhEnterpriseAuth(hostname: string, protocol: 'http' | 'https' = 'https'): Promise<boolean> {
+  if (protocol === 'http' || !ghConfigMayKnowHost(hostname)) {
+    return Promise.resolve(false)
+  }
   return new Promise((resolveAuth) => {
+    let settled = false
+    const finish = (ok: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(hardTimer)
+      resolveAuth(ok)
+    }
     const child = execFile(
       'gh',
       ['auth', 'status', '--hostname', hostname],
-      { windowsHide: true, timeout: 8_000 },
-      (err) => resolveAuth(!err),
+      {
+        env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' },
+        windowsHide: true,
+        timeout: 6_000,
+      },
+      (err) => finish(!err),
     )
+    const hardTimer = setTimeout(() => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      try { child.kill('SIGKILL') } catch {}
+      finish(false)
+    }, 7_000)
+    hardTimer.unref?.()
     child.stdin?.end()
   })
 }
@@ -329,23 +487,36 @@ export async function resolveVerifiedForgeKind(options: {
     return cached === 'unsupported' ? null : { ...endpoint, forge: cached }
   }
 
+  const probeErrors: string[] = []
+
   const giteaAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitea' })
-  const giteaVer = await safeForgeGetJson(endpoint.httpOrigin, '/api/v1/version', giteaAuth, 6_000).catch(() => null)
-  if (giteaVer && typeof giteaVer === 'object' && typeof (giteaVer as { version?: unknown }).version === 'string') {
+  const giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', giteaAuth, 6_000)
+  if (giteaProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitea')
     return { ...endpoint, forge: 'gitea' }
   }
+  if (giteaProbe.status === 'error') {
+    probeErrors.push(`Gitea probe failed (${giteaProbe.reason})`)
+  }
 
-  if (await checkGhEnterpriseAuth(endpoint.hostname)) {
+  if (await checkGhEnterpriseAuth(endpoint.hostname, endpoint.protocol)) {
     probedOriginKinds.set(endpoint.httpOrigin, 'github')
     return { ...endpoint, forge: 'github' }
   }
 
   const gitlabAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitlab' })
-  const gitlabVer = await safeForgeGetJson(endpoint.httpOrigin, '/api/v4/version', gitlabAuth, 6_000).catch(() => null)
-  if (gitlabVer && typeof gitlabVer === 'object' && typeof (gitlabVer as { version?: unknown }).version === 'string') {
+  const gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', gitlabAuth, 6_000)
+  if (gitlabProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitlab')
     return { ...endpoint, forge: 'gitlab' }
+  }
+  if (gitlabProbe.status === 'error') {
+    probeErrors.push(`GitLab probe failed (${gitlabProbe.reason})`)
+  }
+
+  // Never cache or classify as unsupported when any probe failed transiently or due to auth/server errors!
+  if (probeErrors.length > 0) {
+    throw new Error(`Could not verify forge type for ${endpoint.httpOrigin}: ${probeErrors.join('; ')}`)
   }
 
   probedOriginKinds.set(endpoint.httpOrigin, 'unsupported')
@@ -555,6 +726,22 @@ export async function fetchForgePullEvidence(options: {
     safeForgePaginateArray(endpoint.httpOrigin, `${mrApi}/notes`, authHeaders, 'gitlab'),
   ])
   const diffRefs = (mrRaw.diff_refs ?? {}) as { head_sha?: string; base_sha?: string }
+  const targetBranch = typeof mrRaw.target_branch === 'string' ? mrRaw.target_branch.trim() : ''
+  const targetProjSpec = Number.isSafeInteger(mrRaw.target_project_id) && mrRaw.target_project_id !== mrRaw.source_project_id
+    ? String(mrRaw.target_project_id)
+    : encodedProject
+  let targetBranchTipSha = ''
+  if (targetBranch) {
+    const branchRaw = await safeForgeGetJson(
+      endpoint.httpOrigin,
+      `/api/v4/projects/${targetProjSpec}/repository/branches/${encodeURIComponent(targetBranch)}`,
+      authHeaders,
+    ) as Record<string, unknown> | null
+    const commitId = ((branchRaw?.commit ?? {}) as { id?: unknown }).id
+    if (typeof commitId === 'string' && SHA_RE.test(commitId.trim())) {
+      targetBranchTipSha = commitId.trim().toLowerCase()
+    }
+  }
   const items: ForgeEvidenceItem[] = []
   for (const n of notesRaw) {
     const rec = n as Record<string, unknown>
@@ -577,7 +764,7 @@ export async function fetchForgePullEvidence(options: {
     open: mrState === 'opened',
     merged: mrState === 'merged',
     head: String(diffRefs.head_sha ?? mrRaw.sha ?? '').toLowerCase(),
-    base: String(diffRefs.base_sha ?? '').toLowerCase(),
+    base: targetBranchTipSha || String(diffRefs.base_sha ?? '').toLowerCase(),
     sameRepo: Number.isSafeInteger(mrRaw.target_project_id) && mrRaw.target_project_id === mrRaw.source_project_id,
     actorId: meRaw?.id ?? null,
     actorLogin: meRaw?.username ?? null,

@@ -27,6 +27,7 @@ import {
   repositoryLabelFromOrigin,
   resolveCopilotReviewerPreset,
   resolveOtherCliReviewerArgs,
+  reviewerHelperDirAccess,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
 } from './pr-temp-reviewers.js'
@@ -217,6 +218,21 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     () => resolveOtherCliReviewerArgs('antigravity', undefined, true, null, 'demo'),
     /Could not confirm that this Antigravity CLI installation supports/,
   )
+
+  // Claude Code gets its helper folder via --settings permissions.additionalDirectories so interactive mode never stalls at an --add-dir trust prompt:
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --add-dir <directories...>\n  --settings <file-or-json>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--settings', '/tmp/helper/claude-settings.json'], settings: '{"permissions":{"additionalDirectories":["/tmp/helper"]}}' },
+  )
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --add-dir <directories...>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--add-dir', '/tmp/helper'], settings: null },
+  )
+  assert.deepEqual(
+    reviewerHelperDirAccess('codex', '  --add-dir <dir>\n  --settings <file>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--add-dir', '/tmp/helper'], settings: null },
+  )
+  assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {
@@ -549,6 +565,44 @@ test('reconcileSeatWithEvidenceLoader refuses to overwrite timed-out or round-ad
   })
   assert.equal(staleRound.ok, false)
   assert.equal(group.claimedEvidenceKeys.has('issue:902'), false)
+
+  // 4. Event queued behind another seat's verification when seat is reset BEFORE this verification starts:
+  // Capturing expectedRound/expectedGeneration at enqueue time ensures the reused seat's new generation stays 'running' and its timer is untouched!
+  const freshClaude = registry.resetSeatGeneration(group.id, 'claude', { clearForceSkip: true })
+  freshClaude.lifecycle = 'running'
+  const enqueuedRound = group.round
+  const enqueuedGen = freshClaude.generation
+  let releaseBlocker!: () => void
+  const blockerPromise = new Promise<void>((resolveBlocker) => {
+    releaseBlocker = resolveBlocker
+  })
+
+  let clearedReplacementTimer = false
+  const queuedOldCompletion = blockerPromise.then(() =>
+    reconcileSeatWithEvidenceLoader({
+      registry,
+      group,
+      seat: freshClaude,
+      trigger: 'completed',
+      expectedRound: enqueuedRound,
+      expectedGeneration: enqueuedGen,
+      onClearTimer: () => {
+        clearedReplacementTimer = true
+      },
+      loadEvidence: async () => ({ supported: true, verified: null }),
+    }),
+  )
+
+  // Reset seat to a new generation BEFORE releasing the queue blocker!
+  const replacementClaude = registry.resetSeatGeneration(group.id, 'claude', { clearForceSkip: true })
+  assert.equal(replacementClaude, freshClaude, 'resetSeatGeneration mutates the seat object in place')
+  replacementClaude.lifecycle = 'running'
+  releaseBlocker()
+
+  const queuedRes = await queuedOldCompletion
+  assert.equal(queuedRes.ok, false)
+  assert.equal(replacementClaude.lifecycle, 'running', 'queued old completion did not mark replacement generation incomplete')
+  assert.equal(clearedReplacementTimer, false, 'queued old completion did not clear replacement generation timer')
 })
 
 test('dismissing the last required seat ends the group as stopped, never approved', () => {

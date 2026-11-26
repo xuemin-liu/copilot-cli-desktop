@@ -117,6 +117,22 @@ export async function removeReviewerAreaDetailed(
           break
         } catch (error) {
           lastDetail = error instanceof Error ? error.message : String(error)
+          // If an earlier attempt already unregistered the worktree from Git before failing on Windows directory unlink,
+          // stop calling `git worktree remove` (which would say "not a working tree") and let `rm(area.root)` finish cleanup.
+          const latestList = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read').catch(() => null)
+          if (latestList !== null) {
+            let stillRegistered = false
+            for (const line of latestList.split('\0')) {
+              if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) {
+                stillRegistered = true
+                break
+              }
+            }
+            if (!stillRegistered) {
+              removedWorktree = true
+              break
+            }
+          }
           // Re-check whether the failure was due to newly dirtied tracked/untracked files so we don't retry a dirty tree.
           if (!missing) {
             const recheck = await git(runner, area.project, ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=normal'], 'read')
@@ -133,7 +149,11 @@ export async function removeReviewerAreaDetailed(
     }
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
-  await rm(area.root, { recursive: true, force: true, maxRetries: 3 })
+  try {
+    await rm(area.root, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 })
+  } catch (error) {
+    return { outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }
+  }
   return { outcome: 'removed' }
 }
 

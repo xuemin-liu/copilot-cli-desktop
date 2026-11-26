@@ -332,20 +332,64 @@ export async function forgeFetchJson(endpoint, apiPath, { method = 'GET', body =
   }
 }
 
-async function forgePaginateArray(endpoint, basePath, cred, maxPages = 20) {
+function parseNextPageFromHeaders(headers, httpOrigin, totalLoaded, currentPageCount, requestedPageSize) {
+  const linkHeader = headers.get('link')
+  if (linkHeader !== null) {
+    const linkPattern = /<([^>]+)>([^,]*)/g
+    let match
+    while ((match = linkPattern.exec(linkHeader)) !== null) {
+      const target = match[1].trim()
+      const params = match[2]
+      const relMatch = /;\s*rel=(?:"([^"]+)"|([^\s;]+))/i.exec(params)
+      const relTokens = (relMatch?.[1] ?? relMatch?.[2] ?? '').toLowerCase().split(/\s+/)
+      if (relTokens.includes('next')) {
+        const parsedNext = new URL(target, `${httpOrigin}/`)
+        if (parsedNext.origin.toLowerCase() !== httpOrigin.toLowerCase()) {
+          throw new Error(`Refusing cross-origin pagination Link target (${parsedNext.origin}) from ${httpOrigin}.`)
+        }
+        return { hasMore: true, nextPath: `${parsedNext.pathname}${parsedNext.search}` }
+      }
+    }
+    return { hasMore: false }
+  }
+  if (headers.has('x-next-page')) {
+    const rawNext = headers.get('x-next-page')?.trim() ?? ''
+    if (/^[1-9]\d*$/.test(rawNext)) {
+      return { hasMore: true, nextPage: Number(rawNext) }
+    }
+    return { hasMore: false }
+  }
+  if (headers.has('x-hasmore')) {
+    return { hasMore: headers.get('x-hasmore')?.trim().toLowerCase() === 'true' }
+  }
+  if (headers.has('x-total-count')) {
+    const rawTotal = headers.get('x-total-count')?.trim() ?? ''
+    if (/^\d+$/.test(rawTotal)) {
+      return { hasMore: totalLoaded < Number(rawTotal) }
+    }
+  }
+  return { hasMore: currentPageCount >= requestedPageSize }
+}
+
+export async function forgePaginateArray(endpoint, basePath, cred, maxPages = 50) {
   const results = []
-  for (let page = 1; page <= maxPages; page += 1) {
+  const requestedPageSize = endpoint.forge === 'gitlab' ? 100 : 50
+  let nextExplicitPath
+  let nextPageNum = 1
+  for (let pageCount = 1; ; pageCount += 1) {
     const sep = basePath.includes('?') ? '&' : '?'
-    const pageParam = endpoint.forge === 'gitlab' ? `per_page=100&page=${page}` : `limit=50&page=${page}`
-    const { data, headers } = await forgeFetchJson(endpoint, `${basePath}${sep}${pageParam}`, { cred })
+    const defaultPageParam = endpoint.forge === 'gitlab' ? `per_page=${requestedPageSize}&page=${nextPageNum}` : `limit=${requestedPageSize}&page=${nextPageNum}`
+    const requestPath = nextExplicitPath ?? `${basePath}${sep}${defaultPageParam}`
+    const { data, headers } = await forgeFetchJson(endpoint, requestPath, { cred })
     if (!Array.isArray(data) || data.length === 0) break
     results.push(...data)
-    if (endpoint.forge === 'gitlab') {
-      const nextPage = headers.get('x-next-page')
-      if (!nextPage || !/^\d+$/.test(nextPage.trim())) break
-    } else if (data.length < 50) {
-      break
+    const nextInfo = parseNextPageFromHeaders(headers, endpoint.httpOrigin, results.length, data.length, requestedPageSize)
+    if (!nextInfo.hasMore) break
+    if (pageCount >= maxPages) {
+      throw new Error(`Forge pagination exceeded safety cap (${maxPages} pages) on ${basePath}; refusing incomplete PR evidence.`)
     }
+    nextExplicitPath = nextInfo.nextPath
+    nextPageNum = nextInfo.nextPage ?? (nextPageNum + 1)
   }
   return results
 }
@@ -533,11 +577,28 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
   const { data: mr } = await forgeFetchJson(endpoint, mrApi, { cred })
   const actorRes = includeActor ? await forgeFetchJson(endpoint, '/api/v4/user', { cred }).catch(() => ({ data: null })) : { data: null }
   const rawNotes = await forgePaginateArray(endpoint, `${mrApi}/notes`, cred)
+  const targetBranch = typeof mr.target_branch === 'string' ? mr.target_branch.trim() : ''
+  const targetProjSpec = Number.isSafeInteger(mr.target_project_id) && mr.target_project_id !== mr.source_project_id
+    ? String(mr.target_project_id)
+    : encodedProject
+  let targetBranchTipSha = ''
+  if (targetBranch) {
+    const { data: branchObj } = await forgeFetchJson(
+      endpoint,
+      `/api/v4/projects/${targetProjSpec}/repository/branches/${encodeURIComponent(targetBranch)}`,
+      { cred },
+    )
+    const commitId = branchObj?.commit?.id
+    if (typeof commitId === 'string' && SHA_RE.test(commitId.trim())) {
+      targetBranchTipSha = commitId.trim().toLowerCase()
+    }
+  }
   const userNotes = rawNotes.filter((n) => !n.system)
   const rawState = String(mr.state ?? '').toLowerCase()
   const stateStr = rawState === 'merged' ? 'MERGED' : rawState === 'opened' ? 'OPEN' : 'CLOSED'
   const headSha = String(mr.diff_refs?.head_sha ?? mr.sha ?? '').toLowerCase()
-  const baseSha = String(mr.diff_refs?.base_sha ?? '').toLowerCase()
+  const mergeBaseSha = String(mr.diff_refs?.base_sha ?? '').toLowerCase()
+  const baseSha = targetBranchTipSha || mergeBaseSha
   const inline = []
   const issue = []
   for (const n of userNotes) {
@@ -573,6 +634,7 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
       headRefOid: headSha,
       baseRefName: String(mr.target_branch ?? ''),
       baseRefOid: baseSha,
+      mergeBaseOid: mergeBaseSha,
       sameRepo: Number.isSafeInteger(mr.target_project_id) && mr.target_project_id === mr.source_project_id,
       authorId: mr.author?.id ?? null,
       authorLogin: mr.author?.username ?? null,

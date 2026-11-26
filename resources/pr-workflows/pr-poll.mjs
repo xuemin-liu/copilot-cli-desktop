@@ -232,6 +232,7 @@ async function evaluateOnce({ prArg, stateFile }) {
       headChanged,
       baseRef: meta.baseRefName,
       baseSha: meta.baseRefOid,
+      ...(meta.mergeBaseOid ? { mergeBaseSha: meta.mergeBaseOid } : {}),
       previousBase: state.baseSha ?? null,
       baseChanged,
       edited: [...newReviews, ...newInline, ...newIssue].some((item) => item.edited === true),
