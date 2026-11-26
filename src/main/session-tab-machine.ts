@@ -253,6 +253,20 @@ export function fanOutAvailableSlots(state: Pick<TabsState, 'tabs'>, maxTabs = M
   return Math.max(0, maxTabs - regularTabCount(state))
 }
 
+function belongsToHostTab(candidate: DesktopSessionTab, host: DesktopSessionTab): boolean {
+  if (!candidate.tempReviewer) return false
+  return candidate.tempReviewer.hostTabId === host.id
+    || (candidate.tempReviewer.hostTabId === null && candidate.workspaceProfileId === host.workspaceProfileId)
+}
+
+function findHostForReviewer(state: TabsState, reviewerTab: DesktopSessionTab): DesktopSessionTab | null {
+  if (!reviewerTab.tempReviewer) return null
+  if (reviewerTab.tempReviewer.hostTabId !== null) {
+    return state.tabs.find((tab) => tab.id === reviewerTab.tempReviewer!.hostTabId && !tab.tempReviewer) ?? null
+  }
+  return state.tabs.find((tab) => !tab.tempReviewer && !tab.sideChat && tab.workspaceProfileId === reviewerTab.workspaceProfileId) ?? null
+}
+
 /**
  * Resolves the host tab ID and active peek reviewer tab ID regardless of whether focus is currently on the host tab,
  * its side chat, or the peeked reviewer terminal itself.
@@ -262,9 +276,12 @@ export function resolvePeekHostAndTab(
   peekByHost: Readonly<Record<string, string | null>>,
 ): { hostTabId: string | null; peekTabId: string | null } {
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
-  const hostTabId = active?.tempReviewer?.hostTabId ?? active?.sideParentTabId ?? state.activeTabId
+  const hostTabId = active?.tempReviewer
+    ? findHostForReviewer(state, active)?.id ?? null
+    : active?.sideParentTabId ?? state.activeTabId
+  const hostTab = hostTabId ? state.tabs.find((tab) => tab.id === hostTabId) ?? null : null
   const candidate = hostTabId ? peekByHost[hostTabId] ?? null : null
-  const peekTabId = hostTabId && candidate && state.tabs.some((tab) => tab.id === candidate && tab.tempReviewer?.hostTabId === hostTabId)
+  const peekTabId = hostTab && candidate && state.tabs.some((tab) => tab.id === candidate && belongsToHostTab(tab, hostTab))
     ? candidate
     : null
   return { hostTabId, peekTabId }
@@ -281,16 +298,16 @@ export function visibleSessionTabs(
 ): { main: DesktopSessionTab | null; side: DesktopSessionTab | null } {
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
   if (active?.tempReviewer) {
-    const host = state.tabs.find((tab) => tab.id === active.tempReviewer!.hostTabId) ?? null
+    const host = findHostForReviewer(state, active)
     const peek = host && peekTabId
-      ? state.tabs.find((tab) => tab.id === peekTabId && tab.tempReviewer?.hostTabId === host.id) ?? null
+      ? state.tabs.find((tab) => tab.id === peekTabId && belongsToHostTab(tab, host)) ?? null
       : null
     if (host && peek) return { main: host, side: peek }
     return { main: active, side: null }
   }
   const main = state.tabs.find((tab) => tab.id === active?.sideParentTabId) ?? active
   const peek = main && peekTabId
-    ? state.tabs.find((tab) => tab.id === peekTabId && tab.tempReviewer?.hostTabId === main.id) ?? null
+    ? state.tabs.find((tab) => tab.id === peekTabId && belongsToHostTab(tab, main)) ?? null
     : null
   const side = peek ?? (main ? state.tabs.find((tab) => tab.sideParentTabId === main.id) ?? null : null)
   return { main, side }

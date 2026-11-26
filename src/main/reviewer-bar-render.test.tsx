@@ -39,9 +39,11 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
     id: '22222222-2222-4222-8222-222222222222',
     hostTabId: 'tab-1',
     profileId: PROFILE.id,
-    repository: 'owner/repo',
+    repository: 'omaha:3001/owner/repo',
+    prLabel: 'PR #42',
     prNumber: 42,
-    prUrl: 'https://github.com/owner/repo/pull/42',
+    prUrl: 'http://omaha:3001/owner/repo/pulls/42',
+    round: 2,
     head: 'a'.repeat(40),
     base: 'b'.repeat(40),
     stage: 'active',
@@ -103,10 +105,11 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
     seats: group.seats.slice(0, 2),
     confirmTarget: {
       groupId: group.id,
+      round: 2,
       head: group.head,
       base: group.base,
       rosterKey: 'copilot:g1,claude:g2',
-      feedbackSignature: 'sig',
+      stateSignature: 'sig',
       approveAnyway: true,
       missingChecks: [{ cli: 'claude', missing: ['local build and test suite'] }],
     },
@@ -128,19 +131,36 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
     <ReviewerBar groups={[readyGroup]} activeTabId="tab-99" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
   )
   assert.equal(unrelatedHtml, '')
+
+  // Local / non-URL PR badge renders plain span without external URL button, and profile-scoped groups render on activeProfileId:
+  const localGroup: TempReviewerGroupView = {
+    ...readyGroup,
+    hostTabId: null,
+    prLabel: 'MR !7',
+    prNumber: 7,
+    prUrl: null,
+    stage: 'ended',
+    outcome: 'approved',
+  }
+  const localHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[localGroup]} activeTabId="tab-99" activeProfileId={PROFILE.id} peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+  )
+  assert.match(localHtml, /<span class="reviewer-bar-pr"[^>]*>MR !7<\/span>/)
+  assert.match(localHtml, /Approved/)
 })
 
 test('Sidebar hides tempReviewer tabs from main session lists and tucks them into a Reviewers disclosure under the host tab', () => {
   const host = makeTab('tab-1', 'Fix PR #42')
-  const hiddenReviewer = makeTab('tab-2', 'Review #42 · Claude Code', {
+  const hiddenReviewer = makeTab('tab-2', 'Review PR #42 · Claude Code', {
     cli: 'claude',
     tempReviewer: {
       groupId: '22222222-2222-4222-8222-222222222222',
       hostTabId: 'tab-1',
       cli: 'claude',
+      prLabel: 'PR #42',
       prNumber: 42,
-      repository: 'owner/repo',
-      prUrl: 'https://github.com/owner/repo/pull/42',
+      repository: 'omaha:3001/owner/repo',
+      prUrl: 'http://omaha:3001/owner/repo/pulls/42',
     },
   })
   const noop = (): void => {}
@@ -202,5 +222,5 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
       onOpenSettings={noop}
     />,
   )
-  assert.doesNotMatch(collapsedHtml, /Review #42 · Claude Code/)
+  assert.doesNotMatch(collapsedHtml, /Review PR #42 · Claude Code/)
 })

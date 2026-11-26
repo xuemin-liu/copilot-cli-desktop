@@ -31,6 +31,8 @@ param(
   [string]$Page = '',
   [string]$Action = '',
   [string]$Pr = '',
+  [string]$Head = '',
+  [string]$Base = '',
   [int]$Wait = 0,
   [switch]$Changes
 )
@@ -54,8 +56,15 @@ try {
   $meetingBody = @{}
   # Nonsecret routing metadata supplied by the CLI to its shell tools. The desktop independently verifies ownership.
   if ($env:COPILOT_AGENT_SESSION_ID) { $meetingBody.sessionId = $env:COPILOT_AGENT_SESSION_ID }
-  if (@('start', 'round', 'propose-close', 'task-report', 'pr-reply', 'pr-review') -contains $Command) {
-    if (!$File) { throw ('Usage: meeting.ps1 ' + $Command + ' -File <path>' + $(if ($Command -eq 'start') { ' -Topic "<one line>" [-Changes]' } elseif ($Command -eq 'round') { ' [-Changes]' } else { '' })) }
+  if ($Action) {
+    if ($Command -ne 'pr-reviewers' -or @('start', 'status', 'wait', 'round', 'finish', 'stop') -notcontains $Action) { throw 'Usage: meeting.ps1 pr-reviewers -Action start|status|wait|round|finish|stop [-Pr <number|url>] [-Head <sha|ref>] [-Base <sha|ref>] [-File <path>] [-Wait <1..60>]' }
+    $meetingBody.action = $Action
+  } elseif ($Command -eq 'pr-reviewers') {
+    $meetingBody.action = 'status'
+  }
+  $prReviewersTakesFile = ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'start' -or $meetingBody.action -eq 'round'))
+  if (@('start', 'round', 'propose-close', 'task-report', 'pr-reply', 'pr-review') -contains $Command -or ($prReviewersTakesFile -and ($File -or $meetingBody.action -eq 'round'))) {
+    if (!$File) { throw ('Usage: meeting.ps1 ' + $Command + $(if ($Command -eq 'pr-reviewers') { ' -Action round -Head <sha> -File <summary.md>' } else { ' -File <path>' }) + $(if ($Command -eq 'start') { ' -Topic "<one line>" [-Changes]' } elseif ($Command -eq 'round') { ' [-Changes]' } else { '' })) }
     $meetingFile = Get-Item -LiteralPath $File
     if ($meetingFile.PSIsContainer) { throw '-File must name a file.' }
     if ($meetingFile.Length -gt 262144) { throw 'The file is larger than 256 KB; shorten it.' }
@@ -67,18 +76,24 @@ try {
     $meetingBody.page = $Page
   }
   if ($Command -eq 'pr-reply') {
-    if ($To -notmatch '^([0-9]{1,19}|conversation)$') { throw 'Usage: meeting.ps1 pr-reply -To <comment id>|conversation -File <reply.md>' }
+    if ($To -notmatch '^([0-9A-Za-z_-]{1,64}|conversation)$') { throw 'Usage: meeting.ps1 pr-reply -To <comment id>|conversation -File <reply.md>' }
     $meetingBody.to = $To
   } elseif ($To) { throw ('meeting.ps1 ' + $Command + ' takes no -To.') }
-  if ($Action) {
-    if ($Command -ne 'pr-reviewers' -or @('start', 'status', 'wait', 'stop') -notcontains $Action) { throw 'Usage: meeting.ps1 pr-reviewers -Action start|status|wait|stop [-Pr <number|url>] [-Wait <1..60>]' }
-    $meetingBody.action = $Action
-  } elseif ($Command -eq 'pr-reviewers') {
-    $meetingBody.action = 'status'
-  }
   if ($Pr) {
     if ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'start') { throw 'Only pr-reviewers -Action start takes -Pr.' }
     $meetingBody.pr = $Pr
+  }
+  if ($Head) {
+    if ($Command -ne 'pr-reviewers' -or ($meetingBody.action -ne 'start' -and $meetingBody.action -ne 'round')) { throw 'Only pr-reviewers -Action start|round takes -Head.' }
+    if ($Head -notmatch '^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$') { throw 'Invalid -Head revision.' }
+    $meetingBody.head = $Head
+  } elseif ($Command -eq 'pr-reviewers' -and $meetingBody.action -eq 'round') {
+    throw 'pr-reviewers -Action round requires -Head <sha> and -File <summary.md>.'
+  }
+  if ($Base) {
+    if ($Command -ne 'pr-reviewers' -or ($meetingBody.action -ne 'start' -and $meetingBody.action -ne 'round')) { throw 'Only pr-reviewers -Action start|round takes -Base.' }
+    if ($Base -notmatch '^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$') { throw 'Invalid -Base revision.' }
+    $meetingBody.base = $Base
   }
   if ($Wait -ne 0) {
     if (($Command -ne 'pr-wait' -and ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'wait')) -or $Wait -lt 1 -or $Wait -gt 60) {
@@ -145,7 +160,7 @@ fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
 quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
 command=status
 if [ $# -gt 0 ]; then command=$1; shift; fi
-topic=''; file=''; changes=0; to=''; page=''; action=''; pr=''; wait_sec=''
+topic=''; file=''; changes=0; to=''; page=''; action=''; pr=''; head_rev=''; base_rev=''; wait_sec=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
@@ -153,15 +168,17 @@ while [ $# -gt 0 ]; do
     -Changes) changes=1; shift ;;
     -Page) [ $# -ge 2 ] || fail 'Usage: pr-read -Page <number>'; page=$2; shift 2 ;;
     -To) [ $# -ge 2 ] || fail 'Usage: -To <comment id>|conversation'; to=$2; shift 2 ;;
-    -Action) [ $# -ge 2 ] || fail 'Usage: -Action start|status|wait|stop'; action=$2; shift 2 ;;
+    -Action) [ $# -ge 2 ] || fail 'Usage: -Action start|status|wait|round|finish|stop'; action=$2; shift 2 ;;
     -Pr) [ $# -ge 2 ] || fail 'Usage: -Pr <number|url>'; pr=$2; shift 2 ;;
+    -Head) [ $# -ge 2 ] || fail 'Usage: -Head <sha|ref>'; head_rev=$2; shift 2 ;;
+    -Base) [ $# -ge 2 ] || fail 'Usage: -Base <sha|ref>'; base_rev=$2; shift 2 ;;
     -Wait) [ $# -ge 2 ] || fail 'Usage: -Wait <1..60>'; wait_sec=$2; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
 case "$command" in start|join|round|propose-close|end|status|task-report|task-status|pr-reply|pr-review|pr-read|pr-start|pr-wait|pr-reviewers) ;; *) fail "Unknown command: $command" ;; esac
 if [ "$command" = pr-reply ]; then
-  printf '%s' "$to" | grep -Eq '^([0-9]{1,19}|conversation)$' || fail 'Usage: meeting.sh pr-reply -To <comment id>|conversation -File <reply.md>'
+  printf '%s' "$to" | grep -Eq '^([0-9A-Za-z_-]{1,64}|conversation)$' || fail 'Usage: meeting.sh pr-reply -To <comment id>|conversation -File <reply.md>'
 elif [ -n "$to" ]; then fail "meeting.sh $command takes no -To."; fi
 if [ -n "$page" ]; then
   [ "$command" = pr-read ] || fail 'Only pr-read takes -Page.'
@@ -170,12 +187,22 @@ if [ -n "$page" ]; then
 fi
 if [ -n "$action" ]; then
   [ "$command" = pr-reviewers ] || fail 'Only pr-reviewers takes -Action.'
-  case "$action" in start|status|wait|stop) ;; *) fail 'Usage: meeting.sh pr-reviewers -Action start|status|wait|stop' ;; esac
+  case "$action" in start|status|wait|round|finish|stop) ;; *) fail 'Usage: meeting.sh pr-reviewers -Action start|status|wait|round|finish|stop' ;; esac
 elif [ "$command" = pr-reviewers ]; then
   action=status
 fi
 if [ -n "$pr" ]; then
   [ "$command" = pr-reviewers ] && [ "$action" = start ] || fail 'Only pr-reviewers -Action start takes -Pr.'
+fi
+if [ -n "$head_rev" ]; then
+  { [ "$command" = pr-reviewers ] && { [ "$action" = start ] || [ "$action" = round ]; }; } || fail 'Only pr-reviewers -Action start|round takes -Head.'
+  printf '%s' "$head_rev" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$' || fail 'Invalid -Head revision.'
+elif [ "$command" = pr-reviewers ] && [ "$action" = round ]; then
+  fail 'pr-reviewers -Action round requires -Head <sha> and -File <summary.md>.'
+fi
+if [ -n "$base_rev" ]; then
+  { [ "$command" = pr-reviewers ] && { [ "$action" = start ] || [ "$action" = round ]; }; } || fail 'Only pr-reviewers -Action start|round takes -Base.'
+  printf '%s' "$base_rev" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$' || fail 'Invalid -Base revision.'
 fi
 if [ -n "$wait_sec" ]; then
   if [ "$command" != pr-wait ] && { [ "$command" != pr-reviewers ] || [ "$action" != wait ]; }; then
@@ -197,6 +224,14 @@ case "$command" in
     fi
     [ -f "$file" ] || fail '-File must name a file.'
     [ "$(wc -c < "$file" | tr -d ' ')" -le 262144 ] || fail 'The file is larger than 256 KB; shorten it.' ;;
+  pr-reviewers)
+    if [ "$changes" -eq 1 ]; then fail 'meeting.sh pr-reviewers takes no -Changes.'; fi
+    if [ "$action" = round ] && [ -z "$file" ]; then fail 'Usage: meeting.sh pr-reviewers -Action round -Head <sha> -File <summary.md>'; fi
+    if [ -n "$file" ]; then
+      [ "$action" = start ] || [ "$action" = round ] || fail "meeting.sh pr-reviewers -Action $action takes no -File."
+      [ -f "$file" ] || fail '-File must name a file.'
+      [ "$(wc -c < "$file" | tr -d ' ')" -le 262144 ] || fail 'The file is larger than 256 KB; shorten it.'
+    fi ;;
   *) if [ -n "$file" ] || [ "$changes" -eq 1 ]; then fail "meeting.sh $command takes no -File or -Changes."; fi ;;
 esac
 if [ "$command" = propose-close ] && [ "$changes" -eq 1 ]; then fail 'propose-close takes no -Changes.'; fi
@@ -226,6 +261,8 @@ if [ "$command" = start ]; then printf 'form-string = "topic=%s"\n' "$(quote "$t
 if [ "$command" = pr-reply ]; then printf 'form-string = "to=%s"\n' "$to" >> "$work/config"; fi
 if [ -n "$action" ]; then printf 'form-string = "action=%s"\n' "$action" >> "$work/config"; fi
 if [ -n "$pr" ]; then printf 'form-string = "pr=%s"\n' "$(quote "$pr")" >> "$work/config"; fi
+if [ -n "$head_rev" ]; then printf 'form-string = "head=%s"\n' "$(quote "$head_rev")" >> "$work/config"; fi
+if [ -n "$base_rev" ]; then printf 'form-string = "base=%s"\n' "$(quote "$base_rev")" >> "$work/config"; fi
 if [ -n "$wait_sec" ]; then printf 'form-string = "wait=%s"\n' "$wait_sec" >> "$work/config"; fi
 if [ "$changes" -eq 1 ]; then
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail '-Changes needs a Git repository in the current folder.'
@@ -319,7 +356,7 @@ Pull request loops: when the person asks you, in their own message, to review a 
 `
 
 const PR_CHAT_INSTRUCTIONS = `
-When the person asks for fix-pr, review-pr, or review-and-fix-pr (including /fix-pr, /review-pr, /review-and-fix-pr, "fix PR 42", "review PR 287", or "review and fix PR 42"), perform that role in this conversation. Invoke the matching fix-pr, review-pr, or review-and-fix-pr skill and follow its instructions. A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
+When the person asks for fix-pr, review-pr, or review-and-fix-pr (including /fix-pr, /review-pr, /review-and-fix-pr, "fix PR 42", "review PR 287", or "review and fix PR 42") on ANY Git repository host (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or local Git), perform that role in this conversation. Invoke the matching fix-pr, review-pr, or review-and-fix-pr skill and follow its workflow while accessing the PR via whatever CLI or API matches git remote -v (never refuse non-GitHub hosts). A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
 If CLI discovery selects a personal copy or the skill is unavailable, read the packaged workflow with the shell: ${process.platform === 'win32' ? 'node "$env:COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"' : 'node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"'} --guide <fix-pr|review-pr|review-and-fix-pr>. Follow that output in this chat.
 For an explicit request to start or stop repository-wide discovery, use the meeting helper's pr-start command.
 `
@@ -363,7 +400,7 @@ export interface MeetingRequest { topic: string; text: string; changes: string |
   /** pr-reply: the inline comment id to answer, or "conversation". */
   page?: string; to?: string
   /** pr-reviewers / pr-wait options. */
-  action?: string; pr?: string; wait?: number }
+  action?: string; pr?: string; head?: string; base?: string; wait?: number }
 export interface MeetingResponse { ok: boolean; message: string }
 export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest, signal?: AbortSignal) => MeetingResponse | Promise<MeetingResponse>
 
@@ -455,7 +492,9 @@ export class MeetingControlServer {
           const wait = rawWait !== undefined && Number.isSafeInteger(rawWait) && rawWait >= 1 && rawWait <= 60 ? rawWait : undefined
           const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
             ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}),
-            ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}), ...(wait !== undefined ? { wait } : {}) }, gone.signal)
+            ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}),
+            ...(body.head !== undefined ? { head: text('head') } : {}), ...(body.base !== undefined ? { base: text('base') } : {}),
+            ...(wait !== undefined ? { wait } : {}) }, gone.signal)
           const rawJsonCommand = command === 'pr-read' || command === 'pr-wait' || command === 'pr-reviewers'
           if (rawJsonCommand && body.format === 'pr-json' && answer.ok) {
             if (!request.socket.destroyed) {

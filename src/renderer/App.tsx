@@ -519,6 +519,7 @@ export function App(): JSX.Element {
           <ReviewerBar
             groups={state.tempReviewerGroups ?? []}
             activeTabId={state.activeTabId}
+            activeProfileId={state.activeProfileId}
             peekTabId={activePeekTabId}
             onPeek={updatePeekReviewer}
             onError={setOperationError}

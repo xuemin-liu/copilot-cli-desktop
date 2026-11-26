@@ -130,11 +130,12 @@ export interface DesktopSessionTab {
 
 export interface TempReviewerTabInfo {
   groupId: string
-  hostTabId: string
+  hostTabId: string | null
   cli: ReviewerCli
   repository: string
-  prNumber: number
-  prUrl: string
+  prLabel: string
+  prNumber: number | null
+  prUrl: string | null
 }
 
 export type TempReviewerSeatVerdict =
@@ -162,25 +163,28 @@ export interface TempReviewerSeatView {
 
 export interface TempReviewerConfirmTarget {
   groupId: string
+  round: number
   head: string
   base: string
   rosterKey: string
-  feedbackSignature: string
+  stateSignature: string
   approveAnyway: boolean
   missingChecks: Array<{ cli: ReviewerCli; missing: string[] }>
 }
 
 export interface TempReviewerGroupView {
   id: string
-  hostTabId: string
+  hostTabId: string | null
   profileId: string
   repository: string
-  prNumber: number
-  prUrl: string
+  prLabel: string
+  prNumber: number | null
+  prUrl: string | null
+  round: number
   head: string
   base: string
   stage: 'starting' | 'active' | 'ended'
-  outcome: 'confirmed' | 'merged' | 'closed' | 'stopped' | null
+  outcome: 'approved' | 'confirmed' | 'merged' | 'closed' | 'stopped' | null
   seats: TempReviewerSeatView[]
   confirmTarget: TempReviewerConfirmTarget | null
   notice: string | null

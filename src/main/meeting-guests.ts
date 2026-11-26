@@ -527,6 +527,19 @@ export interface GuestDeps {
   canonicalFolder?(path: string): Promise<string>
   /** A folder an agent names as its project, as a host without an invitation: why it cannot be used, or null. */
   checkFolder(path: string): Promise<string | null>
+  /** Forge-agnostic temporary PR reviewer host operations exposed over MCP to any CLI session. */
+  prReviewersStart?(options: {
+    desktopTag: string | null
+    folder?: string
+    pr?: string
+    prUrl?: string
+    head?: string
+    base?: string
+    context?: string
+  }): Promise<{ ok: boolean; message: string; hostKey?: string }>
+  prReviewersWait?(hostKey: string | null, desktopTag: string | null, waitSeconds: number, signal?: AbortSignal): Promise<GuestResponse>
+  prReviewersRound?(hostKey: string | null, desktopTag: string | null, options: { head: string; base?: string; summary: string }): Promise<GuestResponse>
+  prReviewersFinish?(hostKey: string | null, desktopTag: string | null, outcome: 'approved' | 'stopped'): Promise<GuestResponse>
 }
 
 export interface GuestResponse { ok: boolean; message: string }
