@@ -197,6 +197,7 @@ test('a folder a clean removal left behind goes on a later try, also with its .g
       rmSync(join(area.checkout, '.git'))
       f.plain(project, 'worktree', 'prune')
       writeFileSync(join(area.checkout, '.git'), marker)
+      await new Promise((done) => setTimeout(done, 30))
       return area
     }
     // Without a record that Git detached it while clean, an unregistered folder with a .git file is left alone.
@@ -204,20 +205,40 @@ test('a folder a clean removal left behind goes on a later try, also with its .g
     assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner), { outcome: 'kept', reason: 'unregistered' })
     assert.ok(existsSync(join(unknown.checkout, 'a.txt')))
     // With that record, the same state is cleared: folder and ref.
-    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner, { detached: true }), { outcome: 'removed' })
+    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
     assert.equal(existsSync(unknown.root), false)
     assert.throws(() => f.plain(project, 'rev-parse', '--verify', unknown.ref), 'its ref goes with it')
+    // A file saved in the leftover folder after the removal is the person's: nothing is deleted.
+    const noted = await leftover()
+    const removedAt = Date.now()
+    await new Promise((done) => setTimeout(done, 30))
+    mkdirSync(join(noted.checkout, 'notes'))
+    writeFileSync(join(noted.checkout, 'notes', 'recovery.txt'), 'saved after the worktree was removed')
+    const keptNote = await removeReviewerAreaDetailed(noted, f.runner, { detachedAt: removedAt })
+    assert.equal(keptNote.outcome === 'kept' && keptNote.reason, 'dirty')
+    assert.match(keptNote.outcome === 'kept' ? keptNote.detail ?? '' : '', /recovery\.txt was saved after/)
+    assert.ok(existsSync(join(noted.checkout, 'notes', 'recovery.txt')))
+    // Git gives a later review's worktree the entry name this one had ("checkout"). The old pointer then names an
+    // entry that exists but belongs to the other checkout: still stale, and the other review is not touched.
+    const first = await leftover()
+    const second = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, second, { head, base }, 7)
+    assert.equal(readFileSync(join(first.checkout, '.git'), 'utf8'), readFileSync(join(second.checkout, '.git'), 'utf8'), 'Git reused the entry')
+    assert.deepEqual(await removeReviewerAreaDetailed(first, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
+    assert.equal(f.plain(second.checkout, 'rev-parse', 'HEAD').trim(), head)
+    // The entry's own checkout is real Git metadata even with the record.
+    assert.equal((await removeReviewerAreaDetailed(second, f.runner)).outcome, 'removed')
     // A repository someone made of the leftover folder is real Git metadata: the record does not let it go.
     const recovered = await leftover()
     rmSync(join(recovered.checkout, '.git'))
     f.plain(recovered.checkout, 'init', '-q')
     f.plain(recovered.checkout, 'add', '-A'); f.plain(recovered.checkout, 'commit', '-qm', 'recovered by the person')
-    assert.deepEqual(await removeReviewerAreaDetailed(recovered, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+    assert.deepEqual(await removeReviewerAreaDetailed(recovered, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
     assert.match(f.plain(recovered.checkout, 'log', '--oneline'), /recovered by the person/)
     // So is a .git file that points anywhere but a missing entry of this project's own worktrees folder.
     const foreign = await leftover()
     writeFileSync(join(foreign.checkout, '.git'), `gitdir: ${join(f.root, 'not-the-project', 'worktrees', 'gone')}\n`)
-    assert.deepEqual(await removeReviewerAreaDetailed(foreign, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+    assert.deepEqual(await removeReviewerAreaDetailed(foreign, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
     assert.ok(existsSync(join(foreign.checkout, 'a.txt')))
     // The record does not weaken the path guard: a checkout that is not this review's own folder is never removed.
     const linked = await leftover()
@@ -226,14 +247,14 @@ test('a folder a clean removal left behind goes on a later try, also with its .g
     let linkMade = true
     try { symlinkSync(elsewhere, linked.checkout, 'junction') } catch { linkMade = false }
     if (linkMade) {
-      assert.deepEqual(await removeReviewerAreaDetailed(linked, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+      assert.deepEqual(await removeReviewerAreaDetailed(linked, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'unregistered' })
       assert.ok(existsSync(join(elsewhere, 'mine.txt')))
     }
     // A worktree still registered goes through the usual check even with the record: changes keep it.
     const dirty = await createReviewerArea(join(f.root, 'reviewers'))
     await cloneForReview(f.runner, project, upstream, dirty, { head, base }, 7)
     writeFileSync(join(dirty.checkout, 'reviewer-notes.txt'), 'kept for the person')
-    assert.deepEqual(await removeReviewerAreaDetailed(dirty, f.runner, { detached: true }), { outcome: 'kept', reason: 'dirty' })
+    assert.deepEqual(await removeReviewerAreaDetailed(dirty, f.runner, { detachedAt: Date.now() }), { outcome: 'kept', reason: 'dirty' })
     assert.ok(existsSync(join(dirty.checkout, 'reviewer-notes.txt')))
   } finally { f.cleanup() }
 })
@@ -257,7 +278,7 @@ test('a clean worktree whose folder cannot be deleted is reported as detached, a
     assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), new RegExp(basename(area.root)))
     const exited = new Promise<void>((done) => holder!.once('exit', () => done()))
     holder.kill(); await exited; holder = null
-    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detached: true }), { outcome: 'removed' })
+    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
     assert.equal(existsSync(area.root), false)
   } finally { holder?.kill(); f.cleanup() }
 })
@@ -275,16 +296,16 @@ test('a kept reservation records a detached removal, keeps it across a restart, 
     // Kept for the person (changes, or an outcome nobody recorded): not detached.
     await store.keep(a.launchId)
     assert.equal(store.holder('o/r', 1, 'x')?.kept, true)
-    assert.equal(store.holder('o/r', 1, 'x')?.detached, undefined)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, undefined)
     // A later clean removal that only left the folder upgrades it; a plain keep after that does not take it back.
     await store.keep(a.launchId, true)
-    assert.equal(store.holder('o/r', 1, 'x')?.detached, true)
+    assert.equal(typeof store.holder('o/r', 1, 'x')?.detachedAt, 'number')
     await store.keep(a.launchId)
-    assert.equal(store.holder('o/r', 1, 'x')?.detached, true)
+    assert.equal(typeof store.holder('o/r', 1, 'x')?.detachedAt, 'number')
     await store.keep(b.launchId, true)
     const reread = new ReviewReservations(path)
-    assert.equal(reread.holder('o/r', 1, 'x')?.detached, true)
-    assert.equal(reread.holder('o/r', 2, 'x')?.detached, true)
+    assert.equal(typeof reread.holder('o/r', 1, 'x')?.detachedAt, 'number')
+    assert.equal(typeof reread.holder('o/r', 2, 'x')?.detachedAt, 'number')
     // A new start of the same review says what is in the way: changes for the person, or a folder still in use.
     const again = mk(3)
     await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 1, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /still in use and could not be deleted/)
@@ -292,9 +313,14 @@ test('a kept reservation records a detached removal, keeps it across a restart, 
     await store.reserve({ launchId: c.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: c.root, checkout: join(c.root, 'checkout'), ref: `refs/desktop-review/${c.launchId}` })
     await store.keep(c.launchId)
     await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 3, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /left changes in its worktree/)
-    // A record whose flag is not a boolean is not trusted at all.
+    // Something saved in the leftover folder later makes the record the person's again, with the message for changes.
+    await store.undetach(b.launchId)
+    assert.equal(store.holder('o/r', 2, 'x')?.kept, true)
+    assert.equal(store.holder('o/r', 2, 'x')?.detachedAt, undefined)
+    await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 2, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /left changes in its worktree/)
+    // A record whose time is not a number is not trusted at all.
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>[]
-    raw[0]!.detached = 'yes'
+    raw[0]!.detachedAt = 'yes'
     writeFileSync(path, JSON.stringify(raw))
     const tampered = new ReviewReservations(path)
     assert.equal(tampered.list().length, 2)

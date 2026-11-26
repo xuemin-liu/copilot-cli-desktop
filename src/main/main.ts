@@ -988,10 +988,12 @@ let sweeping=false
  */
 async function clearDetachedReviewHold(store:ReviewReservations,repository:string,number:number,reviewer:string):Promise<void>{
   const held=store.holder(repository,number,reviewer)
-  if(!held||!held.kept||held.detached!==true||held.codexAuthSync||reviewLaunches.has(held.launchId))return
+  if(!held||!held.kept||held.detachedAt===undefined||held.codexAuthSync||reviewLaunches.has(held.launchId))return
   // One short try: a folder still held open is reported at once rather than waited on.
-  const removal=await removeReviewerAreaDetailed(held,await meetingGitRunner(),{detached:true,folderRetries:1}).catch(()=>null)
+  const removal=await removeReviewerAreaDetailed(held,await meetingGitRunner(),{detachedAt:held.detachedAt,folderRetries:1}).catch(()=>null)
   if(removal?.outcome==='removed')await store.release(held.launchId).catch(()=>{})
+  // Something was saved in the leftover folder since: it is the person's again, and the reservation says so.
+  else if(removal?.outcome==='kept'&&removal.reason==='dirty')await store.undetach(held.launchId).catch(()=>{})
 }
 /**
  * A review that ended (merged, closed, stopped, or a start that failed) and whose tab is gone leaves its worktree in
@@ -1005,9 +1007,9 @@ async function sweepReviewerAreas():Promise<void>{
   try{
     for(const record of store.list()){
       // A kept worktree is the person's until they remove it; then its ref and folder go, and the PR can be reviewed again.
-      // A kept folder a clean removal left behind (`detached`: only deleting it failed) is not the person's: it is tried again here.
+      // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
-      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&!record.detached&&existsSync(record.checkout)))continue
+      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
@@ -1015,11 +1017,12 @@ async function sweepReviewerAreas():Promise<void>{
       if(open)continue
       const credOutcome = await recoverSweptReviewerCredentials(record, store)
       if (credOutcome === 'retry-sync') continue
-      if (record.kept && !record.detached && existsSync(record.checkout)) continue
-      const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),record.detached===true?{detached:true,folderRetries:1}:undefined).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
+      if (record.kept && record.detachedAt === undefined && existsSync(record.checkout)) continue
+      const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),record.detachedAt!==undefined?{detachedAt:record.detachedAt,folderRetries:1}:undefined).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(removal.outcome==='removed')await store.release(record.launchId)
       else if(removal.reason==='detached')await store.keep(record.launchId,true)
+      else if(record.detachedAt!==undefined&&removal.reason==='dirty'){await store.undetach(record.launchId);workflowNotice=`Files were saved in the leftover review folder of PR #${record.number}, so it was kept: ${record.checkout}. Look at it, then delete the folder.`;broadcastState()}
       else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of PR #${record.number} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
     }
   }finally{sweeping=false}
