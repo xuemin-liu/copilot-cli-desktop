@@ -719,6 +719,12 @@ button:disabled {
   padding: 10px;
 }
 
+/* xterm 6 draws its own overlay scrollbar, but its stock CSS still gives .xterm-viewport `overflow-y: scroll`, so
+   Chromium also painted a native scrollbar (with arrow buttons) along the right edge, misaligned with the rows. */
+.xterm .xterm-viewport {
+  scrollbar-width: none;
+}
+
 .terminal-copy-status {
   position: absolute;
   z-index: 5;
