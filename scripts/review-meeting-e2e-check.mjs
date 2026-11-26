@@ -417,7 +417,27 @@ class AgyStub {
     await hostH('meeting_end')
     await until('everything to be closed', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0, 30_000)
 
-    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF, meetingH] }, null, 2))
+    // 10. Stop while the seat is still starting: the held round opens for the reviewer who joined by id, the hidden
+    // seat is never in it, and its session and checkout are gone.
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'review', holdMs: 5000 }))
+    const hostI = await client('claude-code')
+    const meetingI = meetingIdOf((await hostI('meeting_start', { topic: 'stopped', post: 'Plan I.', folder: repo, reviewers: true })).text)
+    const outsiderI = await client('codex-cli')
+    await outsiderI('meeting_join', { meeting: meetingI })
+    const starting = await until('run I to be starting', async () => { const group = await groupOf(meetingI); return group?.stage === 'starting' && group.seats[0].tabId ? group : null })
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(starting.id)}, 'stop')`)
+    const stopped = await groupOf(meetingI)
+    assert.equal(stopped.stage, 'ended')
+    assert.equal(stopped.outcome, 'stopped')
+    assert.match(await nextMessage(outsiderI), /round 1/, 'the meeting goes on for who is there')
+    await outsiderI('meeting_reply', { text: 'Only me.' })
+    const alone = await nextMessage(hostI)
+    assert.match(alone, /Only me\./)
+    assert.doesNotMatch(alone, /Stub review/, 'the stopped seat took no part')
+    await hostI('meeting_end')
+    await until('everything to be closed', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0, 30_000)
+
+    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF, meetingH, meetingI] }, null, 2))
     app.exit(0)
   }
 }
