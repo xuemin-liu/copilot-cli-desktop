@@ -4982,8 +4982,11 @@ async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string
 function revokeMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: string): void {
   for (const seat of seats) {
     clearMeetingSeatJoinTimer(seat)
+    stopMeetingCopilotWatch(seat.generation)
     const guestSeatId = seat.guestSeatId
     seat.guestSeatId = null
+    // A Copilot seat is in the meeting as its tab.
+    if (!guestSeatId && seat.cli === 'copilot' && seat.tabId) forgetMeetingSession(seat.tabId)
     if (!guestSeatId) continue
     guestMailbox.close(guestSeatId, why)
     meetingHub.leave(guestSeatId)
@@ -5384,11 +5387,9 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeti
     discoverSessionIdFromOutput: deterministicSessionId === null,
     monitorSessionPermissions: true,
   })
-  managedTabs.set(id, { session })
-  trackSessionName(id, { ...process.env, ...plan.env }, false)
-  profilesWithSessionTabs.add(profile.id)
-  if (deterministicSessionId) usageService?.associate(deterministicSessionId, false)
-  tabsState = createBackgroundTab(tabsState, {
+  // The tab first: when no hidden slot is free this throws, and nothing was registered for a tab that does not exist.
+  try {
+    tabsState = createBackgroundTab(tabsState, {
     id,
     title,
     browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
@@ -5404,7 +5405,15 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeti
     launchWorktree: false,
     autoTitle: false,
     tempReviewer: { groupId: group.id, hostTabId: group.hostTabId, cli: 'copilot', repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
-  })
+    })
+  } catch (error) {
+    meetingControl.forget(id)
+    throw error
+  }
+  managedTabs.set(id, { session })
+  trackSessionName(id, { ...process.env, ...plan.env }, false)
+  profilesWithSessionTabs.add(profile.id)
+  if (deterministicSessionId) usageService?.associate(deterministicSessionId, false)
   seat.tabId = id
   syncTabState()
   broadcastState()
