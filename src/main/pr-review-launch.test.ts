@@ -4,7 +4,7 @@ import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileS
 import { basename, join, resolve } from 'node:path'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, keptReviewWorktreeRemains, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
 
 /** "GitHub" (upstream, with refs/pull/<n>/head) and the person's project, a clone of it on its own branch. */
 function repos(f: GitFixture, number = 7): { upstream: string; project: string; base: string; head: string } {
@@ -180,6 +180,31 @@ test('a credential in the project\'s own Git config refuses the review, named by
     const kinds = await projectCredentialSettings(f.runner, project)
     assert.deepEqual(kinds.sort(), ['a URL rewrite with a user name or token', 'a credential helper', 'a remote URL with a user name or token', 'an http extraHeader'].sort())
     assert.doesNotMatch(kinds.join(' '), /SECRET/)
+  } finally { f.cleanup() }
+})
+
+test('a kept folder that is no longer a worktree is not the person\'s: it can be cleared', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+    assert.equal(keptReviewWorktreeRemains(area.checkout), true)
+    // A worktree with changes stays the person's, however often removal is tried.
+    writeFileSync(join(area.checkout, 'reviewer-notes.txt'), 'kept for the person')
+    assert.equal(await removeReviewerArea(area, f.runner), 'kept')
+    assert.equal(keptReviewWorktreeRemains(area.checkout), true)
+    rmSync(join(area.checkout, 'reviewer-notes.txt'))
+    // What a removal that failed part-way leaves: Git no longer registers the worktree, its .git is gone, files remain.
+    mkdirSync(join(area.checkout, 'node_modules'), { recursive: true })
+    writeFileSync(join(area.checkout, 'node_modules', 'left.txt'), 'held open during removal')
+    rmSync(join(area.checkout, '.git'))
+    f.plain(project, 'worktree', 'prune')
+    assert.equal(existsSync(area.checkout), true)
+    assert.equal(keptReviewWorktreeRemains(area.checkout), false)
+    assert.equal(await removeReviewerArea(area, f.runner), 'removed')
+    assert.equal(existsSync(area.root), false)
+    assert.throws(() => f.plain(project, 'rev-parse', '--verify', area.ref), 'its ref goes with it')
   } finally { f.cleanup() }
 })
 

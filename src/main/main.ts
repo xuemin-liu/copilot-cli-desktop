@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, keptReviewWorktreeRemains, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -982,6 +982,17 @@ function sameRealPath(a:string,b:string):boolean{
 }
 let sweeping=false
 /**
+ * Before a review is reserved: clears an earlier, kept hold on the same review whose folder is no longer a worktree, so
+ * a retry is not refused for what a failed removal left behind. A hold with a real worktree, a running launch, or a
+ * Codex credential still to sync is left for the sweep and the person.
+ */
+async function clearWreckedReviewHold(store:ReviewReservations,repository:string,number:number,reviewer:string):Promise<void>{
+  const held=store.holder(repository,number,reviewer)
+  if(!held||!held.kept||held.codexAuthSync||reviewLaunches.has(held.launchId)||keptReviewWorktreeRemains(held.checkout))return
+  const outcome=await removeReviewerArea(held,await meetingGitRunner()).catch(()=>'kept' as const)
+  if(outcome==='removed')await store.release(held.launchId).catch(()=>{})
+}
+/**
  * A review that ended (merged, closed, stopped, or a start that failed) and whose tab is gone leaves its worktree in
  * the person's project, its ref, its Copilot home and a dead session's token: remove them, by the record that says
  * they are this desktop's. A worktree with changes is kept for the person, and said so once.
@@ -993,8 +1004,9 @@ async function sweepReviewerAreas():Promise<void>{
   try{
     for(const record of store.list()){
       // A kept worktree is the person's until they remove it; then its ref and folder go, and the PR can be reviewed again.
+      // A kept folder that is no longer a worktree (a removal failed part-way) is not the person's: it is cleared here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
-      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&existsSync(record.checkout)))continue
+      if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&keptReviewWorktreeRemains(record.checkout)))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
       if(grant?.enabled)continue
@@ -1002,7 +1014,7 @@ async function sweepReviewerAreas():Promise<void>{
       if(open)continue
       const credOutcome = await recoverSweptReviewerCredentials(record, store)
       if (credOutcome === 'retry-sync') continue
-      if (record.kept && existsSync(record.checkout)) continue
+      if (record.kept && keptReviewWorktreeRemains(record.checkout)) continue
       const outcome=await removeReviewerArea(record,await meetingGitRunner()).catch(()=>'kept' as const)
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(outcome==='removed')await store.release(record.launchId)
@@ -1041,6 +1053,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
   if(credentials.length)throw new Error(`${profile.name}'s own Git config holds ${credentials.join(' and ')}, which the sandboxed reviewer could read. Move it to your global Git config or a credential manager, then ask again.`)
   // Recorded before anything is made: a second start of this review is refused, and a crash leaves nothing unaccounted for.
   const area=planReviewerArea(reviewerAreaBase()),launchId=basename(area.root)
+  await clearWreckedReviewHold(store,pull.repository,pull.number,String(me.id))
   await store.reserve({launchId,repository:pull.repository,number:pull.number,reviewer:String(me.id),project:resolve(profile.path),root:area.root,checkout:area.checkout,ref:area.ref})
   reviewLaunches.add(launchId)
   let tabId:string|null=null
@@ -3974,6 +3987,7 @@ async function launchTempReviewerSeat(
   seat.launchId = launchId
   seat.area = area
   if (!reusingExistingArea) {
+    await clearWreckedReviewHold(store, group.repository, group.prNumber ?? 1, `temp:${group.id}:${seat.cli}`)
     await store.reserve({
       launchId,
       repository: group.repository,

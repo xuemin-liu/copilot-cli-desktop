@@ -1,6 +1,6 @@
 import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
@@ -155,6 +155,16 @@ export async function removeReviewerAreaDetailed(
     return { outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }
   }
   return { outcome: 'removed' }
+}
+
+/**
+ * Whether a kept review still has a worktree for the person to look at: its checkout holds a worktree's `.git`. A
+ * checkout without one is what a removal that failed part-way left behind (on Windows, a file still held open stops
+ * `git worktree remove` after it has unregistered the worktree). Git can show no changes in it and cannot remove it, so
+ * it is the desktop's to clear rather than a reason to refuse the next review.
+ */
+export function keptReviewWorktreeRemains(checkout: string): boolean {
+  return existsSync(join(checkout, '.git'))
 }
 
 /**
