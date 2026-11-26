@@ -512,6 +512,7 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
 export class GuestMcpServer {
   private server: Server | null = null
   private port = 0
+  private fallback = false
   readonly sessions = new GuestMcpSessions()
 
   constructor(
@@ -534,6 +535,26 @@ export class GuestMcpServer {
         resolveListen(this.port)
       })
     })
+  }
+
+  /**
+   * Listens on the preferred port, or on any free loopback port when that one is taken (another app, or a second desktop
+   * build), so the tools stay on. Tabs are handed url() when they start, so they follow whichever port it got. Null only
+   * when no port could be had at all.
+   */
+  async listenPreferring(port: number): Promise<{ port: number; fallback: boolean } | null> {
+    const preferred = await this.listen(port)
+    if (preferred !== null) return { port: preferred, fallback: false }
+    if (port === 0) return null
+    const any = await this.listen(0)
+    if (any === null) return null
+    this.fallback = true
+    return { port: any, fallback: true }
+  }
+
+  /** The preferred port was taken, so url() is a port the OS picked for this run: agents set up by hand need it anew. */
+  usesFallbackPort(): boolean {
+    return this.server !== null && this.fallback
   }
 
   url(): string | null {

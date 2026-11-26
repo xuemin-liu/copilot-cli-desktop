@@ -319,6 +319,40 @@ test('a taken port leaves the tools off instead of failing', async () => {
   }
 })
 
+test('a taken preferred port falls back to a free one so the tools stay on', async () => {
+  const blocker = createServer()
+  await new Promise<void>((resolveListen) => blocker.listen(0, '127.0.0.1', () => resolveListen()))
+  const taken = (blocker.address() as { port: number }).port
+  const server = new GuestMcpServer(new GuestMailbox(realTimers), meeting().deps)
+  try {
+    const listening = await server.listenPreferring(taken)
+    assert.ok(listening, 'it listens somewhere')
+    assert.equal(listening.fallback, true)
+    assert.equal(server.usesFallbackPort(), true, 'the meeting bar is told the address is a fallback')
+    assert.notEqual(listening.port, taken)
+    assert.equal(server.url(), `http://127.0.0.1:${listening.port}/mcp`)
+    const answer = await http(listening.port, 'POST', { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }))
+    assert.equal(answer.status, 200, 'the fallback port answers MCP')
+  } finally {
+    await server.close()
+    await new Promise<void>((resolveClose) => blocker.close(() => resolveClose()))
+  }
+})
+
+test('a free preferred port is used as is', async () => {
+  const probe = createServer()
+  await new Promise<void>((resolveListen) => probe.listen(0, '127.0.0.1', () => resolveListen()))
+  const free = (probe.address() as { port: number }).port
+  await new Promise<void>((resolveClose) => probe.close(() => resolveClose()))
+  const server = new GuestMcpServer(new GuestMailbox(realTimers), meeting().deps)
+  try {
+    assert.deepEqual(await server.listenPreferring(free), { port: free, fallback: false })
+    assert.equal(server.usesFallbackPort(), false)
+  } finally {
+    await server.close()
+  }
+})
+
 async function until(check: () => boolean, label: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt++) { if (check()) return; await new Promise((resolveSoon) => setTimeout(resolveSoon, 20)) }
   throw new Error(`Timed out: ${label}`)
