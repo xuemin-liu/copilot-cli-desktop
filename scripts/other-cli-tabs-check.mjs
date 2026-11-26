@@ -360,7 +360,7 @@ if (!process.versions.electron) {
     const all = await tabs()
     assert.deepEqual(all.map(tab => [tab.cli ?? 'copilot', tab.sessionPermissionPreset !== null]), [['copilot', true], ['claude', false], ['codex', false], ['antigravity', false]])
 
-    // All 4 CLI homes received the 3 packaged PR workflow skills (review-pr, fix-pr, review-and-fix-pr).
+    // All 4 CLI homes received the packaged skills (review-pr, fix-pr, review-and-fix-pr, review-meeting).
     const skillDirs = [
       join(process.env.COPILOT_HOME, 'skills'),
       join(process.env.CLAUDE_CONFIG_DIR, 'skills'),
@@ -368,7 +368,7 @@ if (!process.versions.electron) {
       join(process.env.ANTIGRAVITY_GEMINI_DIR, 'config', 'skills'),
     ]
     for (const rootSkills of skillDirs) {
-      for (const skillName of ['review-pr', 'fix-pr', 'review-and-fix-pr']) {
+      for (const skillName of ['review-pr', 'fix-pr', 'review-and-fix-pr', 'review-meeting']) {
         const text = await readFile(join(rootSkills, skillName, 'SKILL.md'), 'utf8')
         assert.match(text, new RegExp(`^name: ${skillName}$`, 'm'), `${rootSkills} has ${skillName}/SKILL.md`)
       }

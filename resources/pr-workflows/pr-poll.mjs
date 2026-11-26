@@ -335,8 +335,8 @@ async function evaluateOnce({ prArg, stateFile }) {
 async function main() {
   if (argv[0] === '--guide') {
     const role = argv[1]
-    if (argv.length !== 2 || !['review-pr', 'fix-pr', 'review-and-fix-pr'].includes(role)) {
-      console.error('usage: pr-poll.mjs --guide review-pr|fix-pr|review-and-fix-pr')
+    if (argv.length !== 2 || !['review-pr', 'fix-pr', 'review-and-fix-pr', 'review-meeting'].includes(role)) {
+      console.error('usage: pr-poll.mjs --guide review-pr|fix-pr|review-and-fix-pr|review-meeting')
       process.exitCode = 2
       return
     }

@@ -334,7 +334,8 @@ A meeting lets several sessions review one session's plan or local changes witho
   review. The host then gets the reviews and that discussion together. It costs one more turn per reviewer per round;
   votes are not discussed.
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
-  answers your own message. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
+  answers your own message. [Hidden reviewers](#hidden-reviewers-the-desktop-starts) join because you allowed them for
+  that meeting. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
   on what it reads, so prefer Restricted reviewers.
 - The shared patch gets the same protection as the Git panel's prompts: files that hold secrets by convention (`.env`,
   keys, credentials) are named but their changes are withheld, and values that look like credentials are masked. This
@@ -350,6 +351,35 @@ A meeting lets several sessions review one session's plan or local changes witho
   reviewer whose tab is gone leaves the meeting; if the host's tab is gone, the meeting closes.
 - The host needs a session started (or resumed once) by this version, so that it has the meeting helper. The helper runs in
   the host's own shell, so it asks for approval like any other command unless the session allows it.
+
+### Hidden reviewers the desktop starts
+
+Instead of asking each reviewer to join, have the desktop start them. Ask the host session for it: **"review this plan
+in a meeting"** or `/review-meeting`. The bundled `review-meeting` skill starts the meeting with reviewers, and the
+desktop starts one hidden session for each CLI chosen under **Settings → Reviewers** (a workspace can choose its own).
+
+- **You are asked first**, once per meeting, and the default answer is no. The question names the reviewers, the commit
+  they get, that later rounds and attachments are covered, and what their permissions allow. Decline, and the meeting
+  stays open for reviewers who join by id.
+- **Round 1 waits** until each hidden reviewer has joined or failed to (four minutes at most), so a fast reviewer does
+  not answer alone.
+- **The bar above the terminal** shows each seat: joining, in the meeting, failed or left, with **Peek** to look at its
+  terminal, **Retry** to start it again (it joins from the next round), **Dismiss**, and **Stop** for all of them. A
+  seat that fails says why.
+- **What a reviewer works in.** A detached checkout of the project's last commit, in a folder of its own. Your
+  uncommitted changes are not in it; attach them to a round and reviewers read them as a patch. In a folder without a
+  Git commit, reviewers start in an empty folder and see only what the meeting shares.
+- **This is not a sandbox.** With "Allow all permissions in hidden reviewer sessions" on (the default), reviewers run
+  without permission prompts and can read and change files anywhere your account can. They are told to review only;
+  nothing enforces it. With the setting off each reviewer uses its workspace permission settings, and one that stops
+  at a prompt waits there until you look at it with Peek.
+- **Votes.** A proposal to close is agreed by the reviewers it was put to. One who leaves during the vote counts as not
+  having agreed, and the proposal goes back to the host; one who joins during it waits for the next round.
+- **When the meeting closes**, however it closes, the hidden sessions and their checkouts are closed with it. They do
+  not survive a restart of the desktop: the meeting comes back without them, and the host can ask for reviewers again.
+- A workspace runs one set of hidden reviewers at a time, for a meeting or for a pull request.
+- Claude Code shows its work in a hidden tab only in a project it already trusts, and Antigravity CLI's print mode is
+  silent until it finishes: a blank Peek for those two is not a stuck reviewer. Check its seat in the bar.
 
 ### Outside agents: start or join by meeting id
 
