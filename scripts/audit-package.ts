@@ -25,7 +25,7 @@ const resourcesRoot = macApp ? join(unpackedRoot, 'Contents', 'Resources') : joi
 const asarPath = join(resourcesRoot, 'app.asar')
 const unpackedAsarRoot = join(resourcesRoot, 'app.asar.unpacked')
 
-for (const file of ['pr-poll.mjs', 'pr-approve.mjs', 'skills/fix-pr/SKILL.md', 'skills/review-pr/SKILL.md', 'skills/review-and-fix-pr/SKILL.md']) {
+for (const file of ['pr-forge.mjs', 'pr-seat-receipt.mjs', 'pr-poll.mjs', 'pr-approve.mjs', 'skills/fix-pr/SKILL.md', 'skills/review-pr/SKILL.md', 'skills/review-and-fix-pr/SKILL.md']) {
   if (!existsSync(join(resourcesRoot, 'pr-workflows', file))) throw new Error('Packaged PR workflow missing: ' + file)
 }
 

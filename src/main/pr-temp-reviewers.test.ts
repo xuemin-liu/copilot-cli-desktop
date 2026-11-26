@@ -16,6 +16,7 @@ import {
 } from './pr-review-launch.js'
 import { ReviewReservations } from './pr-review-reservations.js'
 import {
+  buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
@@ -124,7 +125,7 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
       prLabel: 'PR #322',
       prNumber: 322,
       prUrl: 'https://github.com/xuemin-liu/copilot-cli-desktop/pull/322',
-      round: 1,
+      round: 2,
       head: HEAD,
       base: BASE,
       marker: '🤖 ',
@@ -132,12 +133,17 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
       prToolsDir: '/app/resources/pr-workflows',
       seatStateDir: '/tmp/seat-state',
       checkoutPath: '/tmp/seat-checkout',
+      roundHistory: [{ round: 2, head: HEAD, base: BASE, summary: '🤖 Fixed edge case' }],
+      seatReceiptConfigPath: '/tmp/seat-receipt.json',
     })
     assert.match(brief, /review-pr\/SKILL\.md/)
     assert.match(brief, /Post all reviews, inline findings, thread replies, and approvals directly onto the PR on its remote host/)
     assert.ok(brief.includes(tag), `brief includes reviewer tag ${tag}`)
-    assert.ok(brief.includes(`Approved at ${HEAD}\\n\\n${tag}`), 'documents pr-approve.mjs multi-line tagged format')
-    assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`), 'documents single-line tagged format')
+    assert.ok(brief.includes(`Approved at ${HEAD}\\n\\n${tag} ...\\n\\nReviewed base: ${BASE}`), 'documents pr-approve.mjs base-bound tagged format')
+    assert.ok(brief.includes('pr-seat-receipt.mjs'), 'documents seat completion receipt helper')
+    assert.ok(brief.includes('Prior Round Context'), 'includes prior round summary')
+    assert.match(brief, /Do NOT start `pr-poll\.mjs --watch-head`/, 'managed single-round brief forbids background poll loop')
+    assert.doesNotMatch(brief, /--invert --watch-head --wait/, 'managed single-round brief never gives reviewer a watch-head wait command')
     assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
 })
@@ -231,6 +237,63 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     }),
     ['--dangerously-skip-permissions', '--prompt-interactive', ' -leading-dash'],
   )
+
+  // One-shot non-interactive launch args across all 4 CLIs when reviewerAllowAll is true:
+  assert.deepEqual(
+    buildCopilotOneShotReviewerArgs(
+      ['--mouse=on', '--session-id=11111111-1111-4111-8111-111111111111', '--allow-all'],
+      true,
+      { checkout: '/tmp/co', helper: '/tmp/hlp' },
+      'Review PR',
+    ),
+    ['--session-id=11111111-1111-4111-8111-111111111111', '--allow-all', '--add-dir', '/tmp/co', '--add-dir', '/tmp/hlp', '-p', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('claude', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  -p, --print\n  --verbose\n  --session-id <id>\n  --resume <id>',
+      oneShot: true,
+    }),
+    ['--dangerously-skip-permissions', '--session-id', '11111111-1111-4111-8111-111111111111', '--add-dir', '/tmp/helper', '-p', '--verbose', '--', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('claude', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '22222222-2222-4222-8222-222222222222',
+      prompt: 'Review Round 2',
+      help: '  -p, --print\n  --verbose\n  --session-id <id>\n  --resume <id>',
+      oneShot: true,
+      resumeSessionId: '11111111-1111-4111-8111-111111111111',
+    }),
+    ['--dangerously-skip-permissions', '--resume', '11111111-1111-4111-8111-111111111111', '--add-dir', '/tmp/helper', '-p', '--verbose', '--', 'Review Round 2'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('codex', {
+      configArgs: ['--dangerously-bypass-approvals-and-sandbox'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: 'Commands:\n  exec  Run Codex non-interactively\nOptions:\n  --add-dir <dir>',
+      oneShot: true,
+    }),
+    ['exec', '--dangerously-bypass-approvals-and-sandbox', '--add-dir', '/tmp/helper', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('antigravity', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: ['--add-dir', '/tmp/helper'],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: 'Review PR',
+      help: '  --prompt-interactive\n  --print\n  --conversation <id>\n  --add-dir',
+      oneShot: true,
+      resumeSessionId: '99999999-9999-4999-8999-999999999999',
+    }),
+    ['--dangerously-skip-permissions', '--conversation', '99999999-9999-4999-8999-999999999999', '--add-dir', '/tmp/helper', '--print', 'Review PR'],
+  )
 })
 
 test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden reviewer seats across rounds, and finishes cleanly', () => {
@@ -307,17 +370,31 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
   group.stage = 'active'
   const copilotSeat = group.requiredSeats.get('copilot')!
   const claudeSeat = group.requiredSeats.get('claude')!
+  copilotSeat.checkedOut = HEAD
+  copilotSeat.checkedOutBase = BASE
+  claudeSeat.checkedOut = HEAD
+  claudeSeat.checkedOutBase = BASE
   copilotSeat.lifecycle = 'running'
   claudeSeat.lifecycle = 'running'
 
   const status = JSON.parse(registry.statusPayload(group)) as {
     done: boolean
+    allSeatsSettledForRound: boolean
+    allApprovedCurrentHead: boolean
     expectedReviewerTags: string[]
     group: { round: number; seats: Array<{ cli: string; verdict: string }> }
   }
   assert.equal(status.done, false)
+  assert.equal(status.allSeatsSettledForRound, false)
+  assert.equal(status.allApprovedCurrentHead, false)
   assert.deepEqual(status.expectedReviewerTags, ['[Copilot CLI]', '[Claude Code]'])
   assert.equal(registry.settledStateKey(group), null, 'healthy reviewing seats block wait up to timeout')
+
+  // Advancing round while seats are still running is refused unless force: true:
+  assert.throws(
+    () => registry.advanceRound(group.id, HEAD2, BASE, `🤖 Premature round`),
+    /Cannot advance to a new round while reviewer seat\(s\) are still active/,
+  )
 
   // Attention needed (e.g. tool approval prompt in hidden tab) surfaces immediately to wait:
   claudeSeat.needsAttention = true
@@ -325,19 +402,45 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
   assert.ok(attentionKey)
   claudeSeat.needsAttention = false
 
+  // Incomplete exit (exit 0 without verified PR post) blocks finish('approved') and marks needsAttention:
+  registry.recordSeatOutcome(claudeSeat, 'incomplete', { error: 'No verified PR post' })
+  assert.equal(registry.view(group).seats.find((s) => s.cli === 'claude')?.needsAttention, true)
+  assert.throws(() => registry.finishByHost(group.id, 'approved'), /incomplete/)
+
   // Failed seat blocks approved finish until retried or dismissed:
   registry.revokeSeat(claudeSeat, 'failed', 'Claude exited unexpectedly')
   assert.throws(() => registry.finishByHost(group.id, 'approved'), /failed/)
-  const retried = registry.resetSeatGeneration(group.id, 'claude')
-  retried.lifecycle = 'running'
 
-  // Advance to Round 2 after author pushes HEAD2 on PR:
-  registry.advanceRound(group.id, HEAD2, BASE, `🤖 Fixed findings in ${HEAD2.slice(0, 8)}.`)
+  // Copilot posts findings, Claude is retried and posts findings -> allSeatsSettledForRound becomes true!
+  registry.recordSeatOutcome(copilotSeat, 'findings', { claimedKeys: ['review:101'] })
+  const retried = registry.resetSeatGeneration(group.id, 'claude')
+  retried.checkedOut = HEAD
+  retried.checkedOutBase = BASE
+  retried.lifecycle = 'running'
+  // Force-skipping an active seat records skippedSeatsForHead and blocks finish('approved') until retried/dismissed:
+  registry.advanceRound(group.id, HEAD2, BASE, `🤖 Force round`, { force: true })
   assert.equal(group.round, 2)
   assert.equal(group.head, HEAD2)
+  assert.equal(copilotSeat.checkedOut, HEAD, 'advanceRound never mutates seat.checkedOut before worktree refresh succeeds')
+  assert.equal(group.skippedSeatsForHead.has('claude'), true)
 
-  // Once author fix-pr verifies PR-host approvals, finishByHost('approved') closes all seats cleanly:
-  retried.lifecycle = 'stopped'
+  // Refresh worktrees to HEAD2 and verify skippedSeatsForHead still blocks finish('approved') until explicit retry:
+  copilotSeat.checkedOut = HEAD2
+  copilotSeat.checkedOutBase = BASE
+  retried.checkedOut = HEAD2
+  retried.checkedOutBase = BASE
+  registry.recordSeatOutcome(copilotSeat, 'approved', { claimedKeys: ['issue:201'] })
+  registry.recordSeatOutcome(retried, 'approved', { claimedKeys: ['issue:202'] })
+  assert.throws(() => registry.finishByHost(group.id, 'approved'), /force-skipped/)
+
+  // Explicit retry clears skippedSeatsForHead; once verified approved at (HEAD2, BASE), allApprovedCurrentHead is true and finishByHost('approved') succeeds!
+  const cleanRetry = registry.resetSeatGeneration(group.id, 'claude')
+  cleanRetry.checkedOut = HEAD2
+  cleanRetry.checkedOutBase = BASE
+  registry.recordSeatOutcome(cleanRetry, 'approved', { claimedKeys: ['issue:203'] })
+  assert.equal(registry.allSeatsSettledForRound(group), true)
+  assert.equal(registry.allApprovedCurrentHead(group), true)
+
   const finished = registry.finishByHost(group.id, 'approved')
   assert.equal(finished.view.stage, 'ended')
   assert.equal(finished.view.outcome, 'approved')

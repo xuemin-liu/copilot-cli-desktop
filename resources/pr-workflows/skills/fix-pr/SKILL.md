@@ -13,8 +13,8 @@ This workflow applies to **any remote Git repository and PR/MR host** (GitHub, s
 1. Read the PR/MR number or URL from the user's request, and inspect `git remote -v` to identify the PR host.
 2. Access the PR using the tool or API matching that repository:
    - **GitHub (`github.com` or GitHub Enterprise)**: `gh pr view`, `gh api`, and (when `$COPILOT_DESKTOP_PR_TOOLS` is set) `pr-poll.mjs`.
-   - **Gitea / Forgejo (including self-hosted servers such as `http://<host>:<port>/<owner>/<repo>`)**: `tea` CLI if installed, or REST API (`/api/v1/repos/<owner>/<repo>/pulls/<index>`, `/reviews`, `/comments`) authenticated via environment token or credentials from `git credential fill`.
-   - **GitLab**: `glab` CLI if installed, or `/api/v4/projects/<url-encoded-path>/merge_requests/<iid>` (`/discussions`, `/notes`, `/approvals`).
+   - **Gitea / Forgejo (including self-hosted servers such as `http://<host>:<port>/<owner>/<repo>`)**: `tea` CLI if installed, `pr-poll.mjs` when `$COPILOT_DESKTOP_PR_TOOLS` is set (pass `--pr-url <url>` or `--forge gitea`), or REST API (`/api/v1/repos/<owner>/<repo>/pulls/<index>`, `/reviews`, `/comments`) authenticated via environment token or credentials from `git credential fill`.
+   - **GitLab**: `glab` CLI if installed, `pr-poll.mjs` when `$COPILOT_DESKTOP_PR_TOOLS` is set (pass `--pr-url <url>` or `--forge gitlab`), or `/api/v4/projects/<url-encoded-path>/merge_requests/<iid>` (`/discussions`, `/notes`, `/approvals`).
    - **Bitbucket / Azure DevOps / other hosts**: matching CLI or REST API + `git credential fill`.
 3. If the user omitted the PR/MR number, resolve the open PR/MR for the current branch on that host. Inspect existing feedback immediately rather than waiting for a later poll.
 
@@ -51,7 +51,10 @@ Also stop if the PR merges or closes, the user cancels the loop, or an explicit 
 
 When waiting for reviewer re-review after pushing or when no feedback has arrived yet:
 - Use an async shell waiter so completion wakes this session without burning turns:
-  - On GitHub when `$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs` and `$COPILOT_DESKTOP_PR_STATE` are available: run `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --repo <owner/repo> --wait 60` (capturing `--snapshot` before handling and marking handled watermarks + `--head <sha>` afterward).
-  - On Gitea, GitLab, or other hosts: run a bounded async poll script checking the PR's state, `head` SHA, reviews, and non-`🤖 ` comments every 30–60 seconds until new reviewer activity or closure appears.
+  - On GitHub, Gitea/Forgejo, or GitLab when `$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs` and `$COPILOT_DESKTOP_PR_STATE` are available:
+    1. Capture a snapshot first (`node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --snapshot`).
+    2. After handling feedback, advance the state file explicitly with `--through`: `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha>` (`--mark` requires `--through R,I,C`).
+    3. Wait for new or edited reviewer comments/approvals with `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --wait 60`.
+  - On other hosts: run a bounded async poll script checking the PR's state, `head` and `base` SHAs, reviews, and non-`🤖 ` comments (including `updated_at` edits) every 30–60 seconds until new reviewer activity or closure appears.
 - Without a verified async wake-up tool, address all current feedback now and state clearly that automatic background waiting is unavailable.
 - Report fixed items, commit SHAs, validation run, thread replies, and final approval status concisely.

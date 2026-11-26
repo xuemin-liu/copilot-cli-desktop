@@ -538,7 +538,7 @@ export interface GuestDeps {
     context?: string
   }): Promise<{ ok: boolean; message: string; hostKey?: string }>
   prReviewersWait?(hostKey: string | null, desktopTag: string | null, waitSeconds: number, signal?: AbortSignal): Promise<GuestResponse>
-  prReviewersRound?(hostKey: string | null, desktopTag: string | null, options: { head: string; base?: string; summary: string }): Promise<GuestResponse>
+  prReviewersRound?(hostKey: string | null, desktopTag: string | null, options: { head: string; base?: string; summary: string; force?: boolean }): Promise<GuestResponse>
   prReviewersFinish?(hostKey: string | null, desktopTag: string | null, outcome: 'approved' | 'stopped'): Promise<GuestResponse>
 }
 

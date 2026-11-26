@@ -53,6 +53,90 @@ async function realPath(path: string): Promise<string> {
   try { return realpathSync.native(path) } catch { return resolve(path) }
 }
 
+export type ReviewerAreaRemovalResult =
+  | { outcome: 'removed' }
+  | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner'; detail?: string }
+
+const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
+
+/**
+ * Takes a review out of the person's project with structured outcome reporting:
+ * - Preserves path/symlink and unregistered `.git` guards.
+ * - Checks `git status --porcelain=v1 --untracked-files=normal` before removal so genuinely modified or untracked
+ *   non-ignored files return `{ outcome: 'kept', reason: 'dirty' }` immediately.
+ * - Retries `git worktree remove -- <checkout>` (never `--force`) across short delays when clean so transient Windows
+ *   child process handle locks release cleanly instead of leaving stale worktrees behind.
+ */
+export async function removeReviewerAreaDetailed(
+  area: Pick<ReviewerArea, 'root' | 'checkout' | 'project' | 'ref'>,
+  runner?: GitRunner | null,
+  options?: { retryDelaysMs?: readonly number[] },
+): Promise<ReviewerAreaRemovalResult> {
+  if (area.project) {
+    if (!runner) return { outcome: 'kept', reason: 'no-runner' }
+    let listed: string
+    try {
+      listed = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read')
+    } catch (error) {
+      return { outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }
+    }
+    // A failed start may have created the reviewer folder but never the checkout. Resolve its existing parent
+    // in that case so /var and /private/var (or a Windows junction) compare in the same namespace.
+    const missing = await lstat(area.checkout).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
+    const checkout = missing ? join(await realPath(dirname(area.checkout)), basename(area.checkout)) : await realPath(area.checkout)
+    // Only this review's own folder: a checkout that resolves anywhere but the "checkout" folder inside its reviewer
+    // folder (replaced by a link to another worktree, say) is not removed, whatever it matches.
+    if (!samePath(checkout, join(await realPath(area.root), 'checkout'))) {
+      return { outcome: 'kept', reason: 'unregistered' }
+    }
+    let registered = false
+    for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
+    // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
+    if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) {
+      return { outcome: 'kept', reason: 'unregistered' }
+    }
+    if (registered) {
+      if (!missing) {
+        const statusOut = await git(runner, area.project, ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=normal'], 'read')
+          .catch(() => null)
+        if (statusOut !== null && statusOut.length > 0) {
+          return { outcome: 'kept', reason: 'dirty' }
+        }
+      }
+      const delays = options?.retryDelaysMs ?? DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS
+      let removedWorktree = false
+      let lastDetail: string | undefined
+      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        if (attempt > 0) {
+          const delayMs = delays[attempt - 1] ?? 0
+          if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs))
+        }
+        try {
+          await git(runner, area.project, ['worktree', 'remove', '--', checkout])
+          removedWorktree = true
+          break
+        } catch (error) {
+          lastDetail = error instanceof Error ? error.message : String(error)
+          // Re-check whether the failure was due to newly dirtied tracked/untracked files so we don't retry a dirty tree.
+          if (!missing) {
+            const recheck = await git(runner, area.project, ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=normal'], 'read')
+              .catch(() => null)
+            if (recheck !== null && recheck.length > 0) {
+              return { outcome: 'kept', reason: 'dirty', ...(lastDetail ? { detail: lastDetail } : {}) }
+            }
+          }
+        }
+      }
+      if (!removedWorktree) {
+        return { outcome: 'kept', reason: 'git-failed', ...(lastDetail ? { detail: lastDetail } : {}) }
+      }
+    }
+    if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
+  }
+  await rm(area.root, { recursive: true, force: true, maxRetries: 3 })
+  return { outcome: 'removed' }
+}
+
 /**
  * Takes a review out of the person's project: its own worktree (only when the project still registers it at this
  * folder, and only while it is clean: Git itself refuses a worktree with changes), its own ref, then its folder. Never a
@@ -60,26 +144,7 @@ async function realPath(path: string): Promise<string> {
  * remove, is kept for the person: 'kept'.
  */
 export async function removeReviewerArea(area: Pick<ReviewerArea, 'root' | 'checkout' | 'project' | 'ref'>, runner?: GitRunner | null): Promise<'removed' | 'kept'> {
-  if (area.project) {
-    if (!runner) return 'kept'
-    let listed: string
-    try { listed = await git(runner, area.project, ['worktree', 'list', '--porcelain', '-z'], 'read') } catch { return 'kept' }
-    // A failed start may have created the reviewer folder but never the checkout. Resolve its existing parent
-    // in that case so /var and /private/var (or a Windows junction) compare in the same namespace.
-    const missing = await lstat(area.checkout).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
-    const checkout = missing ? join(await realPath(dirname(area.checkout)), basename(area.checkout)) : await realPath(area.checkout)
-    // Only this review's own folder: a checkout that resolves anywhere but the "checkout" folder inside its reviewer
-    // folder (replaced by a link to another worktree, say) is not removed, whatever it matches.
-    if (!samePath(checkout, join(await realPath(area.root), 'checkout'))) return 'kept'
-    let registered = false
-    for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
-    // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
-    if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) return 'kept'
-    if (registered && !await git(runner, area.project, ['worktree', 'remove', '--', checkout]).then(() => true, () => false)) return 'kept'
-    if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
-  }
-  await rm(area.root, { recursive: true, force: true, maxRetries: 3 })
-  return 'removed'
+  return (await removeReviewerAreaDetailed(area, runner)).outcome
 }
 
 /** The reviewer's sandbox policy: the person's folders denied, its helper folder readable. */

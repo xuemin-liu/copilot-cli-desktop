@@ -33,6 +33,7 @@ param(
   [string]$Head = '',
   [string]$Base = '',
   [int]$Wait = 0,
+  [switch]$Force,
   [switch]$Changes
 )
 $ErrorActionPreference = 'Stop'
@@ -100,6 +101,12 @@ try {
     }
     $meetingBody.wait = [string]$Wait
   }
+  if ($Force) {
+    if ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'round') {
+      throw 'Use -Force only with pr-reviewers -Action round.'
+    }
+    $meetingBody.force = '1'
+  }
   if ($Command -eq 'task-report') {
     $reportRoot = [IO.Path]::GetFullPath($env:COPILOT_DESKTOP_TASK_REPORT_DIR)
     $reportPath = [IO.Path]::GetFullPath($File)
@@ -159,12 +166,13 @@ fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
 quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
 command=status
 if [ $# -gt 0 ]; then command=$1; shift; fi
-topic=''; file=''; changes=0; to=''; page=''; action=''; pr=''; head_rev=''; base_rev=''; wait_sec=''
+topic=''; file=''; changes=0; force=0; to=''; page=''; action=''; pr=''; head_rev=''; base_rev=''; wait_sec=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
     -File) [ $# -ge 2 ] || fail 'Usage: -File <path>'; file=$2; shift 2 ;;
     -Changes) changes=1; shift ;;
+    -Force) force=1; shift ;;
     -Page) [ $# -ge 2 ] || fail 'Usage: pr-read -Page <number>'; page=$2; shift 2 ;;
     -To) [ $# -ge 2 ] || fail 'Usage: -To <comment id>|conversation'; to=$2; shift 2 ;;
     -Action) [ $# -ge 2 ] || fail 'Usage: -Action start|status|wait|round|finish|stop'; action=$2; shift 2 ;;
@@ -209,6 +217,11 @@ if [ -n "$wait_sec" ]; then
     fail 'Use -Wait <1..60> only with pr-reviewers -Action wait.'
   fi
   printf '%s' "$wait_sec" | grep -Eq '^([1-9]|[1-5][0-9]|60)$' || fail 'Use -Wait <1..60>.'
+fi
+if [ "$force" -eq 1 ]; then
+  if [ "$command" != pr-reviewers ] || [ "$action" != round ]; then
+    fail 'Use -Force only with pr-reviewers -Action round.'
+  fi
 fi
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
@@ -264,6 +277,7 @@ if [ -n "$pr" ]; then printf 'form-string = "pr=%s"\n' "$(quote "$pr")" >> "$wor
 if [ -n "$head_rev" ]; then printf 'form-string = "head=%s"\n' "$(quote "$head_rev")" >> "$work/config"; fi
 if [ -n "$base_rev" ]; then printf 'form-string = "base=%s"\n' "$(quote "$base_rev")" >> "$work/config"; fi
 if [ -n "$wait_sec" ]; then printf 'form-string = "wait=%s"\n' "$wait_sec" >> "$work/config"; fi
+if [ "$force" -eq 1 ]; then printf 'form-string = "force=1"\n' >> "$work/config"; fi
 if [ "$changes" -eq 1 ]; then
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail '-Changes needs a Git repository in the current folder.'
   : > "$work/changes"
@@ -400,9 +414,10 @@ export interface MeetingRequest { topic: string; text: string; changes: string |
   /** pr-reply: the inline comment id to answer, or "conversation". */
   page?: string; to?: string
   /** pr-reviewers / pr-wait options. */
-  action?: string; pr?: string; head?: string; base?: string; wait?: number }
+  action?: string; pr?: string; head?: string; base?: string; wait?: number; force?: boolean }
 export interface MeetingResponse { ok: boolean; message: string }
 export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest, signal?: AbortSignal) => MeetingResponse | Promise<MeetingResponse>
+export type SeatReceiptHandler = (payload: Record<string, unknown>) => MeetingResponse | Promise<MeetingResponse>
 
 /**
  * Outside agents' requests (`/guest/<command>`, meeting-guests.ts). Their tokens are not session tokens: a guest token
@@ -428,6 +443,7 @@ export class MeetingControlServer {
     private readonly handle: MeetingRequestHandler,
     private readonly guest?: GuestEndpoint,
     private readonly onListening?: (port: number) => void,
+    private readonly onSeatReceipt?: SeatReceiptHandler,
   ) {}
 
   /** The port, starting the server if no session has yet; an invited guest needs it before its host restarts. */
@@ -473,6 +489,7 @@ export class MeetingControlServer {
         const port = (server.address() as { port: number } | null)?.port
         // No CORS; reject browser-originated requests and DNS rebinding before authentication.
         if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { ok: false, message: 'Forbidden' }); return }
+        if ((request.url ?? '') === '/pr-seat-receipt') { this.answerSeatReceipt(request, response, send); return }
         if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, response, send); return }
         const tabId = this.caller(request.headers.authorization ?? '')
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
@@ -485,11 +502,12 @@ export class MeetingControlServer {
           const text = (key: string): string => typeof body[key] === 'string' ? body[key] as string : ''
           const rawWait = body.wait !== undefined ? Number(body.wait) : undefined
           const wait = rawWait !== undefined && Number.isSafeInteger(rawWait) && rawWait >= 1 && rawWait <= 60 ? rawWait : undefined
+          const force = body.force === true || body.force === 'true' || body.force === '1'
           const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
             ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}), ...(body.to !== undefined ? { to: text('to') } : {}), ...(body.page !== undefined ? { page: text('page') } : {}),
             ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}),
             ...(body.head !== undefined ? { head: text('head') } : {}), ...(body.base !== undefined ? { base: text('base') } : {}),
-            ...(wait !== undefined ? { wait } : {}) }, gone.signal)
+            ...(wait !== undefined ? { wait } : {}), ...(force ? { force: true } : {}) }, gone.signal)
           const rawJsonCommand = command === 'pr-read' || command === 'pr-reviewers'
           if (rawJsonCommand && body.format === 'pr-json' && answer.ok) {
             if (!request.socket.destroyed) {
@@ -509,6 +527,28 @@ export class MeetingControlServer {
         resolveListen(listeningPort)
       })
     }).catch((error) => { this.listening = null; throw error })
+  }
+
+  private answerSeatReceipt(request: IncomingMessage, response: ServerResponse, send: (status: number, body: MeetingResponse) => void): void {
+    const handler = this.onSeatReceipt
+    if (!handler || request.method !== 'POST') {
+      send(404, { ok: false, message: 'Seat receipt endpoint unavailable.' })
+      return
+    }
+    void readFields(request, 16_384).then(async (body) => {
+      if (body === null) {
+        send(400, { ok: false, message: 'Invalid seat receipt JSON payload.' })
+        return
+      }
+      const answer = await handler(body)
+      if (!response.headersSent && !request.socket.destroyed) {
+        send(answer.ok ? 200 : 400, answer)
+      }
+    }).catch(() => {
+      if (!response.headersSent && !request.socket.destroyed) {
+        send(500, { ok: false, message: 'Could not verify seat receipt.' })
+      }
+    })
   }
 
   private answerGuest(request: IncomingMessage, response: ServerResponse, send: (status: number, body: MeetingResponse) => void): void {
