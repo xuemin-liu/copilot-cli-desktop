@@ -18,6 +18,7 @@ import { ReviewReservations } from './pr-review-reservations.js'
 import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
+  otherCliReviewerOneShot,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -233,6 +234,12 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     { args: ['--add-dir', '/tmp/helper'], settings: null },
   )
   assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
+
+  // Claude Code's one-shot mode prints nothing until it ends, so it stays interactive; the others run one-shot with allow-all.
+  assert.equal(otherCliReviewerOneShot('claude', true), false)
+  assert.equal(otherCliReviewerOneShot('codex', true), true)
+  assert.equal(otherCliReviewerOneShot('antigravity', true), true)
+  assert.equal(otherCliReviewerOneShot('codex', false), false)
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {

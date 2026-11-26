@@ -358,6 +358,16 @@ export function reviewerHelperDirAccess(
 }
 
 /**
+ * Whether a non-Copilot reviewer runs in its CLI's one-shot mode. Claude Code's (`-p`) prints nothing until its final
+ * answer, so its hidden reviewer tab would stay blank for the whole review. It runs interactively instead, where its
+ * work shows in the tab, and its seat settles by its receipt, the PR host's evidence or the round timer rather than
+ * by its exit.
+ */
+export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean): boolean {
+  return reviewerAllowAll && cli !== 'claude'
+}
+
+/**
  * Builds the final CLI arguments for launching a non-Copilot temporary PR reviewer session (`claude`, `codex`, or
  * `antigravity`) with its initial review prompt. When `oneShot` is true (`reviewerAllowAll` enabled), uses each CLI's
  * non-interactive print/exec mode so the process exits cleanly as soon as the round's review is posted.

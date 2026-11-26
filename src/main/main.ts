@@ -159,6 +159,7 @@ import {
 import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
+  otherCliReviewerOneShot,
   buildReviewerBrief,
   CLAUDE_REVIEWER_SETTINGS_FILE,
   cleanupReviewerSeatCredentials,
@@ -4202,7 +4203,7 @@ async function launchTempReviewerSeat(
       generation: seat.generation,
       prompt,
       help,
-      oneShot: allowAll,
+      oneShot: otherCliReviewerOneShot(cli, allowAll),
       resumeSessionId: verifiedResumeId,
     })
     if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
