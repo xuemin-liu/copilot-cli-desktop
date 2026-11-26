@@ -2502,7 +2502,7 @@ async function startSessionTab(
   return snapshot()
 }
 
-const otherCliResolution = createOtherCliCache((cli) => resolveAgentCli(cli))
+const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
 async function listSessionClis(): Promise<SessionCliChoice[]> {

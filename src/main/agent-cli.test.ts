@@ -16,6 +16,7 @@ import {
   codexAcceptsMcpOverride,
   resolveAgentCli,
 } from './agent-cli.js'
+import { OTHER_CLI_CACHE_MS } from './agent-cli-cache.js'
 import { newSessionOptions } from './session-name.js'
 import { createTab, EMPTY_TABS_STATE } from './session-tab-machine.js'
 
@@ -181,6 +182,66 @@ test('resolveAgentCli prefers codex on Windows PATH and falls back to the Store 
   assert.equal(fromApp.error, null)
   assert.equal(fromApp.command, appExe)
   assert.equal(fromApp.version, '0.171.0-alpha.13.2')
+})
+
+test('resolveAgentCli memoizes Windows Codex Store lookups across routine misses until expiry or fresh launch', async () => {
+  const installLocation = 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_2'
+  const appExe = `${installLocation}\\app\\resources\\codex.exe`
+  let clock = 1_000
+  let storeInstalled = false
+  let powershellCalls = 0
+  let releaseFirstLookup!: () => void
+  const firstLookupGate = new Promise<void>((resolve) => { releaseFirstLookup = resolve })
+  const execFile = async (file: string) => {
+    if (file.toLowerCase().endsWith('where.exe')) throw new Error('INFO: Could not find files')
+    if (file.toLowerCase().endsWith('powershell.exe')) {
+      powershellCalls += 1
+      if (powershellCalls === 1) await firstLookupGate
+      return { stdout: storeInstalled ? `${installLocation}\r\n` : '', stderr: '' }
+    }
+    if (file === appExe) return { stdout: 'codex-cli 0.172.0\n', stderr: '' }
+    throw new Error(`unexpected ${file}`)
+  }
+  const deps = () => ({
+    platform: 'win32' as const,
+    env: { SystemRoot: 'C:\\Windows' },
+    pathExists: (path: string) => storeInstalled && path === appExe,
+    execFile,
+    now: () => clock,
+  })
+
+  // Concurrent routine misses share the same in-flight PowerShell lookup.
+  const firstPending = resolveAgentCli('codex', deps())
+  const secondPending = resolveAgentCli('codex', deps())
+  releaseFirstLookup()
+  const [first, second] = await Promise.all([firstPending, secondPending])
+  assert.equal(first.version, null)
+  assert.equal(second.version, null)
+  assert.equal(powershellCalls, 1)
+
+  // Another routine miss within OTHER_CLI_CACHE_MS reuses the memoized empty result without running PowerShell.
+  clock += OTHER_CLI_CACHE_MS - 1
+  assert.equal((await resolveAgentCli('codex', deps())).version, null)
+  assert.equal(powershellCalls, 1)
+
+  // A fresh launch bypasses the memo, finds the newly installed Store app, and refreshes the memo for routine checks.
+  storeInstalled = true
+  const freshFound = await resolveAgentCli('codex', { ...deps(), fresh: true })
+  assert.equal(freshFound.error, null)
+  assert.equal(freshFound.command, appExe)
+  assert.equal(freshFound.version, '0.172.0')
+  assert.equal(powershellCalls, 2)
+
+  // A routine check immediately after reuses the refreshed Store location without running PowerShell again.
+  const routineFound = await resolveAgentCli('codex', deps())
+  assert.equal(routineFound.command, appExe)
+  assert.equal(powershellCalls, 2)
+
+  // Once OTHER_CLI_CACHE_MS passes, a routine check queries PowerShell again.
+  clock += OTHER_CLI_CACHE_MS
+  const afterExpiry = await resolveAgentCli('codex', deps())
+  assert.equal(afterExpiry.command, appExe)
+  assert.equal(powershellCalls, 3)
 })
 
 test('resolveAgentCli finds the program on PATH outside Windows', async () => {
