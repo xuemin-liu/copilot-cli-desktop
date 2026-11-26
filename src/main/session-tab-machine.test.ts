@@ -269,10 +269,52 @@ test('visibleSessionTabs supports non-destructive peekTabId without clobbering a
   const focusedReviewer = activateTab(state, 'rev-codex')
   const peekMap = { host: 'rev-codex' }
   const resolved = resolvePeekHostAndTab(focusedReviewer, peekMap)
-  assert.deepEqual(resolved, { hostTabId: 'host', peekTabId: 'rev-codex' })
+  assert.deepEqual(resolved, { peekKey: 'host', hostTabId: 'host', peekTabId: 'rev-codex' })
   assert.deepEqual(
     { main: visibleSessionTabs(focusedReviewer, resolved.peekTabId).main?.id, side: visibleSessionTabs(focusedReviewer, resolved.peekTabId).side?.id },
     { main: 'host', side: 'rev-codex' },
+  )
+})
+
+test('resolvePeekHostAndTab and visibleSessionTabs support profile-scoped (hostTabId: null) reviewers with or without open regular tabs', () => {
+  const profileMeta = { groupId: 'g-prof', hostTabId: null, cli: 'claude' as const, repository: 'omaha:3001/o/r', prLabel: 'PR #15', prNumber: 15, prUrl: 'http://omaha:3001/o/r/pulls/15' }
+
+  // 1. No regular tabs open in workspace ws-1:
+  let noHostState = createBackgroundTab(EMPTY_TABS_STATE, {
+    id: 'rev-standalone',
+    title: 'Review PR #15 · Claude Code',
+    cli: 'claude',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: profileMeta,
+  })
+  assert.equal(noHostState.activeTabId, null)
+  assert.deepEqual(visibleSessionTabs(noHostState, null), { main: null, side: null })
+
+  const standaloneResolved = resolvePeekHostAndTab(noHostState, { 'profile:ws-1': 'rev-standalone' }, 'ws-1')
+  assert.deepEqual(standaloneResolved, { peekKey: 'profile:ws-1', hostTabId: null, peekTabId: 'rev-standalone' })
+  assert.deepEqual(
+    { main: visibleSessionTabs(noHostState, standaloneResolved.peekTabId).main?.id, side: visibleSessionTabs(noHostState, standaloneResolved.peekTabId).side },
+    { main: 'rev-standalone', side: null },
+  )
+
+  // Clicking inside the standalone peeked terminal focuses it; hiding clears peek and hides the pane cleanly:
+  const focusedStandalone = activateTab(noHostState, 'rev-standalone')
+  const hiddenResolved = resolvePeekHostAndTab(focusedStandalone, { 'profile:ws-1': null }, 'ws-1')
+  assert.deepEqual(hiddenResolved, { peekKey: 'profile:ws-1', hostTabId: null, peekTabId: null })
+  assert.deepEqual(visibleSessionTabs(focusedStandalone, hiddenResolved.peekTabId), { main: null, side: null })
+
+  // 2. Regular tab open in ws-1 alongside a profile-scoped reviewer:
+  let withHostState = createTab(noHostState, { id: 'tab-1', title: 'Main', workspaceProfileId: 'ws-1' })
+  const focusedProfileRev = activateTab(withHostState, 'rev-standalone')
+  const resolvedWithHost = resolvePeekHostAndTab(focusedProfileRev, { 'tab-1': 'rev-standalone' }, 'ws-1')
+  assert.deepEqual(resolvedWithHost, { peekKey: 'tab-1', hostTabId: 'tab-1', peekTabId: 'rev-standalone' })
+  assert.deepEqual(
+    { main: visibleSessionTabs(focusedProfileRev, resolvedWithHost.peekTabId).main?.id, side: visibleSessionTabs(focusedProfileRev, resolvedWithHost.peekTabId).side?.id },
+    { main: 'tab-1', side: 'rev-standalone' },
   )
 })
 

@@ -329,7 +329,7 @@ test('pr-reviewers and pr-wait pass actions, PR targets, wait timeouts, and JSON
         wait: null,
       })
 
-      const waited = await run('pr-reviewers', '-Action', 'wait', '-Wait', '15')
+      const waited = await run('pr-reviewers', '-Action', 'Wait', '-Wait', '15')
       assert.equal(waited.code, 0, waited.stderr)
       assert.deepEqual(JSON.parse(waited.stdout.trim()), { done: false, command: 'pr-reviewers', action: 'wait', pr: null, head: null, base: null, text: null, wait: 15 })
 

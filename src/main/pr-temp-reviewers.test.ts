@@ -67,10 +67,14 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
   assert.deepEqual(parseAnyPullRequestInput('!14'), { number: 14, prLabel: 'MR !14', prUrl: null, repository: null })
   assert.deepEqual(parseAnyPullRequestInput('42'), { number: 42, prLabel: 'PR #42', prUrl: null, repository: null })
   assert.throws(() => parseAnyPullRequestInput('http://user:secret@omaha:3001/org/repo/pulls/12'), /embedded credentials/)
+  assert.throws(() => parseAnyPullRequestInput('https://github.com/octo/demo/pull/0'), /Invalid pull request number/)
+  assert.throws(() => parseAnyPullRequestInput('https://gitlab.example.com/team/project/-/merge_requests/0'), /Invalid merge request number/)
+  assert.throws(() => parseAnyPullRequestInput('http://omaha:3001/daq/daq-service/0'), /Invalid pull request number/)
 
   assert.equal(repositoryLabelFromOrigin('http://omaha:3001/daq/daq-service.git', 'fallback'), 'omaha:3001/daq/daq-service')
   assert.equal(repositoryLabelFromOrigin('git@omaha.local:daq/daq-service.git', 'fallback'), 'omaha.local/daq/daq-service')
   assert.equal(repositoryLabelFromOrigin('https://github.com/octo/demo.git', 'fallback'), 'octo/demo')
+  assert.equal(repositoryLabelFromOrigin('file:///path/to/repo.git', 'local-repo'), 'local-repo')
   assert.equal(repositoryLabelFromOrigin('', 'local-repo'), 'local-repo')
 
   assert.deepEqual(prReviewAndFixRequest('/review-and-fix-pr'), { number: null, repository: null })
@@ -87,11 +91,15 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
     { number: 12, repository: 'omaha:3001/daq/daq-service', prUrl: 'http://omaha:3001/daq/daq-service/pulls/12' },
   )
 
-  // Plain single-role commands must stay with their existing handlers
+  // Plain single-role commands and malformed/ambiguous targets must be rejected
   assert.equal(prReviewAndFixRequest('review PR 42'), null)
   assert.equal(prReviewAndFixRequest('fix PR 42'), null)
   assert.equal(prReviewAndFixRequest('do not review and fix PR 42'), null)
   assert.equal(prReviewAndFixRequest('review and fix PR 42 and PR 43'), null)
+  assert.equal(prReviewAndFixRequest('/review-and-fix-pr 18 19'), null)
+  assert.equal(prReviewAndFixRequest('/review-and-fix-pr foo'), null)
+  assert.equal(prReviewAndFixRequest('/review-and-fix-pr 0'), null)
+  assert.equal(prReviewAndFixRequest('review and fix 2 bugs'), null)
 })
 
 test('CLI launch builders verify flags, isolate CODEX_HOME outside user home, and keep bearer tokens out of argv', async () => {
@@ -211,20 +219,42 @@ test('TempReviewerRegistry coordinates forge-agnostic multi-round Gitea reviews,
   assert.equal(copilotApprovedR1.ok, true)
   assert.equal(registry.view(group).confirmTarget, null, 'still waiting on Claude')
 
-  // Sibling approval did NOT invalidate Claude's read; now Claude posts a Blocking finding:
+  // Sibling approval or findings do NOT mutate materialStateSignature (preventing reviewer-to-reviewer ping-pong):
+  const sigBeforeSiblingReview = group.materialStateSignature
   const claudeFindingR1 = registry.recordSeatReview(group.id, 'claude', {
     body: '[Claude Code] Found ring-buffer overflow.',
     approve: false,
     comments: [{ path: 'src/buffer.ts', line: 44, body: 'Blocking: off-by-one when wrapping.' }],
   })
   assert.equal(claudeFindingR1.ok, true)
+  assert.equal(group.materialStateSignature, sigBeforeSiblingReview, 'sibling review does not alter host materialStateSignature')
+  assert.equal(registry.recordSeatReply(group.id, 'claude', 'conversation', 'Additional note.').ok, true)
+  assert.equal(group.materialStateSignature, sigBeforeSiblingReview, 'sibling reply does not alter host materialStateSignature')
   const afterFindingView = registry.view(group)
-  // Claude's finding changed materialStateSignature -> Copilot's prior approval is invalidated too!
-  assert.deepEqual(afterFindingView.seats.map((s) => s.verdict), ['reviewing', 'changes-requested'])
+  // Both seats are now settled on round 1 ('approved' + 'changes-requested') so host wait returns immediately:
+  assert.deepEqual(afterFindingView.seats.map((s) => s.verdict), ['approved', 'changes-requested'])
+  assert.ok(registry.settledStateKey(group, afterFindingView), 'round 1 settled state key is computed')
   assert.throws(() => registry.finishByHost(group.id, 'approved'), /Cannot finish as approved/)
 
-  // Host fixes the bug, pushes HEAD2, and advances to Round 2:
+  // Concurrent group in the same workspace profile is rejected while active:
+  assert.throws(() => registry.createGroup({
+    hostTabId: null,
+    hostSessionId: null,
+    profileId: 'prof-1',
+    projectPath: '/tmp/daq-service',
+    repository: 'omaha:3001/daq/daq-service',
+    prLabel: 'PR #13',
+    prNumber: 13,
+    prUrl: null,
+    head: HEAD,
+    base: BASE,
+    clis: ['copilot'],
+    origin: 'http://omaha:3001/daq/daq-service.git',
+  }), /already running temporary reviewers/)
+
+  // Host fixes the bug, pushes HEAD2, and advances to Round 2 (resetting settled key & updating materialStateSignature):
   registry.advanceRound(group.id, HEAD2, BASE, `🤖 Fixed ring-buffer wrap in ${HEAD2.slice(0, 8)}.`)
+  assert.notEqual(group.materialStateSignature, sigBeforeSiblingReview)
   assert.equal(group.round, 2)
   assert.equal(group.head, HEAD2)
 

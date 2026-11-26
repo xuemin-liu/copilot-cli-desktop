@@ -32,11 +32,11 @@ export interface ParsedPullRequestInput {
 }
 
 const SHA_RE = /^[a-f0-9]{40,64}$/
+const POSITIVE_PULL_DIGITS = /^[1-9]\d{0,8}$/
 const OPENING = /^(?:(?:hey|hi|ok(?:ay)?|so|now)\b[\s,]*)?(?:(?:please|pls|kindly)\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?)?/i
 const NEGATION = /\b(?:don'?t|do\s+not|doesn'?t|not|never|no\s+need|stop|cancel|without)\b/i
 const UNNUMBERED = /\b(?:my|this|the\s+current)\s+(?:pr|mr|pull\s+request|merge\s+request)\b/i
 const ANY_HTTP_URL = /https?:\/\/[^\s<>")]+/gi
-const PULL_NUMBER = /\b(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*(\d{1,9})\b|[#!](\d{1,9})\b/i
 
 function cleanUrlToken(raw: string): string {
   return raw.trim().replace(/[.,;:!?)]+$/, '')
@@ -61,8 +61,10 @@ export function parseAnyPullRequestInput(raw: string): ParsedPullRequestInput {
 
     // GitLab: /<group>[/<subgroup>...]/<project>/-/merge_requests/<iid> or /merge_requests/<iid>
     const mrIdx = segments.findIndex((seg) => seg.toLowerCase() === 'merge_requests')
-    if (mrIdx >= 2 && /^\d{1,9}$/.test(segments[mrIdx + 1] ?? '')) {
-      const number = Number(segments[mrIdx + 1])
+    if (mrIdx >= 2 && /^\d+$/.test(segments[mrIdx + 1] ?? '')) {
+      const mrSeg = segments[mrIdx + 1]!
+      if (!POSITIVE_PULL_DIGITS.test(mrSeg)) throw new Error('Invalid merge request number.')
+      const number = Number(mrSeg)
       const repoEnd = segments[mrIdx - 1] === '-' ? mrIdx - 1 : mrIdx
       return {
         number,
@@ -74,8 +76,10 @@ export function parseAnyPullRequestInput(raw: string): ParsedPullRequestInput {
 
     // GitHub / Gitea / Forgejo / Bitbucket / Azure DevOps: /.../pull(s)/<n>, /.../pull-requests/<n>, /.../pullrequest/<n>
     const prIdx = segments.findIndex((seg) => /^(?:pulls?|pull-requests|pullrequest)$/i.test(seg))
-    if (prIdx >= 1 && /^\d{1,9}$/.test(segments[prIdx + 1] ?? '')) {
-      const number = Number(segments[prIdx + 1])
+    if (prIdx >= 1 && /^\d+$/.test(segments[prIdx + 1] ?? '')) {
+      const prSeg = segments[prIdx + 1]!
+      if (!POSITIVE_PULL_DIGITS.test(prSeg)) throw new Error('Invalid pull request number.')
+      const number = Number(prSeg)
       const repoSegments = segments.slice(0, prIdx).filter((seg) => seg !== '_git')
       return {
         number,
@@ -85,7 +89,11 @@ export function parseAnyPullRequestInput(raw: string): ParsedPullRequestInput {
       }
     }
 
-    const trailingNum = segments.length > 0 && /^\d{1,9}$/.test(segments.at(-1)!) ? Number(segments.at(-1)!) : null
+    const lastSeg = segments.at(-1) ?? ''
+    if (/^\d+$/.test(lastSeg) && !POSITIVE_PULL_DIGITS.test(lastSeg)) {
+      throw new Error('Invalid pull request number.')
+    }
+    const trailingNum = segments.length > 0 && POSITIVE_PULL_DIGITS.test(lastSeg) ? Number(lastSeg) : null
     return {
       number: trailingNum,
       prLabel: trailingNum !== null ? `PR #${trailingNum}` : 'PR',
@@ -96,15 +104,15 @@ export function parseAnyPullRequestInput(raw: string): ParsedPullRequestInput {
 
   const mrMatch = /^(?:mr|merge\s+request)?\s*!(\d{1,9})$/i.exec(trimmed) ?? /^mr\s+(\d{1,9})$/i.exec(trimmed)
   if (mrMatch) {
+    if (!POSITIVE_PULL_DIGITS.test(mrMatch[1]!)) throw new Error('Invalid merge request number.')
     const number = Number(mrMatch[1])
-    if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid merge request number.')
     return { number, prLabel: `MR !${number}`, prUrl: null, repository: null }
   }
 
   const prMatch = /^(?:(?:pr|pull\s+request)\s*#?\s*)?#?(\d{1,9})$/i.exec(trimmed)
   if (prMatch) {
+    if (!POSITIVE_PULL_DIGITS.test(prMatch[1]!)) throw new Error('Invalid pull request number.')
     const number = Number(prMatch[1])
-    if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number.')
     return { number, prLabel: `PR #${number}`, prUrl: null, repository: null }
   }
 
@@ -121,6 +129,7 @@ export function repositoryLabelFromOrigin(origin: string | null | undefined, fal
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
     try {
       const parsed = new URL(raw)
+      if (!parsed.host) return fallbackName
       const cleanPath = parsed.pathname.replace(/^\/+/, '').replace(/\/+$/, '').replace(/\.git$/i, '')
       if (!cleanPath) return fallbackName
       return parsed.hostname.toLowerCase() === 'github.com' ? cleanPath : `${parsed.host}/${cleanPath}`
@@ -168,35 +177,61 @@ export function prReviewAndFixRequest(text: string): PrReviewAndFixRequest | nul
   }
 
   const command = line.replace(OPENING, '')
-  const slashSkill = /^\/?review-and-fix-pr\b/i.test(command)
-  const combinedPhrase = /^(?:(?:review\s*(?:and|&)\s*(?:fix|address|resolve))|(?:start\s+(?:temp(?:orary)?\s+)?reviewers?\b.*?\b(?:and\s+)?(?:fix|address|resolve)))\b/i.test(command)
-  if (!slashSkill && !combinedPhrase) return null
+  const slashMatch = /^\/?review-and-fix-pr(?:\s+|$)/i.exec(command)
+  const phraseMatch = !slashMatch
+    ? /^(?:(?:review\s*(?:and|&)\s*(?:fix|address|resolve))|(?:start\s+(?:temp(?:orary)?\s+)?reviewers?\b.*?\b(?:and\s+)?(?:fix|address|resolve)))(?:\s+|$)/i.exec(command)
+    : null
+  const prefixMatch = slashMatch ?? phraseMatch
+  if (!prefixMatch) return null
 
+  const remainder = command.slice(prefixMatch[0].length).trim()
   const singleUrl = parsedUrls[0] ?? null
   const urlNumber = singleUrl?.number ?? null
 
-  const unnumbered = singleUrl === null && bare.size === 0 && (slashSkill || UNNUMBERED.test(command))
-  if (unnumbered) {
-    return { number: null, repository: null }
-  }
-  if (UNNUMBERED.test(command)) return null
-
-  if (singleUrl) {
-    if (urlNumber !== null && [...bare].some((n) => n !== urlNumber)) return null
-    if (urlNumber === null && bare.size > 1) return null
-    const resolvedNum = urlNumber ?? (bare.size === 1 ? [...bare][0]! : null)
-    return {
-      number: resolvedNum,
-      repository: singleUrl.repository,
-      ...(singleUrl.prUrl && !/^https:\/\/github\.com\//i.test(singleUrl.prUrl) ? { prUrl: singleUrl.prUrl } : {}),
+  if (singleUrl === null) {
+    if (slashMatch && remainder === '' && bare.size === 0) {
+      return { number: null, repository: null }
     }
+    if (UNNUMBERED.test(remainder) && bare.size === 0) {
+      const restAfterUnnumbered = remainder
+        .replace(UNNUMBERED, '')
+        .replace(/^(?:for|on)\b/i, '')
+        .replace(/[.,!?]+$/, '')
+        .trim()
+      if (restAfterUnnumbered === '') {
+        return { number: null, repository: null }
+      }
+      return null
+    }
+    if (UNNUMBERED.test(command) || bare.size > 1) return null
+
+    const targetPattern = slashMatch
+      ? /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])?([1-9]\d{0,8})[.,!?]*$/i
+      : /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])([1-9]\d{0,8})[.,!?]*$/i
+    const targetMatch = targetPattern.exec(remainder)
+    if (!targetMatch) return null
+    const number = Number(targetMatch[1])
+    if (!Number.isSafeInteger(number) || number < 1) return null
+    if (bare.size === 1 && !bare.has(number)) return null
+    return { repository: null, number }
   }
 
-  if (bare.size > 1) return null
-  const numMatch = PULL_NUMBER.exec(command) ?? (slashSkill ? /\b(\d{1,9})\b/.exec(command) : null)
-  const number = numMatch ? Number(numMatch[1] ?? numMatch[2]) : null
-  if (!number || !Number.isSafeInteger(number) || number < 1) return null
-  return { repository: null, number }
+  if (UNNUMBERED.test(command)) return null
+  if (urlNumber !== null && [...bare].some((n) => n !== urlNumber)) return null
+  if (urlNumber === null && bare.size > 1) return null
+  const remWithoutUrl = remainder.replace(ANY_HTTP_URL, ' ').replace(/[.,!?]+$/, '').trim()
+  if (remWithoutUrl !== '') {
+    const optionalLabel = /^(?:(?:for|on)\s*)?(?:(?:pr|mr|pull\s+request|merge\s+request)(?:\s*[#!]?\s*([1-9]\d{0,8}))?|[#!]([1-9]\d{0,8}))?$/i.exec(remWithoutUrl)
+    if (!optionalLabel) return null
+    const explicitNum = optionalLabel[1] ?? optionalLabel[2]
+    if (explicitNum !== undefined && urlNumber !== null && Number(explicitNum) !== urlNumber) return null
+  }
+  const resolvedNum = urlNumber ?? (bare.size === 1 ? [...bare][0]! : null)
+  return {
+    number: resolvedNum,
+    repository: singleUrl.repository,
+    ...(singleUrl.prUrl && !/^https:\/\/github\.com\//i.test(singleUrl.prUrl) ? { prUrl: singleUrl.prUrl } : {}),
+  }
 }
 
 export function reviewerPromptLine(prTarget: string, briefPath: string): string {
@@ -745,6 +780,8 @@ export interface TempReviewerGroup {
   stage: 'starting' | 'active' | 'ended'
   outcome: 'approved' | 'confirmed' | 'merged' | 'closed' | 'stopped' | null
   notice: string | null
+  /** Last non-pending state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
+  lastObservedHostSettledKey: string | null
   /** Frozen required seats; only explicit user Dismiss removes a CLI from this map. */
   requiredSeats: Map<ReviewerCli, TempReviewerSeat>
 }
@@ -752,15 +789,16 @@ export interface TempReviewerGroup {
 const MAX_READ_PAGE_CHARS = 18_000
 
 /**
- * Deterministic signature of the group's round, revision, and material entries (initial context, author round notes,
- * reviewer findings, and replies), excluding approval and held-approval entries so one seat's approval never invalidates
- * a sibling seat's concurrent read or approval.
+ * Deterministic signature of the group's round, revision, and host-supplied material entries (initial context, author
+ * round summaries, and host replies). Peer reviewer findings, replies, and approvals are intentionally excluded so one
+ * seat's submission never invalidates a sibling seat's approval on the same revision or triggers reviewer-to-reviewer
+ * `pr_wait` ping-pong before the host advances the round.
  */
 export function computeMaterialStateSignature(
   group: Pick<TempReviewerGroup, 'round' | 'head' | 'base' | 'entries'>,
 ): string {
   const material = group.entries
-    .filter((entry) => entry.kind !== 'approval' && entry.kind !== 'held-approval')
+    .filter((entry) => entry.author === 'host')
     .map((entry) => [entry.id, entry.round, entry.kind, entry.author, entry.head, entry.base, entry.body, entry.comments ?? []] as const)
   return createHash('sha256')
     .update(JSON.stringify({ round: group.round, head: group.head, base: group.base, material }))
@@ -1002,6 +1040,17 @@ export class TempReviewerRegistry {
     return [...this.groups.values()].filter((g) => g.stage !== 'ended').length
   }
 
+  activeSeatCount(): number {
+    let count = 0
+    for (const group of this.groups.values()) {
+      if (group.stage === 'ended') continue
+      for (const seat of group.requiredSeats.values()) {
+        if (seat.lifecycle === 'starting' || seat.lifecycle === 'running') count += 1
+      }
+    }
+    return count
+  }
+
   group(groupId: string): TempReviewerGroup | null {
     return this.groups.get(groupId) ?? null
   }
@@ -1090,6 +1139,10 @@ export class TempReviewerRegistry {
         throw new Error(`This session is already running temporary reviewers for ${existingHost.prLabel}. Stop them first.`)
       }
     }
+    const existingProfile = this.activeForProfile(init.profileId)
+    if (existingProfile) {
+      throw new Error(`This workspace is already running temporary reviewers for ${existingProfile.prLabel}. Stop them first.`)
+    }
     if (init.prNumber !== null && this.activeForPull(init.repository, init.prNumber)) {
       throw new Error(`${init.repository} ${init.prLabel} already has temporary reviewers running.`)
     }
@@ -1167,6 +1220,7 @@ export class TempReviewerRegistry {
       stage: 'starting',
       outcome: null,
       notice: null,
+      lastObservedHostSettledKey: null,
       requiredSeats,
     }
     this.groups.set(id, group)
@@ -1240,18 +1294,6 @@ export class TempReviewerRegistry {
       createdAt: Date.now(),
     }
     group.entries.push(entry)
-    group.materialStateSignature = computeMaterialStateSignature(group)
-    if (kind === 'review' && validated.readMatchesCurrent) {
-      // Keep the posting reviewer synchronized with the state signature that includes its own review
-      entry.stateSignature = group.materialStateSignature
-      seat.assessedState = {
-        round: group.round,
-        head: group.head,
-        base: group.base,
-        stateSignature: group.materialStateSignature,
-      }
-      seat.lastSeenStateSignature = group.materialStateSignature
-    }
     this.wakeAll()
     return { ok: true, entry, held }
   }
@@ -1289,8 +1331,6 @@ export class TempReviewerRegistry {
       createdAt: Date.now(),
     }
     group.entries.push(entry)
-    group.materialStateSignature = computeMaterialStateSignature(group)
-    seat.lastSeenStateSignature = group.materialStateSignature
     this.wakeAll()
     return { ok: true, entry }
   }
@@ -1321,6 +1361,7 @@ export class TempReviewerRegistry {
     }
     group.entries.push(entry)
     group.materialStateSignature = computeMaterialStateSignature(group)
+    group.lastObservedHostSettledKey = null
     this.wakeAll()
     return { ok: true, entry }
   }
@@ -1356,6 +1397,7 @@ export class TempReviewerRegistry {
       createdAt: Date.now(),
     })
     group.materialStateSignature = computeMaterialStateSignature(group)
+    group.lastObservedHostSettledKey = null
     this.wakeAll()
     return group
   }
@@ -1382,6 +1424,7 @@ export class TempReviewerRegistry {
     seat.assessedState = null
     seat.needsAttention = false
     seat.error = null
+    group.lastObservedHostSettledKey = null
     this.wakeAll()
     return seat
   }
@@ -1400,6 +1443,7 @@ export class TempReviewerRegistry {
     if (!group || group.stage === 'ended' || !seat) throw new Error('That reviewer seat is not active')
     this.revokeSeat(seat, 'stopped')
     group.requiredSeats.delete(cli)
+    group.lastObservedHostSettledKey = null
     let groupEnded = false
     if (group.requiredSeats.size === 0) {
       group.stage = 'ended'
@@ -1516,6 +1560,18 @@ export class TempReviewerRegistry {
 
   views(): TempReviewerGroupView[] {
     return [...this.groups.values()].map((group) => this.view(group))
+  }
+
+  settledStateKey(group: TempReviewerGroup, precomputedView?: TempReviewerGroupView): string | null {
+    if (group.stage !== 'active') return null
+    const view = precomputedView ?? this.view(group)
+    if (view.seats.length === 0) return null
+    const anyPending = view.seats.some((s) => s.verdict === 'starting' || s.verdict === 'reviewing' || s.verdict === 'settling')
+    if (anyPending) return null
+    const seatSig = view.seats
+      .map((s) => `${s.cli}:${group.requiredSeats.get(s.cli)?.generation ?? ''}:${s.verdict}:${s.error ?? ''}`)
+      .join('|')
+    return `${group.round}:${group.head}:${group.base}:${group.materialStateSignature}:${seatSig}`
   }
 
   statusPayload(group: TempReviewerGroup): string {

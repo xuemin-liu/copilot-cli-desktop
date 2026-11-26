@@ -58,7 +58,7 @@ try {
   if ($env:COPILOT_AGENT_SESSION_ID) { $meetingBody.sessionId = $env:COPILOT_AGENT_SESSION_ID }
   if ($Action) {
     if ($Command -ne 'pr-reviewers' -or @('start', 'status', 'wait', 'round', 'finish', 'stop') -notcontains $Action) { throw 'Usage: meeting.ps1 pr-reviewers -Action start|status|wait|round|finish|stop [-Pr <number|url>] [-Head <sha|ref>] [-Base <sha|ref>] [-File <path>] [-Wait <1..60>]' }
-    $meetingBody.action = $Action
+    $meetingBody.action = $Action.ToLowerInvariant()
   } elseif ($Command -eq 'pr-reviewers') {
     $meetingBody.action = 'status'
   }
@@ -187,6 +187,7 @@ if [ -n "$page" ]; then
 fi
 if [ -n "$action" ]; then
   [ "$command" = pr-reviewers ] || fail 'Only pr-reviewers takes -Action.'
+  action=$(printf '%s' "$action" | tr '[:upper:]' '[:lower:]')
   case "$action" in start|status|wait|round|finish|stop) ;; *) fail 'Usage: meeting.sh pr-reviewers -Action start|status|wait|round|finish|stop' ;; esac
 elif [ "$command" = pr-reviewers ]; then
   action=status
