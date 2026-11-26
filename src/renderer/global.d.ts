@@ -189,6 +189,7 @@ export interface CopilotDesktopBridge {
 }
 
 export interface DesktopSettingsSnapshot extends DesktopPreferences {
+  copilotModelCatalogRevision: number
   launchAtLogin: boolean
   launchAtLoginAvailable: boolean
   globalShortcutRegistered: boolean
@@ -275,7 +276,7 @@ export interface CopilotDesktopSettingsBridge {
   onUpdateStateChanged(listener: (state: DesktopSettingsSnapshot['update']) => void): () => void
   onPreferencesChanged(listener: (preferences: DesktopPreferences) => void): () => void
   onCopilotStateChanged(
-    listener: (state: Pick<DesktopSettingsSnapshot, 'cliVersion' | 'cliCapabilities' | 'cliMaintenance'>) => void,
+    listener: (state: Pick<DesktopSettingsSnapshot, 'cliVersion' | 'cliCapabilities' | 'cliMaintenance' | 'copilotModelCatalogRevision'>) => void,
   ): () => void
 }
 

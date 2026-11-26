@@ -15,7 +15,8 @@ import type { CopilotResolution } from './types.js'
 export interface CliModelOption {
   id: string
   label: string
-  efforts: string[]
+  /** An omitted list means the provider did not advertise its effort levels. */
+  efforts?: string[]
 }
 
 const TIMEOUT = 15_000
@@ -36,7 +37,7 @@ function modelOption(id: unknown, label: unknown, levels: unknown, allowed: read
   return [{
     id,
     label: typeof label === 'string' && label.trim() ? label.trim().slice(0, 200) : id,
-    efforts: allowed.filter((effort) => reported.includes(effort)),
+    ...(Array.isArray(levels) ? { efforts: allowed.filter((effort) => reported.includes(effort)) } : {}),
   }]
 }
 
@@ -52,7 +53,9 @@ async function inCatalogDirectory<T>(read: (cwd: string) => Promise<T>): Promise
 
 export async function readCopilotModelCatalog(resolution: CopilotResolution, env: NodeJS.ProcessEnv): Promise<CliModelOption[]> {
   if (resolution.version === null) return []
-  if (env.COPILOT_PROVIDER_TYPE && env.COPILOT_MODEL) return modelOption(env.COPILOT_MODEL, env.COPILOT_MODEL, [], [])
+  if (env.COPILOT_PROVIDER_TYPE && env.COPILOT_PROVIDER_TYPE !== 'github' && env.COPILOT_MODEL) {
+    return modelOption(env.COPILOT_MODEL, env.COPILOT_MODEL, undefined, [])
+  }
   return inCatalogDirectory(async (cwd) => {
     const rpc = new CopilotRpc(resolution, cwd, env)
     try {
@@ -62,7 +65,7 @@ export async function readCopilotModelCatalog(resolution: CopilotResolution, env
         const model = record(value)
         const policy = record(model.policy)
         if (policy.state === 'disabled') return []
-        return modelOption(model.id, model.name, model.supportedReasoningEfforts, efforts)
+        return modelOption(model.id, model.name, list(model.supportedReasoningEfforts), efforts)
       })
       const auto = list(record(result.auto).tiers).map(record).some((tier) => (
         tier.type === 'auto' && record(tier.status).enabled === true && record(tier.status).pickerVisible !== false
@@ -133,7 +136,7 @@ export async function readOtherCliModelCatalog(resolution: AgentCliResolution): 
           return list(record(response.response).models).flatMap((value) => {
             const model = record(value)
             if (model.value === 'default') return []
-            return modelOption(model.value, model.displayName, model.supportedEffortLevels, efforts)
+            return modelOption(model.value, model.displayName, list(model.supportedEffortLevels), efforts)
           })
         }
       })

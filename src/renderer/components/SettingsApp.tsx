@@ -6,9 +6,9 @@ import type { ResumeMode } from '../../main/resume-args.js'
 import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
-import type { SessionLaunchConfig } from '../../main/session-launch.js'
+import { REASONING_EFFORTS, type SessionLaunchConfig } from '../../main/session-launch.js'
 import type { CliModelOption } from '../../main/cli-model-catalog.js'
-import { AGENT_CLI_SETTINGS, type OtherCliConfig } from '../../main/agent-cli-settings.js'
+import { AGENT_CLI_SETTINGS, otherCliReasoningEfforts, type OtherCliConfig } from '../../main/agent-cli-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli } from '../../main/session-cli.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
@@ -84,30 +84,45 @@ const effortLabels: Record<string, string> = {
   none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
   max: 'Maximum', ultra: 'Ultra', ultracode: 'Ultracode',
 }
+const COPILOT_EFFORTS = REASONING_EFFORTS.filter((effort) => effort !== 'default')
+const CUSTOM_MODEL = '--custom-model'
 
-function ModelFields({ label, catalog, model, effort, onChange }: {
+function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onChange }: {
   label: string
   catalog: CliModelOption[] | undefined
   model: string
   effort?: string
+  fallbackEfforts?: readonly string[]
   onChange: (model: string, effort: string) => void
 }): JSX.Element {
+  const [custom, setCustom] = useState(false)
   const selected = catalog?.find((entry) => entry.id === model)
-  const selectedEfforts = selected?.efforts ?? []
+  const selectedEfforts = selected?.efforts ?? fallbackEfforts
+  const chooseModel = (next: string): void => {
+    const levels = catalog?.find((entry) => entry.id === next)?.efforts ?? fallbackEfforts
+    onChange(next, effort && levels.includes(effort) ? effort : '')
+  }
   return <>
     <label>
       {label}
-      <select value={model} disabled={!model && !catalog?.length} onChange={(event) => {
+      <select value={custom ? CUSTOM_MODEL : model} onChange={(event) => {
         const next = event.target.value
-        const levels = catalog?.find((entry) => entry.id === next)?.efforts
-        onChange(next, effort && levels?.includes(effort) ? effort : '')
+        setCustom(next === CUSTOM_MODEL)
+        if (next !== CUSTOM_MODEL) chooseModel(next)
       }}>
         <option value="">Use CLI default</option>
-        {model && !selected && <option value={model}>{model} (saved)</option>}
+        {model && !selected && !custom && <option value={model}>{model} (saved)</option>}
         {catalog?.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
+        <option value={CUSTOM_MODEL}>Custom model…</option>
       </select>
       {!catalog?.length && <small role="status">{catalog ? 'Model list unavailable' : 'Loading models…'}</small>}
     </label>
+    {custom && (
+      <label>
+        Custom model ID
+        <input type="text" value={model} maxLength={200} onChange={(event) => chooseModel(event.target.value)} />
+      </label>
+    )}
     {effort !== undefined && (
       <label>
         Reasoning effort
@@ -188,6 +203,7 @@ function WorkspaceProfileEditor({
           catalog={modelCatalogs.copilot}
           model={launch.model}
           effort={launch.reasoningEffort === 'default' ? '' : launch.reasoningEffort}
+          fallbackEfforts={COPILOT_EFFORTS}
           onChange={(model, effort) => setLaunch((current) => ({
             ...current, model, reasoningEffort: (effort || 'default') as SessionLaunchConfig['reasoningEffort'],
           }))}
@@ -348,9 +364,11 @@ function WorkspaceProfileEditor({
             )
           })}
           <ModelFields
+            key={activeCli}
             label={activeCli === 'antigravity' ? 'Model and thinking' : 'Model'}
             catalog={modelCatalogs[activeCli]}
             model={activeConfig.model ?? ''}
+            fallbackEfforts={otherCliReasoningEfforts(activeCli)}
             {...(activeCli === 'antigravity' ? {} : { effort: activeConfig.reasoningEffort ?? '' })}
             onChange={(model, effort) => setOtherCliFields(activeCli, { model, reasoningEffort: effort })}
           />
@@ -665,6 +683,8 @@ export function SettingsApp(): JSX.Element | null {
   const [snapshot, setSnapshot] = useState<DesktopSettingsSnapshot | null>(null)
   const [modelCatalogs, setModelCatalogs] = useState<ModelCatalogs>({})
   const [catalogRefresh, setCatalogRefresh] = useState(0)
+  const lastCatalogRefresh = useRef(0)
+  const providerKey = snapshot ? JSON.stringify([snapshot.provider, snapshot.copilotModelCatalogRevision]) : null
   const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({})
   const [cliMaintenancePending, setCliMaintenancePending] = useState(false)
   const [capabilityCheckPending, setCapabilityCheckPending] = useState(false)
@@ -696,16 +716,20 @@ export function SettingsApp(): JSX.Element | null {
   }, [query, snapshot, modelCatalogs])
 
   useEffect(() => {
+    if (providerKey === null) return
+    const reload = lastCatalogRefresh.current !== catalogRefresh
+    lastCatalogRefresh.current = catalogRefresh
+    setModelCatalogs({})
     let active = true
     for (const cli of SESSION_CLIS) {
-      void window.copilotDesktopSettings.getModelCatalog(cli, catalogRefresh > 0)
+      void window.copilotDesktopSettings.getModelCatalog(cli, reload)
         .catch(() => [])
         .then((catalog) => {
           if (active) setModelCatalogs((current) => ({ ...current, [cli]: catalog }))
         })
     }
     return () => { active = false }
-  }, [catalogRefresh])
+  }, [catalogRefresh, providerKey])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
@@ -1177,10 +1201,7 @@ export function SettingsApp(): JSX.Element | null {
         {snapshot.profiles.length === 0 && <p>No workspaces yet. Choose one from the main window.</p>}
         {snapshot.profiles.length > 0 && (
           <div className="settings-actions">
-            <button type="button" disabled={SESSION_CLIS.some((cli) => !modelCatalogs[cli])} onClick={() => {
-              setModelCatalogs({})
-              setCatalogRefresh((current) => current + 1)
-            }}>Refresh models</button>
+            <button type="button" disabled={SESSION_CLIS.some((cli) => !modelCatalogs[cli])} onClick={() => setCatalogRefresh((current) => current + 1)}>Refresh models</button>
           </div>
         )}
         {snapshot.profiles.map((profile) => (

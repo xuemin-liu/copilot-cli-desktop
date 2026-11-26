@@ -2565,12 +2565,26 @@ async function startSessionTab(
 
 const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
 
-const modelCatalogs = new Map<SessionCli, { promise: Promise<CliModelOption[]>; pending: boolean }>()
+const modelCatalogs = new Map<SessionCli, { providerKey: string; promise: Promise<CliModelOption[]> }>()
+let copilotModelCatalogRevision = 0
+
+function invalidateCopilotModelCatalog(): void {
+  modelCatalogs.delete('copilot')
+  copilotModelCatalogRevision++
+}
 
 function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOption[]> {
+  const provider = desktopConfig.provider
+  const providerKey = cli === 'copilot' ? JSON.stringify(provider) : ''
   const cached = modelCatalogs.get(cli)
-  if (cached && (!reload || cached.pending)) return cached.promise
-  const entry = { pending: true, promise: load().catch(() => []).finally(() => { entry.pending = false }) }
+  if (!reload && cached?.providerKey === providerKey) return cached.promise
+  const entry = {
+    providerKey,
+    promise: load().catch(() => []).then((models) => {
+      if (models.length === 0 && modelCatalogs.get(cli) === entry) modelCatalogs.delete(cli)
+      return models
+    }),
+  }
   modelCatalogs.set(cli, entry)
   return entry.promise
 
@@ -2584,7 +2598,7 @@ function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOptio
   async function loadCopilot(): Promise<CliModelOption[]> {
     const resolution = (!reload && state.resolution) || (await probeCopilotResolution()).resolution
     const inherited = { ...process.env, ...await credentialStore?.resolveEnvironment() }
-    return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(desktopConfig.provider, inherited) })
+    return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(provider, inherited) })
   }
 }
 
@@ -6665,6 +6679,7 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(restoreAllWorkspaces = false): Promise<DesktopState> {
   const probe = await probeCopilotResolution()
+  if (state.resolution && !sameCopilotResolution(state.resolution, probe.resolution)) invalidateCopilotModelCatalog()
   state.resolution = probe.resolution
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
@@ -6716,6 +6731,7 @@ async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
     return false
   }
   state.resolution = next
+  invalidateCopilotModelCatalog()
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
   broadcastState()
@@ -6816,6 +6832,7 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
         : await updateCopilotCli(current!)
     } finally { copilotBeingReplaced = false }
     await bestEffortUsage(usageService?.collect())
+    invalidateCopilotModelCatalog()
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -7194,6 +7211,7 @@ interface DesktopSettingsSnapshot extends DesktopPreferences {
   rollbackVersion: string | null
   access: Awaited<ReturnType<typeof readAccessStatus>>
   provider: CopilotProviderConfig
+  copilotModelCatalogRevision: number
   cliVersion: string | null
   cliCapabilities: CopilotCapabilities
   cliMaintenance: CopilotMaintenanceState
@@ -7254,6 +7272,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     rollbackVersion: desktopConfig.rollbackVersion,
     access,
     provider: { ...desktopConfig.provider },
+    copilotModelCatalogRevision,
     cliVersion: state.resolution?.version ?? null,
     cliCapabilities: { ...copilotCapabilities },
     cliMaintenance: { ...copilotMaintenance },
@@ -7286,6 +7305,7 @@ function broadcastCopilotSettingsState(): void {
       cliVersion: state.resolution?.version ?? null,
       cliCapabilities: { ...copilotCapabilities },
       cliMaintenance: { ...copilotMaintenance },
+      copilotModelCatalogRevision,
     })
   }
 }
@@ -8680,6 +8700,7 @@ ipcMain.handle('desktop-settings:save-credential', async (event, name: unknown, 
   if (!isCredentialName(name) || typeof secret !== 'string') throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.saveCredential(name as CredentialName, secret)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown) => {
@@ -8687,6 +8708,7 @@ ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown
   if (!isCredentialName(name)) throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.deleteCredential(name as CredentialName)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:install-copilot', async (event) => {

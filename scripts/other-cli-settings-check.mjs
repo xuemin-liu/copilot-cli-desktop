@@ -1,7 +1,7 @@
 // Per-CLI permission/model settings in the real app. Antigravity is a local fixture: node.exe copied to agy.exe on
 // PATH, which reports a version and whose --help has no --model — an installed CLI build that would reject the flag.
 // Checks, through the real main process and windows:
-//  1. Settings renders the per-CLI editor, and a malformed new value fails the save instead of being dropped.
+//  1. Settings saves model and effort selections, reloads a changed provider, and rejects a malformed model.
 //  2. A new tab whose workspace model the installed agy does not list is refused before any process starts.
 //  3. A saved tab with that setting, restored on startup, does not launch; it shows a notice naming the field.
 //  4. "Use … settings" clears just that field on the tab, starts it, and the next restart keeps working.
@@ -147,17 +147,48 @@ if (!process.versions.electron) {
     }
     await suntil('document.querySelector(".other-cli-settings")', 'per-CLI settings')
     await suntil('document.querySelector(\'option[value="local-test-model"]\')', 'Copilot model from the configured provider')
-    await sui(`(() => {
-      const model = document.querySelector('option[value="local-test-model"]').closest('select')
-      model.value = 'local-test-model'
-      model.dispatchEvent(new Event('change', { bubbles: true }))
-      ;[...document.querySelectorAll('.settings-card button')].find(button => button.textContent === 'Save profile').click()
+    const selectOption = (selector) => sui(`(() => {
+      const option = document.querySelector(${JSON.stringify(selector)})
+      const select = option.closest('select')
+      if (select.disabled) throw new Error('Picker is disabled')
+      select.value = option.value
+      select.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
-    for (let attempt = 0; attempt < 50 && (await readDesktopConfig(configPath)).profiles[0].launch.model !== 'local-test-model'; attempt++) await delay(100)
-    assert.equal((await readDesktopConfig(configPath)).profiles[0].launch.model, 'local-test-model', 'the selected Copilot model is saved')
+    const clickButton = (label) => sui(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    const setInput = (selector, value) => sui(`(() => {
+      const input = document.querySelector(${JSON.stringify(selector)})
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)})
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })()`)
+    const saveLaunch = async (model, effort) => {
+      await clickButton('Save profile')
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const launch = (await readDesktopConfig(configPath)).profiles[0].launch
+        if (launch.model === model && launch.reasoningEffort === effort) {
+          await suntil('[...document.querySelectorAll("button")].some(button => button.textContent === "Save profile" && !button.disabled)', 'save finished')
+          return
+        }
+        await delay(100)
+      }
+      throw new Error(`Workspace did not save model "${model}" and effort "${effort}"`)
+    }
+
+    const copilotGrid = '.settings-card > .settings-form-grid'
+    await selectOption(`${copilotGrid} option[value="high"]`)
+    await saveLaunch('', 'high')
+    await selectOption(`${copilotGrid} option[value="--custom-model"]`)
+    await setInput(`${copilotGrid} input[maxlength="200"]`, 'custom-review-model')
+    await saveLaunch('custom-review-model', 'high')
+    await selectOption('option[value="local-test-model"]')
+    await saveLaunch('local-test-model', 'high')
+    await setInput('input[placeholder="Model or deployment identifier"]', 'replacement-test-model')
+    await clickButton('Save provider')
+    await suntil('document.querySelector(\'option[value="replacement-test-model"]\')', 'updated Copilot provider model')
+    assert.equal(await sui('document.querySelector(\'option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
     assert.equal(await sui('document.querySelectorAll(".other-cli-tab").length'), 3)
     await sui('document.querySelectorAll(".other-cli-tab")[1].click()')
     await suntil('document.querySelectorAll(".other-cli-settings select").length === 4', 'Codex approval, sandbox, model and effort')
+    await suntil('document.querySelector(\'.other-cli-settings select:not(:disabled) option[value="high"]\')', 'Codex default model effort')
     const rejected = await sui(`window.copilotDesktopSettings.updateWorkspaceProfile(${JSON.stringify(project.id)}, 'project', 'default', 'new',
       ${JSON.stringify(project.launch)}, { antigravity: { model: 'model-x' }, claude: { model: '--bad' } }).then(() => 'saved', error => String(error))`)
     assert.match(rejected, /not a usable model name/)
