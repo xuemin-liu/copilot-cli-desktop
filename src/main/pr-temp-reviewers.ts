@@ -203,13 +203,15 @@ export function prReviewAndFixRequest(text: string): PrReviewAndFixRequest | nul
     if (UNNUMBERED.test(command) || bare.size > 1) return null
 
     const targetPattern = slashMatch
-      ? /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])?([1-9]\d{0,8})[.,!?]*$/i
-      : /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])([1-9]\d{0,8})[.,!?]*$/i
+      ? /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])?([1-9]\d{0,8})(?=$|[\s.,!?])/i
+      : /^(?:(?:for|on)\s+)?(?:(?:pr|mr|pull\s+request|merge\s+request)\s*[#!]?\s*|[#!])([1-9]\d{0,8})(?=$|[\s.,!?])/i
     const targetMatch = targetPattern.exec(remainder)
     if (!targetMatch) return null
     const number = Number(targetMatch[1])
     if (!Number.isSafeInteger(number) || number < 1) return null
     if (bare.size === 1 && !bare.has(number)) return null
+    const afterTarget = remainder.slice(targetMatch[0].length).trim()
+    if (afterTarget && /\b\d+\b/.test(afterTarget)) return null
     return { repository: null, number }
   }
 
@@ -217,11 +219,14 @@ export function prReviewAndFixRequest(text: string): PrReviewAndFixRequest | nul
   if (urlNumber !== null && [...bare].some((n) => n !== urlNumber)) return null
   if (urlNumber === null && bare.size > 1) return null
   const remWithoutUrl = remainder.replace(ANY_HTTP_URL, ' ').replace(/[.,!?]+$/, '').trim()
-  if (remWithoutUrl !== '') {
+  if (remWithoutUrl !== '' && urlNumber === null) {
     const optionalLabel = /^(?:(?:for|on)\s*)?(?:(?:pr|mr|pull\s+request|merge\s+request)(?:\s*[#!]?\s*([1-9]\d{0,8}))?|[#!]([1-9]\d{0,8}))?$/i.exec(remWithoutUrl)
     if (!optionalLabel) return null
     const explicitNum = optionalLabel[1] ?? optionalLabel[2]
     if (explicitNum !== undefined && urlNumber !== null && Number(explicitNum) !== urlNumber) return null
+  }
+  if (remWithoutUrl !== '' && urlNumber !== null && /\b\d+\b/.test(remWithoutUrl) && [...remWithoutUrl.matchAll(/\b(\d+)\b/g)].some((m) => Number(m[1]) !== urlNumber)) {
+    return null
   }
   const resolvedNum = urlNumber ?? (bare.size === 1 ? [...bare][0]! : null)
   return {
@@ -332,11 +337,12 @@ export function buildOtherCliReviewerCliArgs(
     return [...configArgs, ...sessionArgs, ...addDirArgs, '--', prompt]
   }
   if (cli === 'antigravity') {
+    const safePrompt = prompt.startsWith('-') ? ` ${prompt}` : prompt
     if (help && helpListsFlag(help, '--prompt-interactive')) {
-      return [...configArgs, ...addDirArgs, '--prompt-interactive', prompt]
+      return [...configArgs, ...addDirArgs, '--prompt-interactive', safePrompt]
     }
     if (help && helpListsFlag(help, '--print')) {
-      return [...configArgs, ...addDirArgs, '--print', prompt]
+      return [...configArgs, ...addDirArgs, '--print', safePrompt]
     }
     throw new Error('Could not confirm that this Antigravity CLI installation supports --prompt-interactive or --print.')
   }
