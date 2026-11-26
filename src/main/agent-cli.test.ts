@@ -115,6 +115,74 @@ test('resolveAgentCli refuses a shim that points outside its package, and says h
   assert.match(found.error ?? '', /npm install -g @openai\/codex/)
 })
 
+test('resolveAgentCli falls back to the Windows Codex Store app when codex is not on PATH or npm', async () => {
+  const installLocation = 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1120.6357.0_x64__2p2nqsd0c76g0'
+  const appExe = `${installLocation}\\app\\resources\\codex.exe`
+  const calls: Array<{ file: string; args: string[]; cwd: string | undefined }> = []
+  const found = await resolveAgentCli('codex', {
+    platform: 'win32',
+    env: { SystemRoot: 'C:\\Windows', APPDATA: 'C:\\Users\\me\\AppData\\Roaming' },
+    pathExists: (path) => path === appExe,
+    execFile: async (file, args, options) => {
+      calls.push({ file, args, cwd: options.cwd })
+      if (file.toLowerCase().endsWith('where.exe')) throw new Error('INFO: Could not find files')
+      if (file.toLowerCase().endsWith('powershell.exe')) {
+        assert.equal(file, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+        assert.equal(options.cwd, 'C:\\Windows\\System32')
+        return { stdout: `relative\\ignored\r\n${installLocation}\r\n`, stderr: '' }
+      }
+      assert.equal(file, appExe)
+      assert.deepEqual(args, ['--version'])
+      return { stdout: 'codex-cli 0.171.0-alpha.13.2\n', stderr: '' }
+    },
+  })
+  assert.equal(found.error, null)
+  assert.equal(found.command, appExe)
+  assert.equal(found.resolvedPath, appExe)
+  assert.deepEqual(found.prefixArgs, [])
+  assert.equal(found.version, '0.171.0-alpha.13.2')
+  assert.equal(calls.length, 3)
+})
+
+test('resolveAgentCli prefers codex on Windows PATH and falls back to the Store app only if PATH fails', async () => {
+  const pathExe = 'C:\\Tools\\codex.exe'
+  const installLocation = 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_1'
+  const appExe = `${installLocation}\\app\\resources\\codex.exe`
+
+  // When PATH succeeds, PowerShell is never invoked.
+  const fromPath = await resolveAgentCli('codex', {
+    platform: 'win32',
+    env: { SystemRoot: 'C:\\Windows' },
+    pathExists: (path) => path === appExe,
+    execFile: async (file, args) => {
+      if (file.toLowerCase().endsWith('where.exe')) return { stdout: `${pathExe}\r\n`, stderr: '' }
+      if (file.toLowerCase().endsWith('powershell.exe')) assert.fail('must not query Windows Store when PATH succeeds')
+      assert.equal(file, pathExe)
+      assert.deepEqual(args, ['--version'])
+      return { stdout: 'codex-cli 0.170.0\n', stderr: '' }
+    },
+  })
+  assert.equal(fromPath.command, pathExe)
+  assert.equal(fromPath.version, '0.170.0')
+
+  // When PATH fails its version probe, fall back to the Store app.
+  const fromApp = await resolveAgentCli('codex', {
+    platform: 'win32',
+    env: { SystemRoot: 'C:\\Windows' },
+    pathExists: (path) => path === appExe,
+    execFile: async (file) => {
+      if (file.toLowerCase().endsWith('where.exe')) return { stdout: `${pathExe}\r\n`, stderr: '' }
+      if (file === pathExe) throw new Error('broken executable')
+      if (file.toLowerCase().endsWith('powershell.exe')) return { stdout: `${installLocation}\r\n`, stderr: '' }
+      if (file === appExe) return { stdout: 'codex-cli 0.171.0-alpha.13.2\n', stderr: '' }
+      throw new Error(`unexpected ${file}`)
+    },
+  })
+  assert.equal(fromApp.error, null)
+  assert.equal(fromApp.command, appExe)
+  assert.equal(fromApp.version, '0.171.0-alpha.13.2')
+})
+
 test('resolveAgentCli finds the program on PATH outside Windows', async () => {
   const found = await resolveAgentCli('claude', {
     platform: 'linux',
