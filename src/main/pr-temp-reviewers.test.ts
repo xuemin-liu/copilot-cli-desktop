@@ -20,6 +20,7 @@ import {
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
   claudeBypassesPermissions,
+  claudeTrustFolderForCheckout,
   interactiveSeatsToReconcile,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
@@ -251,6 +252,13 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.equal(claudeBypassesPermissions(['--permission-mode', 'acceptEdits']), false)
   assert.equal(claudeBypassesPermissions(['--model', 'bypassPermissions']), false)
   assert.equal(claudeBypassesPermissions([]), false)
+  // Trust is asked about the main repository folder only: a linked worktree's own folder is never the answer.
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'main', '.git')), join('work', 'main'))
+  assert.equal(claudeTrustFolderForCheckout(`${join('work', 'main', '.git')}/`), join('work', 'main'))
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'bare.git')), null, 'a bare repository has no main folder')
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'main', '.git', 'worktrees', 'feature-wt')), null)
+  assert.equal(claudeTrustFolderForCheckout(''), null)
+  assert.equal(claudeTrustFolderForCheckout(null), null)
   assert.equal(otherCliReviewerOneShot('codex', true), true)
   assert.equal(otherCliReviewerOneShot('antigravity', true), true)
   assert.equal(otherCliReviewerOneShot('codex', false), false)

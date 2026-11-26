@@ -559,6 +559,12 @@ test('claudeProjectTrusted reads trust for a project folder from Claude Code\'s 
     // A worktree is trusted through its main repository's folder, given beside it.
     assert.equal(await claudeProjectTrusted([join(dir, 'worktree'), null, project], env), true)
     assert.equal(await claudeProjectTrusted([join(dir, 'declined')], env), false)
+    // A linked worktree with its own trust record, and none for its main repository: asked about the main folder
+    // alone (as the reviewer launch does), it is not trusted.
+    await writeFile(join(dir, '.claude.json'), JSON.stringify({ projects: { [join(dir, 'feature-wt')]: { hasTrustDialogAccepted: true } } }))
+    assert.equal(await claudeProjectTrusted([join(dir, 'main')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'feature-wt')], env), true)
+    await writeFile(join(dir, '.claude.json'), JSON.stringify({ projects: { [project.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true }, [join(dir, 'declined')]: { hasTrustDialogAccepted: false }, [join(dir, 'odd')]: { hasTrustDialogAccepted: 'true' } } }))
     assert.equal(await claudeProjectTrusted([join(dir, 'odd')], env), false)
     assert.equal(await claudeProjectTrusted([join(dir, 'Work')], env), false, 'a parent folder is not the project')
     assert.equal(await claudeProjectTrusted([null, undefined, ''], env), false)

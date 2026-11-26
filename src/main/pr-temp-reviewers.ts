@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { parseSafeHttpUrl } from './external-targets.js'
 import { helpListsFlag, type PerCliConfig } from './agent-cli-settings.js'
@@ -377,6 +377,20 @@ export function reviewerHelperDirAccess(
  */
 export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
   return reviewerAllowAll && (cli !== 'claude' || !claudeTrustsProject)
+}
+
+/**
+ * The one folder whose trust record Claude Code reads for a session in a reviewer checkout: the main repository
+ * folder, the parent of the project's `.git` common folder. The checkout is a worktree, and Claude Code looks up a
+ * worktree's trust under its main repository; a record under the project's own folder counts only when the project
+ * is that main checkout. Null when the common folder is not a `.git` folder (a bare repository, say), where trust
+ * cannot be established and the seat stays one-shot.
+ */
+export function claudeTrustFolderForCheckout(commonDir: string | null | undefined): string | null {
+  const folder = (commonDir ?? '').trim().replace(/[\\/]+$/, '')
+  if (!folder || basename(folder) !== '.git') return null
+  const parent = dirname(folder)
+  return parent && parent !== folder ? parent : null
 }
 
 /** Whether these Claude Code arguments start it in bypass-permissions mode, by either spelling of the flag. */

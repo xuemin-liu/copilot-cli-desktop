@@ -161,6 +161,7 @@ import {
   buildOtherCliReviewerCliArgs,
   otherCliReviewerOneShot,
   claudeBypassesPermissions,
+  claudeTrustFolderForCheckout,
   interactiveSeatsToReconcile,
   buildReviewerBrief,
   CLAUDE_REVIEWER_SETTINGS_FILE,
@@ -4222,11 +4223,9 @@ async function launchTempReviewerSeat(
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
     const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
     // Claude Code runs interactively (its work shows in the tab) only where it will not stop at its workspace trust
-    // question: the reviewer checkout is a worktree, which takes its trust from the project's main repository folder.
-    const claudeTrustsProject = cli === 'claude' && allowAll && await claudeProjectTrusted([
-      group.projectPath,
-      area.commonDir && basename(area.commonDir) === '.git' ? dirname(area.commonDir) : null,
-    ])
+    // question: the reviewer checkout is a worktree, which takes its trust from the project's main repository folder,
+    // also when the project itself is a linked worktree with a trust record of its own.
+    const claudeTrustsProject = cli === 'claude' && allowAll && await claudeProjectTrusted([claudeTrustFolderForCheckout(area.commonDir)])
     const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, cli === 'claude' && claudeBypassesPermissions(configArgs))
     if (helperAccess.settings !== null) {
       await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
