@@ -1,11 +1,12 @@
 import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
 import { githubRemoteRepository, type GithubSnapshot } from './workflow-github.js'
 import { reviewerDeniedPaths, writeReviewerHome, verifyReviewerHome, type ReviewerPathRoots } from './pr-reviewer-sandbox.js'
+import { plainFs } from './plain-fs.js'
 
 /**
  * Where a review loop reads a pull request (docs/pr-loops-plan.md, decision 5): a detached `git worktree` of the
@@ -79,16 +80,17 @@ async function staleWorktreePointer(runner: GitRunner, project: string, checkout
 /**
  * The first file in a leftover checkout that was made, written, or changed in any other way (moved in or renamed, which
  * keeps a file's creation and write times) at or after `since`, or null. Folders' own times are not looked at (deleting
- * part of a folder changes them), and links are not followed.
+ * part of a folder changes them), and links are not followed. Read with `plainFs`: a checkout holds `.asar` files,
+ * and Electron's own `lstat` of one would open it and keep the desktop from ever deleting it.
  */
 async function savedAfter(checkout: string, since: number): Promise<string | null> {
   const pending = [checkout]
   while (pending.length) {
     const dir = pending.pop() as string
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
+    for (const entry of await plainFs.promises.readdir(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) { pending.push(path); continue }
-      const info = await lstat(path)
+      const info = await plainFs.promises.lstat(path)
       if (Math.max(info.mtimeMs, info.birthtimeMs, info.ctimeMs) >= since) return path
     }
   }
@@ -212,7 +214,8 @@ export async function removeReviewerAreaDetailed(
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   try {
-    await rm(area.root, { recursive: true, force: true, maxRetries: options?.folderRetries ?? 6, retryDelay: 200 })
+    // `plainFs`: the checkout holds `.asar` files, which Electron's own `rm` cannot delete and then locks for good.
+    await plainFs.promises.rm(area.root, { recursive: true, force: true, maxRetries: options?.folderRetries ?? 6, retryDelay: 200 })
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     return detached ? { outcome: 'kept', reason: 'detached', detail, detachedAt: detachedAt ?? startedAt } : { outcome: 'kept', reason: 'git-failed', detail }
@@ -520,7 +523,7 @@ export async function pruneReviewerAreas(base: string, keep: ReadonlySet<string>
     if (!entry.isDirectory() || entry.isSymbolicLink() || !AREA_NAME.test(entry.name) || keep.has(path)) continue
     try {
       if (now - (await stat(path)).mtimeMs < maxAgeMs) continue
-      await rm(path, { recursive: true, force: true, maxRetries: 3 }); removed.push(path)
+      await plainFs.promises.rm(path, { recursive: true, force: true, maxRetries: 3 }); removed.push(path)
     } catch { /* In use or gone; the next start tries again. */ }
   }
   return removed
