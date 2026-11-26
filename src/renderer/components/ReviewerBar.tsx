@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
 import { sessionCliLabel, type ReviewerCli } from '../../main/session-cli.js'
-import type { TempReviewerConfirmTarget, TempReviewerGroupView, TempReviewerSeatVerdict } from '../../main/types.js'
+import type { TempReviewerGroupView, TempReviewerSeatVerdict } from '../../main/types.js'
 
 export interface ReviewerBarProps {
   groups: readonly TempReviewerGroupView[]
@@ -14,31 +14,16 @@ export interface ReviewerBarProps {
 
 const VERDICT_LABEL: Record<TempReviewerSeatVerdict, string> = {
   starting: 'starting…',
-  reviewing: 'reviewing…',
-  'changes-requested': 'changes requested',
-  approved: 'approved',
-  'held-approval': 'approved (missing checks)',
-  settling: 'posting…',
-  uncertain: 'post uncertain',
+  reviewing: 'reviewing on PR…',
   failed: 'failed',
   stopped: 'stopped',
 }
 
 const OUTCOME_LABEL: Record<NonNullable<TempReviewerGroupView['outcome']>, string> = {
-  approved: 'Approved',
-  confirmed: 'Approval confirmed',
+  approved: 'Approved on PR',
   merged: 'PR merged',
   closed: 'PR closed',
   stopped: 'Stopped',
-}
-
-export function reviewerConfirmButtonLabel(target: TempReviewerConfirmTarget): string {
-  if (!target.approveAnyway) return 'Confirm approval'
-  const details = target.missingChecks
-    .filter((entry) => entry.missing.length > 0)
-    .map((entry) => `${sessionCliLabel(entry.cli)}: ${entry.missing.join(', ')}`)
-    .join('; ')
-  return details ? `Approve anyway (missing: ${details})` : 'Approve anyway'
 }
 
 export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekTabId, onPeek, onError }: ReviewerBarProps): JSX.Element | null {
@@ -52,8 +37,8 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
 
   const runAction = (
     groupId: string,
-    action: 'stop' | 'confirm' | 'retry' | 'dismiss' | 'dismiss-ended',
-    payload?: ReviewerCli | TempReviewerConfirmTarget,
+    action: 'stop' | 'retry' | 'dismiss' | 'dismiss-ended',
+    payload?: ReviewerCli,
   ): void => {
     setBusyGroupId(groupId)
     void window.copilotDesktop.tempReviewerAction(groupId, action, payload)
@@ -68,15 +53,13 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
         const busy = busyGroupId === group.id
         const stageSummary = ended
           ? (group.outcome ? OUTCOME_LABEL[group.outcome] : 'Ended')
-          : group.confirmTarget
-            ? 'Ready to confirm'
-            : group.stage === 'starting'
-              ? 'Starting reviewers…'
-              : 'Reviewing'
+          : group.stage === 'starting'
+            ? 'Starting reviewers…'
+            : 'Reviewing on PR'
         return (
           <section
             key={group.id}
-            className={`meeting-bar reviewer-bar reviewer-bar-${ended ? 'ended' : group.confirmTarget ? 'ready' : 'active'}`}
+            className={`meeting-bar reviewer-bar reviewer-bar-${ended ? 'ended' : 'active'}`}
             aria-label={`Temporary PR reviewers for ${group.prLabel}`}
           >
             {group.prUrl ? (
@@ -108,10 +91,12 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                   <li
                     key={seat.cli}
                     className={`reviewer-seat reviewer-seat-${seat.verdict}${seat.needsAttention ? ' reviewer-seat-attention' : ''}`}
-                    title={seat.error ?? (seat.missingChecks.length > 0 ? `Missing checks: ${seat.missingChecks.join(', ')}` : undefined)}
+                    title={seat.error ?? undefined}
                   >
                     <span className="reviewer-seat-name">{sessionCliLabel(seat.cli)}</span>
-                    <span className="reviewer-seat-verdict">{VERDICT_LABEL[seat.verdict]}</span>
+                    <span className="reviewer-seat-verdict">
+                      {seat.needsAttention && seat.verdict === 'reviewing' ? 'needs approval' : VERDICT_LABEL[seat.verdict]}
+                    </span>
                     {canPeek && (
                       <button
                         type="button"
@@ -148,16 +133,6 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
               })}
             </ul>
             <div className="reviewer-bar-actions">
-              {!ended && group.confirmTarget && (
-                <button
-                  type="button"
-                  className="primary-button reviewer-bar-confirm"
-                  disabled={busy}
-                  onClick={() => runAction(group.id, 'confirm', group.confirmTarget!)}
-                >
-                  {reviewerConfirmButtonLabel(group.confirmTarget)}
-                </button>
-              )}
               {!ended ? (
                 <button
                   type="button"

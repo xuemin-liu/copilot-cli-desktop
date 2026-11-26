@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ReviewerBar, reviewerConfirmButtonLabel } from '../renderer/components/ReviewerBar.js'
+import { ReviewerBar } from '../renderer/components/ReviewerBar.js'
 import { Sidebar } from '../renderer/components/Sidebar.js'
 import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 import type { DesktopSessionTab, TempReviewerGroupView, WorkspaceProfile } from './types.js'
@@ -34,7 +34,7 @@ function makeTab(id: string, title: string, extra: Partial<DesktopSessionTab> = 
   }
 }
 
-test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confirm / Approve anyway button', () => {
+test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide/Retry/Dismiss/Stop controls', () => {
   const group: TempReviewerGroupView = {
     id: '22222222-2222-4222-8222-222222222222',
     hostTabId: 'tab-1',
@@ -52,10 +52,8 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
       {
         cli: 'copilot',
         tabId: 'tab-2',
-        verdict: 'approved',
+        verdict: 'reviewing',
         checkedOut: 'a'.repeat(40),
-        ranChecks: ['npm test'],
-        missingChecks: [],
         needsAttention: false,
         error: null,
         keptCheckoutPath: null,
@@ -63,11 +61,9 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
       {
         cli: 'claude',
         tabId: 'tab-3',
-        verdict: 'held-approval',
+        verdict: 'reviewing',
         checkedOut: 'a'.repeat(40),
-        ranChecks: ['static-source-and-diff-review'],
-        missingChecks: ['local build and test suite'],
-        needsAttention: false,
+        needsAttention: true,
         error: null,
         keptCheckoutPath: null,
       },
@@ -76,14 +72,11 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
         tabId: null,
         verdict: 'failed',
         checkedOut: 'a'.repeat(40),
-        ranChecks: [],
-        missingChecks: [],
         needsAttention: true,
-        error: 'Codex sandbox failed',
+        error: 'Codex exited unexpectedly',
         keptCheckoutPath: null,
       },
     ],
-    confirmTarget: null,
     notice: null,
   }
 
@@ -94,47 +87,29 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
   assert.match(activeHtml, /Copilot CLI/)
   assert.match(activeHtml, /Claude Code/)
   assert.match(activeHtml, /Codex CLI/)
+  assert.match(activeHtml, /reviewing on PR…/)
+  assert.match(activeHtml, /needs approval/)
   assert.match(activeHtml, /Hide/)
   assert.match(activeHtml, /Peek/)
   assert.match(activeHtml, /Retry/)
   assert.match(activeHtml, /Dismiss/)
-  assert.doesNotMatch(activeHtml, /Confirm approval/)
-
-  const readyGroup: TempReviewerGroupView = {
-    ...group,
-    seats: group.seats.slice(0, 2),
-    confirmTarget: {
-      groupId: group.id,
-      round: 2,
-      head: group.head,
-      base: group.base,
-      rosterKey: 'copilot:g1,claude:g2',
-      stateSignature: 'sig',
-      approveAnyway: true,
-      missingChecks: [{ cli: 'claude', missing: ['local build and test suite'] }],
-    },
-  }
-  assert.match(reviewerConfirmButtonLabel(readyGroup.confirmTarget!), /Approve anyway \(missing: Claude Code: local build and test suite\)/)
-  const readyHtml = renderToStaticMarkup(
-    <ReviewerBar groups={[readyGroup]} activeTabId="tab-1" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
-  )
-  assert.match(readyHtml, /Approve anyway/)
+  assert.match(activeHtml, /Stop reviewers/)
 
   // When focus moves into the peeked reviewer terminal (activeTabId === 'tab-2'), Hide and Peek remain available:
   const focusedOnReviewerHtml = renderToStaticMarkup(
-    <ReviewerBar groups={[readyGroup]} activeTabId="tab-2" peekTabId="tab-2" onPeek={() => {}} onError={() => {}} />,
+    <ReviewerBar groups={[group]} activeTabId="tab-2" peekTabId="tab-2" onPeek={() => {}} onError={() => {}} />,
   )
   assert.match(focusedOnReviewerHtml, /Hide/)
   assert.match(focusedOnReviewerHtml, /Peek/)
 
   const unrelatedHtml = renderToStaticMarkup(
-    <ReviewerBar groups={[readyGroup]} activeTabId="tab-99" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+    <ReviewerBar groups={[group]} activeTabId="tab-99" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
   )
   assert.equal(unrelatedHtml, '')
 
-  // Local / non-URL PR badge renders plain span without external URL button, and profile-scoped groups render on activeProfileId:
-  const localGroup: TempReviewerGroupView = {
-    ...readyGroup,
+  // Profile-scoped groups render on activeProfileId and show final PR outcome:
+  const endedGroup: TempReviewerGroupView = {
+    ...group,
     hostTabId: null,
     prLabel: 'MR !7',
     prNumber: 7,
@@ -142,11 +117,11 @@ test('ReviewerBar renders per-CLI chips, Peek/Retry/Dismiss controls, and Confir
     stage: 'ended',
     outcome: 'approved',
   }
-  const localHtml = renderToStaticMarkup(
-    <ReviewerBar groups={[localGroup]} activeTabId="tab-99" activeProfileId={PROFILE.id} peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+  const endedHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[endedGroup]} activeTabId="tab-99" activeProfileId={PROFILE.id} peekTabId={null} onPeek={() => {}} onError={() => {}} />,
   )
-  assert.match(localHtml, /<span class="reviewer-bar-pr"[^>]*>MR !7<\/span>/)
-  assert.match(localHtml, /Approved/)
+  assert.match(endedHtml, /<span class="reviewer-bar-pr"[^>]*>MR !7<\/span>/)
+  assert.match(endedHtml, /Approved on PR/)
 })
 
 test('Sidebar hides tempReviewer tabs from main session lists and tucks them into a Reviewers disclosure under the host tab', () => {
@@ -222,5 +197,6 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
       onOpenSettings={noop}
     />,
   )
-  assert.doesNotMatch(collapsedHtml, /Review PR #42 · Claude Code/)
+  const numberedButtons = collapsedHtml.match(/class="sidebar-session-title"/g) ?? []
+  assert.equal(numberedButtons.length, 1, 'collapsed rail only lists the regular host tab, never hidden tempReviewer tabs')
 })

@@ -6,7 +6,7 @@ user-invocable: true
 
 # Review a pull request
 
-This workflow applies to **any Git repository and PR/MR host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or any other forge). Never refuse a pull request because the repository is not hosted on `github.com`. This skill defines the review workflow; **this CLI session decides how to access the PR** based on the repository.
+This workflow applies to **any remote Git repository and PR/MR host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or any other forge). Never refuse a pull request because the repository is not hosted on `github.com`, and never perform a local-only review — always read from and post reviews/comments/approvals directly onto the pull request on its remote host. This skill defines the review workflow; **this CLI session decides how to access the PR** based on the repository.
 
 ## 1. Identify the repository and PR access method
 
@@ -32,7 +32,7 @@ This workflow applies to **any Git repository and PR/MR host** (GitHub, self-hos
 - Every finding must request a justified change and be labeled **Blocking**, **Non-blocking**, or **Nit**. Do not turn optional stylistic preferences into findings.
 - Never approve in a review that contains open findings. Every valid finding must be closed by verifying its fix in code, accepting a sound technical rebuttal, or explicitly retracting it on its thread.
 - Never start reviewer comments or replies with `🤖 `. The PR author starts its own replies with `🤖 ` so cooperating sessions on the same account can distinguish author replies from reviewer comments.
-- Approval requires zero remaining findings and an explicit comment or review associated with the exact head SHA beginning with `Approved at <full-head-sha>`, summarizing validation checks run and any limits:
+- Approval requires zero remaining findings and an explicit comment or review associated with the exact head SHA beginning with `Approved at <full-head-sha>` (preserving any reviewer CLI tag such as `[Copilot CLI]` or `[Claude Code]` requested by your launch brief), summarizing validation checks run and any limits:
   - When formal host `APPROVE` is supported and permitted (different account), you may submit formal approval alongside `Approved at <full-head-sha>`.
   - When both sessions share one account (where hosts forbid formal self-approval), post a file-level inline comment or review comment beginning `Approved at <full-head-sha>` (on GitHub with `$COPILOT_DESKTOP_PR_TOOLS`, you may use `node "$COPILOT_DESKTOP_PR_TOOLS/pr-approve.mjs" OWNER/REPO PR HEAD BASE NOTE_FILE`).
 
@@ -52,7 +52,6 @@ This workflow applies to **any Git repository and PR/MR host** (GitHub, self-hos
 - On new commits, review the delta since the last reviewed SHA (or the full diff after a force-push or base change), re-run relevant local checks, verify open findings, and post updated findings or fresh `Approved at <new-full-head-sha>`. A new commit always invalidates prior approval.
 - To wait for author replies (`🤖 `) or new commits without wasting model turns, run a single async shell waiter appropriate to the host:
   - On GitHub when `$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs` and `$COPILOT_DESKTOP_PR_STATE` are available: use `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --repo <owner/repo> --invert --watch-head --wait 60` (marking only the watermarks and SHA actually reviewed).
-  - Inside a Desktop temporary reviewer session: use `pr_wait` (MCP) or `pr-wait` (`COPILOT_DESKTOP_MEETING_HELPER`).
   - On Gitea, GitLab, or other hosts when async shell waiting is available: poll the PR host's PR + comments endpoints at a bounded interval (e.g. every 30–60s) until `head`, state, or a `🤖 ` reply changes.
 - If no async wake-up mechanism is available in this CLI, complete the full review now, report findings/approval clearly, and state that automatic background monitoring is unavailable.
 - When the PR merges or closes (or the user stops the watch), clean up your disposable detached worktree and report concisely whether the merged commit matched the approved SHA.

@@ -9,7 +9,6 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MEETING_HELPER_NOTE, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS } from './meeting-messages.js'
 import { MEETING_ID_PATTERN } from './meeting.js'
 import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
-import { handlePrReviewerMcpHttp, PR_REVIEWER_MCP_PATH, type PrReviewerMcpDeps } from './pr-reviewer-mcp.js'
 
 /**
  * What a session needs to host a meeting: a PowerShell helper (no Node or desktop CLI needed, like `browser.ps1`), the
@@ -18,13 +17,13 @@ import { handlePrReviewerMcpHttp, PR_REVIEWER_MCP_PATH, type PrReviewerMcpDeps }
  * own permissions; the desktop only receives text and never opens a path a model chose.
  */
 
-export const MEETING_COMMANDS = ['start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-wait', 'pr-reviewers'] as const
+export const MEETING_COMMANDS = ['start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-reviewers'] as const
 export type MeetingCommand = typeof MEETING_COMMANDS[number]
 const MAX_REQUEST_BYTES = (MAX_MEETING_POST_CHARS + MAX_MEETING_PATCH_CHARS) * 3 + 64 * 1024
 
 const MEETING_HELPER = String.raw`[CmdletBinding(PositionalBinding=$false)]
 param(
-  [Parameter(Position=0)][ValidateSet('start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-wait', 'pr-reviewers')][string]$Command = 'status',
+  [Parameter(Position=0)][ValidateSet('start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status', 'pr-reply', 'pr-review', 'pr-read', 'pr-start', 'pr-reviewers')][string]$Command = 'status',
   [string]$Topic = '',
   [string]$File,
   [string]$To = '',
@@ -96,8 +95,8 @@ try {
     $meetingBody.base = $Base
   }
   if ($Wait -ne 0) {
-    if (($Command -ne 'pr-wait' -and ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'wait')) -or $Wait -lt 1 -or $Wait -gt 60) {
-      throw 'Use -Wait <1..60> only with pr-wait or pr-reviewers -Action wait.'
+    if ($Command -ne 'pr-reviewers' -or $meetingBody.action -ne 'wait' -or $Wait -lt 1 -or $Wait -gt 60) {
+      throw 'Use -Wait <1..60> only with pr-reviewers -Action wait.'
     }
     $meetingBody.wait = [string]$Wait
   }
@@ -135,7 +134,7 @@ try {
   $meetingJson = $meetingBody | ConvertTo-Json -Compress
   $meetingBytes = [System.Text.Encoding]::UTF8.GetBytes($(if ($meetingJson) { $meetingJson } else { '{}' }))
   $meetingHeaders = @{ Authorization = 'Bearer ' + $meetingControl.token }
-  $meetingTimeout = $(if ($Command -eq 'pr-wait' -or ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'wait' -or $meetingBody.action -eq 'start'))) { 90 } else { 30 })
+  $meetingTimeout = $(if ($Command -eq 'pr-reviewers' -and ($meetingBody.action -eq 'wait' -or $meetingBody.action -eq 'start')) { 90 } else { 30 })
   $meetingResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ('http://127.0.0.1:' + $meetingControl.port + '/' + $Command) -Headers $meetingHeaders -ContentType 'application/json; charset=utf-8' -Body $meetingBytes -TimeoutSec $meetingTimeout -MaximumRedirection 0
   $meetingResult = [System.Text.Encoding]::UTF8.GetString($meetingResponse.RawContentStream.ToArray()) | ConvertFrom-Json
   [Console]::Out.WriteLine($meetingResult.message)
@@ -176,7 +175,7 @@ while [ $# -gt 0 ]; do
     *) fail "Unknown argument: $1" ;;
   esac
 done
-case "$command" in start|join|round|propose-close|end|status|task-report|task-status|pr-reply|pr-review|pr-read|pr-start|pr-wait|pr-reviewers) ;; *) fail "Unknown command: $command" ;; esac
+case "$command" in start|join|round|propose-close|end|status|task-report|task-status|pr-reply|pr-review|pr-read|pr-start|pr-reviewers) ;; *) fail "Unknown command: $command" ;; esac
 if [ "$command" = pr-reply ]; then
   printf '%s' "$to" | grep -Eq '^([0-9A-Za-z_-]{1,64}|conversation)$' || fail 'Usage: meeting.sh pr-reply -To <comment id>|conversation -File <reply.md>'
 elif [ -n "$to" ]; then fail "meeting.sh $command takes no -To."; fi
@@ -206,8 +205,8 @@ if [ -n "$base_rev" ]; then
   printf '%s' "$base_rev" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$' || fail 'Invalid -Base revision.'
 fi
 if [ -n "$wait_sec" ]; then
-  if [ "$command" != pr-wait ] && { [ "$command" != pr-reviewers ] || [ "$action" != wait ]; }; then
-    fail 'Use -Wait <1..60> only with pr-wait or pr-reviewers -Action wait.'
+  if [ "$command" != pr-reviewers ] || [ "$action" != wait ]; then
+    fail 'Use -Wait <1..60> only with pr-reviewers -Action wait.'
   fi
   printf '%s' "$wait_sec" | grep -Eq '^([1-9]|[1-5][0-9]|60)$' || fail 'Use -Wait <1..60>.'
 fi
@@ -357,7 +356,7 @@ Pull request loops: when the person asks you, in their own message, to review a 
 `
 
 const PR_CHAT_INSTRUCTIONS = `
-When the person asks for fix-pr, review-pr, or review-and-fix-pr (including /fix-pr, /review-pr, /review-and-fix-pr, "fix PR 42", "review PR 287", or "review and fix PR 42") on ANY Git repository host (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or local Git), perform that role in this conversation. Invoke the matching fix-pr, review-pr, or review-and-fix-pr skill and follow its workflow while accessing the PR via whatever CLI or API matches git remote -v (never refuse non-GitHub hosts). A bare command uses the current branch's PR. Use this Desktop-provided copy even if another skill with the same name is installed.
+When the person asks for fix-pr, review-pr, or review-and-fix-pr (including /fix-pr, /review-pr, /review-and-fix-pr, "fix PR 42", "review PR 287", or "review and fix PR 42") on ANY remote Git repository host (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, etc.), perform that role in this conversation. Invoke the matching fix-pr, review-pr, or review-and-fix-pr skill and follow its workflow while accessing the PR on its remote host via whatever CLI or API matches git remote -v (never refuse non-GitHub hosts and never perform local-only reviews). A bare command uses the current branch's open PR on the remote host. Use this Desktop-provided copy even if another skill with the same name is installed.
 If CLI discovery selects a personal copy or the skill is unavailable, read the packaged workflow with the shell: ${process.platform === 'win32' ? 'node "$env:COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"' : 'node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs"'} --guide <fix-pr|review-pr|review-and-fix-pr>. Follow that output in this chat.
 For an explicit request to start or stop repository-wide discovery, use the meeting helper's pr-start command.
 `
@@ -429,7 +428,6 @@ export class MeetingControlServer {
     private readonly handle: MeetingRequestHandler,
     private readonly guest?: GuestEndpoint,
     private readonly onListening?: (port: number) => void,
-    private readonly prReviewerMcp?: PrReviewerMcpDeps<unknown>,
   ) {}
 
   /** The port, starting the server if no session has yet; an invited guest needs it before its host restarts. */
@@ -473,10 +471,6 @@ export class MeetingControlServer {
           response.end(JSON.stringify(body))
         }
         const port = (server.address() as { port: number } | null)?.port
-        if (this.prReviewerMcp && port && (request.url ?? '').split('?')[0] === PR_REVIEWER_MCP_PATH) {
-          void handlePrReviewerMcpHttp(request, response, port, this.prReviewerMcp)
-          return
-        }
         // No CORS; reject browser-originated requests and DNS rebinding before authentication.
         if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { ok: false, message: 'Forbidden' }); return }
         if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, response, send); return }
@@ -496,7 +490,7 @@ export class MeetingControlServer {
             ...(body.action !== undefined ? { action: text('action') } : {}), ...(body.pr !== undefined ? { pr: text('pr') } : {}),
             ...(body.head !== undefined ? { head: text('head') } : {}), ...(body.base !== undefined ? { base: text('base') } : {}),
             ...(wait !== undefined ? { wait } : {}) }, gone.signal)
-          const rawJsonCommand = command === 'pr-read' || command === 'pr-wait' || command === 'pr-reviewers'
+          const rawJsonCommand = command === 'pr-read' || command === 'pr-reviewers'
           if (rawJsonCommand && body.format === 'pr-json' && answer.ok) {
             if (!request.socket.destroyed) {
               response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
