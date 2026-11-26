@@ -68,6 +68,7 @@ if (!process.versions.electron) {
     project.otherCli = { antigravity: { model: 'model-x' } }
     project.tabs = [{ title: 'Saved Antigravity', lastSessionId: null, cli: 'antigravity', otherCliConfig: { model: 'model-x' }, active: true }]
     await writeDesktopConfig(configPath, { ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id,
+      provider: { type: 'openai', baseUrl: 'http://127.0.0.1:1', model: 'local-test-model', offline: true },
       closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false })
 
     await import('../dist/src/main/main.js')
@@ -145,9 +146,18 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}`)
     }
     await suntil('document.querySelector(".other-cli-settings")', 'per-CLI settings')
+    await suntil('document.querySelector(\'option[value="local-test-model"]\')', 'Copilot model from the configured provider')
+    await sui(`(() => {
+      const model = document.querySelector('option[value="local-test-model"]').closest('select')
+      model.value = 'local-test-model'
+      model.dispatchEvent(new Event('change', { bubbles: true }))
+      ;[...document.querySelectorAll('.settings-card button')].find(button => button.textContent === 'Save profile').click()
+    })()`)
+    for (let attempt = 0; attempt < 50 && (await readDesktopConfig(configPath)).profiles[0].launch.model !== 'local-test-model'; attempt++) await delay(100)
+    assert.equal((await readDesktopConfig(configPath)).profiles[0].launch.model, 'local-test-model', 'the selected Copilot model is saved')
     assert.equal(await sui('document.querySelectorAll(".other-cli-tab").length'), 3)
     await sui('document.querySelectorAll(".other-cli-tab")[1].click()')
-    await suntil('document.querySelectorAll(".other-cli-settings select").length === 2', 'Codex approval + sandbox')
+    await suntil('document.querySelectorAll(".other-cli-settings select").length === 4', 'Codex approval, sandbox, model and effort')
     const rejected = await sui(`window.copilotDesktopSettings.updateWorkspaceProfile(${JSON.stringify(project.id)}, 'project', 'default', 'new',
       ${JSON.stringify(project.launch)}, { antigravity: { model: 'model-x' }, claude: { model: '--bad' } }).then(() => 'saved', error => String(error))`)
     assert.match(rejected, /not a usable model name/)

@@ -3,7 +3,8 @@ import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserVi
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { NewSessionOptions } from '../main/session-name.js'
-import type { ReviewerCli, SessionCliChoice } from '../main/session-cli.js'
+import type { ReviewerCli, SessionCli, SessionCliChoice } from '../main/session-cli.js'
+import type { CliModelOption } from '../main/cli-model-catalog.js'
 import type { CredentialName } from '../main/secure-credentials.js'
 import type { AccessStatus } from '../main/access-status.js'
 import type { CopilotProviderConfig } from '../main/provider-config.js'
@@ -238,6 +239,7 @@ export interface CopilotDesktopSettingsBridge {
   exportUsage(): Promise<boolean>
   restoreUsage(): Promise<boolean>
   get(): Promise<DesktopSettingsSnapshot>
+  getModelCatalog(cli: SessionCli, reload: boolean): Promise<CliModelOption[]>
   updatePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopSettingsSnapshot>
   setLaunchAtLogin(enabled: boolean): Promise<DesktopSettingsSnapshot>
   clearSharedBrowserData(): Promise<void>

@@ -7,8 +7,9 @@ import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import type { SessionLaunchConfig } from '../../main/session-launch.js'
+import type { CliModelOption } from '../../main/cli-model-catalog.js'
 import { AGENT_CLI_SETTINGS, type OtherCliConfig } from '../../main/agent-cli-settings.js'
-import { OTHER_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli } from '../../main/session-cli.js'
+import { OTHER_CLIS, SESSION_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli } from '../../main/session-cli.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
@@ -77,15 +78,60 @@ const CREDENTIAL_LABELS: Record<CredentialName, string> = {
   GITHUB_TOKEN: 'GITHUB_TOKEN (GitHub auth fallback)',
 }
 
+type ModelCatalogs = Partial<Record<SessionCli, CliModelOption[]>>
+
+const effortLabels: Record<string, string> = {
+  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
+  max: 'Maximum', ultra: 'Ultra', ultracode: 'Ultracode',
+}
+
+function ModelFields({ label, catalog, model, effort, onChange }: {
+  label: string
+  catalog: CliModelOption[] | undefined
+  model: string
+  effort?: string
+  onChange: (model: string, effort: string) => void
+}): JSX.Element {
+  const selected = catalog?.find((entry) => entry.id === model)
+  const selectedEfforts = selected?.efforts ?? []
+  return <>
+    <label>
+      {label}
+      <select value={model} disabled={!model && !catalog?.length} onChange={(event) => {
+        const next = event.target.value
+        const levels = catalog?.find((entry) => entry.id === next)?.efforts
+        onChange(next, effort && levels?.includes(effort) ? effort : '')
+      }}>
+        <option value="">Use CLI default</option>
+        {model && !selected && <option value={model}>{model} (saved)</option>}
+        {catalog?.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
+      </select>
+      {!catalog?.length && <small role="status">{catalog ? 'Model list unavailable' : 'Loading models…'}</small>}
+    </label>
+    {effort !== undefined && (
+      <label>
+        Reasoning effort
+        <select value={effort} disabled={!effort && selectedEfforts.length === 0} onChange={(event) => onChange(model, event.target.value)}>
+          <option value="">Model default</option>
+          {effort && !selectedEfforts.includes(effort) && <option value={effort}>{effortLabels[effort] ?? effort} (saved)</option>}
+          {selectedEfforts.map((level) => <option key={level} value={level}>{effortLabels[level] ?? level}</option>)}
+        </select>
+      </label>
+    )}
+  </>
+}
+
 function WorkspaceProfileEditor({
   profile,
   active,
   defaultReviewerClis,
+  modelCatalogs,
   onSave,
 }: {
   profile: WorkspaceProfile
   active: boolean
   defaultReviewerClis: readonly ReviewerCli[]
+  modelCatalogs: ModelCatalogs
   onSave: Save
 }): JSX.Element {
   const [saving, setSaving] = useState(false)
@@ -99,12 +145,13 @@ function WorkspaceProfileEditor({
 
   const nullableNumber = (value: string): number | null => value === '' ? null : Number(value)
 
-  /** Set or clear one field of one CLI's config, dropping the CLI's entry entirely when it has no settings left. */
-  const setOtherCliField = (cli: OtherCli, key: string, value: string): void => setOtherCli((current) => {
+  const setOtherCliFields = (cli: OtherCli, fields: Record<string, string>): void => setOtherCli((current) => {
     const next = { ...current }
     const perCli = { ...(next[cli] ?? {}) }
-    if (value) perCli[key] = value
-    else delete perCli[key]
+    for (const [key, value] of Object.entries(fields)) {
+      if (value) perCli[key] = value
+      else delete perCli[key]
+    }
     if (Object.keys(perCli).length === 0) delete next[cli]
     else next[cli] = perCli
     return next
@@ -136,15 +183,15 @@ function WorkspaceProfileEditor({
             {RESUME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
-        <label>
-          Initial model
-          <input
-            type="text"
-            value={launch.model}
-            placeholder="Auto / saved Copilot default"
-            onChange={(event) => setLaunch((current) => ({ ...current, model: event.target.value }))}
-          />
-        </label>
+        <ModelFields
+          label="Initial model"
+          catalog={modelCatalogs.copilot}
+          model={launch.model}
+          effort={launch.reasoningEffort === 'default' ? '' : launch.reasoningEffort}
+          onChange={(model, effort) => setLaunch((current) => ({
+            ...current, model, reasoningEffort: (effort || 'default') as SessionLaunchConfig['reasoningEffort'],
+          }))}
+        />
         <label>
           Custom agent
           <input
@@ -153,23 +200,6 @@ function WorkspaceProfileEditor({
             placeholder="Default agent"
             onChange={(event) => setLaunch((current) => ({ ...current, agent: event.target.value }))}
           />
-        </label>
-        <label>
-          Reasoning effort
-          <select
-            value={launch.reasoningEffort}
-            onChange={(event) => setLaunch((current) => ({
-              ...current,
-              reasoningEffort: event.target.value as SessionLaunchConfig['reasoningEffort'],
-            }))}
-          >
-            <option value="default">Model default</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="xhigh">Extra high</option>
-            <option value="max">Maximum</option>
-          </select>
         </label>
         <label>
           Context window
@@ -304,7 +334,7 @@ function WorkspaceProfileEditor({
                   value={activeConfig[selector.key] ?? ''}
                   disabled={sandboxBypassed}
                   title={sandboxBypassed ? 'Bypassed when Approval is set to Allow all' : undefined}
-                  onChange={(event) => setOtherCliField(activeCli, selector.key, event.target.value)}
+                onChange={(event) => setOtherCliFields(activeCli, { [selector.key]: event.target.value })}
                 >
                   <option value="">{selector.inheritLabel}</option>
                   {selector.levels.map((level) => (
@@ -317,17 +347,13 @@ function WorkspaceProfileEditor({
               </label>
             )
           })}
-          {activeDescriptor.supportsModel && (
-            <label>
-              {activeDescriptor.modelLabel}
-              <input
-                type="text"
-                value={activeConfig.model ?? ''}
-                placeholder={activeDescriptor.modelPlaceholder}
-                onChange={(event) => setOtherCliField(activeCli, 'model', event.target.value)}
-              />
-            </label>
-          )}
+          <ModelFields
+            label={activeCli === 'antigravity' ? 'Model and thinking' : 'Model'}
+            catalog={modelCatalogs[activeCli]}
+            model={activeConfig.model ?? ''}
+            {...(activeCli === 'antigravity' ? {} : { effort: activeConfig.reasoningEffort ?? '' })}
+            onChange={(model, effort) => setOtherCliFields(activeCli, { model, reasoningEffort: effort })}
+          />
         </div>
         {activeDescriptor.permissionNote && <p className="settings-disclaimer">{activeDescriptor.permissionNote}</p>}
       </div>
@@ -637,6 +663,8 @@ function CopilotResourcesSettings({
 
 export function SettingsApp(): JSX.Element | null {
   const [snapshot, setSnapshot] = useState<DesktopSettingsSnapshot | null>(null)
+  const [modelCatalogs, setModelCatalogs] = useState<ModelCatalogs>({})
+  const [catalogRefresh, setCatalogRefresh] = useState(0)
   const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({})
   const [cliMaintenancePending, setCliMaintenancePending] = useState(false)
   const [capabilityCheckPending, setCapabilityCheckPending] = useState(false)
@@ -665,7 +693,19 @@ export function SettingsApp(): JSX.Element | null {
       element,
       title: element.querySelector('h2')?.textContent ?? '',
     })))
-  }, [query, snapshot])
+  }, [query, snapshot, modelCatalogs])
+
+  useEffect(() => {
+    let active = true
+    for (const cli of SESSION_CLIS) {
+      void window.copilotDesktopSettings.getModelCatalog(cli, catalogRefresh > 0)
+        .catch(() => [])
+        .then((catalog) => {
+          if (active) setModelCatalogs((current) => ({ ...current, [cli]: catalog }))
+        })
+    }
+    return () => { active = false }
+  }, [catalogRefresh])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
@@ -1135,12 +1175,21 @@ export function SettingsApp(): JSX.Element | null {
       <section>
         <h2>Workspace profiles</h2>
         {snapshot.profiles.length === 0 && <p>No workspaces yet. Choose one from the main window.</p>}
+        {snapshot.profiles.length > 0 && (
+          <div className="settings-actions">
+            <button type="button" disabled={SESSION_CLIS.some((cli) => !modelCatalogs[cli])} onClick={() => {
+              setModelCatalogs({})
+              setCatalogRefresh((current) => current + 1)
+            }}>Refresh models</button>
+          </div>
+        )}
         {snapshot.profiles.map((profile) => (
           <WorkspaceProfileEditor
             key={profile.id}
             profile={profile}
             active={profile.id === snapshot.activeProfileId}
             defaultReviewerClis={snapshot.reviewerClis}
+            modelCatalogs={modelCatalogs}
             onSave={save}
           />
         ))}

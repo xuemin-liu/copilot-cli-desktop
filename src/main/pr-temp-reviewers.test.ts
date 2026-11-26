@@ -181,8 +181,8 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   assert.throws(() => resolveCopilotReviewerPreset('read-only', false, 'demo'), /Restricted \(read-only\)/)
 
   assert.deepEqual(
-    resolveOtherCliReviewerArgs('claude', { approval: 'plan', model: 'claude-sonnet-5' }, true, '  --dangerously-skip-permissions\n  --model <m>', 'demo'),
-    { configForLaunch: { model: 'claude-sonnet-5' }, allowAllArgs: ['--dangerously-skip-permissions'] },
+    resolveOtherCliReviewerArgs('claude', { approval: 'plan', model: 'claude-sonnet-5', reasoningEffort: 'max' }, true, '  --dangerously-skip-permissions\n  --model <m>\n  --effort <effort>', 'demo'),
+    { configForLaunch: { model: 'claude-sonnet-5', reasoningEffort: 'max' }, allowAllArgs: ['--dangerously-skip-permissions'] },
   )
   assert.deepEqual(
     resolveOtherCliReviewerArgs('claude', undefined, true, '  --permission-mode <mode>', 'demo'),
@@ -194,8 +194,8 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
   )
 
   assert.deepEqual(
-    resolveOtherCliReviewerArgs('codex', { approval: 'on-request', sandbox: 'read-only', model: 'gpt-5-codex' }, true, '  --dangerously-bypass-approvals-and-sandbox\n  --model <m>', 'demo'),
-    { configForLaunch: { model: 'gpt-5-codex' }, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] },
+    resolveOtherCliReviewerArgs('codex', { approval: 'on-request', sandbox: 'read-only', model: 'gpt-5-codex', reasoningEffort: 'high' }, true, '  --dangerously-bypass-approvals-and-sandbox\n  --model <m>\n  --config <value>', 'demo'),
+    { configForLaunch: { model: 'gpt-5-codex', reasoningEffort: 'high' }, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] },
   )
   assert.deepEqual(
     resolveOtherCliReviewerArgs('codex', undefined, true, '  --ask-for-approval <a>\n  --sandbox <s>', 'demo'),

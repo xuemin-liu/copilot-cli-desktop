@@ -142,9 +142,10 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeProjectTrusted, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
+import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
+import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
 import {
@@ -2563,6 +2564,29 @@ async function startSessionTab(
 }
 
 const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
+
+const modelCatalogs = new Map<SessionCli, { promise: Promise<CliModelOption[]>; pending: boolean }>()
+
+function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOption[]> {
+  const cached = modelCatalogs.get(cli)
+  if (cached && (!reload || cached.pending)) return cached.promise
+  const entry = { pending: true, promise: load().catch(() => []).finally(() => { entry.pending = false }) }
+  modelCatalogs.set(cli, entry)
+  return entry.promise
+
+  async function load(): Promise<CliModelOption[]> {
+    const models = cli === 'copilot'
+      ? await loadCopilot()
+      : await readOtherCliModelCatalog(await otherCliResolution(cli, reload))
+    return [...new Map(models.map((model) => [model.id, model])).values()]
+  }
+
+  async function loadCopilot(): Promise<CliModelOption[]> {
+    const resolution = (!reload && state.resolution) || (await probeCopilotResolution()).resolution
+    const inherited = { ...process.env, ...await credentialStore?.resolveEnvironment() }
+    return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(desktopConfig.provider, inherited) })
+  }
+}
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
 async function listSessionClis(): Promise<SessionCliChoice[]> {
@@ -8352,6 +8376,11 @@ ipcMain.handle('desktop-settings:get', (event) => {
   assertTrustedSettingsSender(event, true)
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:model-catalog', (event, cli: unknown, reload: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (!isReviewerCli(cli) || typeof reload !== 'boolean') throw new Error('Invalid model catalog request')
+  return getModelCatalog(cli, reload)
+})
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
   assertTrustedSettingsSender(event)
   if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
@@ -9014,6 +9043,9 @@ if (!app.requestSingleInstanceLock()) {
     updateTrayVisibility()
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    if (!packageSmokeTest) {
+      for (const cli of SESSION_CLIS) void getModelCatalog(cli)
+    }
     if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)
