@@ -8515,6 +8515,11 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (!previous) throw new Error('That reviewer seat is not in this group')
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
+    // The slot limit is shared with meetings: a seat that still has its tab keeps that slot through the retry, and one
+    // without a tab needs a free one, or it would take the slot another run has already been admitted for.
+    if (previous.tabId === null && previous.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
+      throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
+    }
     await cleanupTempReviewerSeat(previous)
     if (group.stage === 'ended') {
       broadcastState()
