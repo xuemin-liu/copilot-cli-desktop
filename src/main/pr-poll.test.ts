@@ -241,7 +241,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     const prUrl = `${httpOrigin}/daq/service/pulls/12`
     const gitOrigin = `${httpOrigin}/daq/service.git`
     const stateFile = join(dir, 'state.json')
-    const env = { GITEA_TOKEN: 'test-gitea-token' }
+    const env = { GITEA_TOKEN: 'test-gitea-token', GITEA_URL: httpOrigin }
 
     // 1. Cleartext http:// is refused when origin is https:// and --allow-http-origin is omitted:
     const httpRefused = await runNodeScript(
@@ -280,7 +280,9 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     // Verify Desktop resolveVerifiedForgeKind (/api/v1/version probe) + fetchForgePullEvidence + parentReviewId receipt matching on Gitea:
     clearForgeProbeCacheForTests()
     const prevGiteaTok = process.env.GITEA_TOKEN
+    const prevGiteaUrlTest = process.env.GITEA_URL
     process.env.GITEA_TOKEN = 'test-gitea-token'
+    process.env.GITEA_URL = httpOrigin
     try {
       const trustedEp = resolveTrustedForgeEndpoint({ origin: gitOrigin, prNumber: 12, prUrl })
       assert.equal(trustedEp?.forge, 'probe')
@@ -306,6 +308,8 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     } finally {
       if (prevGiteaTok === undefined) delete process.env.GITEA_TOKEN
       else process.env.GITEA_TOKEN = prevGiteaTok
+      if (prevGiteaUrlTest === undefined) delete process.env.GITEA_URL
+      else process.env.GITEA_URL = prevGiteaUrlTest
     }
 
     // Mark review 11 and inline 21 as handled:
@@ -763,7 +767,7 @@ test('pr-poll.mjs + pr-approve.mjs + Desktop evidence work end-to-end on GitLab 
     const stateFile = join(dir, 'gl-state.json')
     const noteFile = join(dir, 'gl-note.md')
     writeFileSync(noteFile, '[Antigravity CLI] GitLab MR verified.\n')
-    const env = { GITLAB_TOKEN: 'glpat-test' }
+    const env = { GITLAB_TOKEN: 'glpat-test', GITLAB_URL: httpOrigin }
 
     const postRes = await runNodeScript(
       PR_APPROVE,
@@ -807,7 +811,9 @@ test('pr-poll.mjs + pr-approve.mjs + Desktop evidence work end-to-end on GitLab 
 
     // Desktop fetchForgePullEvidence also reports live target branch tip BASE_2 and rejects stale BASE_1 approval:
     const prevGlTok = process.env.GITLAB_TOKEN
+    const prevGlUrl = process.env.GITLAB_URL
     process.env.GITLAB_TOKEN = 'glpat-test'
+    process.env.GITLAB_URL = httpOrigin
     try {
       const glEp = resolveTrustedForgeEndpoint({ origin: gitOrigin, prNumber: 7, prUrl: mrUrl })
       assert.equal(glEp?.forge, 'gitlab')
@@ -828,6 +834,8 @@ test('pr-poll.mjs + pr-approve.mjs + Desktop evidence work end-to-end on GitLab 
     } finally {
       if (prevGlTok === undefined) delete process.env.GITLAB_TOKEN
       else process.env.GITLAB_TOKEN = prevGlTok
+      if (prevGlUrl === undefined) delete process.env.GITLAB_URL
+      else process.env.GITLAB_URL = prevGlUrl
     }
 
     // pr-approve.mjs rejects stale BASE_1 and succeeds with live target branch tip BASE_2:
@@ -1016,15 +1024,17 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
   shortPageServerPort = await listenServer(shortPageServer)
   const shortDir = mkdtempSync(join(tmpdir(), 'gitea-short-page-'))
   const prevGiteaTokShort = process.env.GITEA_TOKEN
+  const prevGiteaUrlShort = process.env.GITEA_URL
+  const shortOrigin = `http://127.0.0.1:${shortPageServerPort}`
   process.env.GITEA_TOKEN = 'tok-short'
+  process.env.GITEA_URL = shortOrigin
   try {
-    const shortOrigin = `http://127.0.0.1:${shortPageServerPort}`
     const shortPrUrl = `${shortOrigin}/daq/service/pulls/12`
     const shortGitOrigin = `${shortOrigin}/daq/service.git`
     const shortSnap = await runNodeScript(
       PR_POLL,
       ['12', join(shortDir, 'state.json'), '--pr-url', shortPrUrl, '--origin', shortGitOrigin, '--snapshot'],
-      { env: { GITEA_TOKEN: 'tok-short' } },
+      { env: { GITEA_TOKEN: 'tok-short', GITEA_URL: shortOrigin } },
     )
     assert.equal(shortSnap.code, 0, shortSnap.stderr)
     const shortJson = JSON.parse(shortSnap.stdout)
@@ -1059,6 +1069,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
   } finally {
     if (prevGiteaTokShort === undefined) delete process.env.GITEA_TOKEN
     else process.env.GITEA_TOKEN = prevGiteaTokShort
+    if (prevGiteaUrlShort === undefined) delete process.env.GITEA_URL
+    else process.env.GITEA_URL = prevGiteaUrlShort
     await closeServer(shortPageServer)
     rmSync(shortDir, { recursive: true, force: true })
   }
@@ -1580,10 +1592,16 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         assert.equal(reqSeen.authorization, expectedBasic, `pr-poll.mjs GET ${reqSeen.path} used host-bound git credential, never ambient GITEA_TOKEN`)
       }
 
-      // When GITEA_URL explicitly binds GITEA_TOKEN to a different origin and NO git credential exists for this host, GITEA_TOKEN MUST NOT be sent!
+      // 1) Destination with NO stored Git credential and an UNBOUND ambient GITEA_TOKEN (no GITEA_URL/GITEA_HOST):
+      // BOTH Desktop fetchForgePullEvidence AND standalone pr-poll.mjs MUST make unauthenticated requests (NEVER send unbound ambient GITEA_TOKEN!),
+      // and pr-approve.mjs MUST fail fast without leaking the unbound token!
       writeFileSync(credsFile, '')
-      process.env.GITEA_URL = 'https://other-gitea.corp.example'
-      const beforeMismatchCount = signinEvidenceAuthSeen.length
+      delete process.env.GITEA_URL
+      delete process.env.GITEA_HOST
+      delete process.env.FORGEJO_URL
+      delete process.env.FORGEJO_HOST
+      delete process.env.FORGEJO_TOKEN
+      const beforeUnboundDesktop = signinEvidenceAuthSeen.length
       await assert.rejects(
         fetchForgePullEvidence({
           endpoint: verifiedSignin!,
@@ -1593,8 +1611,189 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         }),
         /failed \(401\)/,
       )
-      for (const reqSeen of signinEvidenceAuthSeen.slice(beforeMismatchCount)) {
-        assert.equal(reqSeen.authorization, undefined, `mismatched GITEA_URL prevented leaking GITEA_TOKEN to ${reqSeen.path}`)
+      assert.ok(signinEvidenceAuthSeen.length > beforeUnboundDesktop)
+      for (const reqSeen of signinEvidenceAuthSeen.slice(beforeUnboundDesktop)) {
+        assert.equal(reqSeen.authorization, undefined, `Desktop did NOT send unbound ambient GITEA_TOKEN to ${reqSeen.path}`)
+      }
+
+      const beforeUnboundPoll = signinEvidenceAuthSeen.length
+      const unboundPollRes = await runNodeScript(
+        PR_POLL,
+        ['12', join(emptyGhCfg, 'unbound-gitea-state.json'), '--pr-url', signinPrUrl, '--origin', signinGitOrigin, '--snapshot'],
+        {
+          env: {
+            GIT_CONFIG_GLOBAL: gitCfgFile,
+            GIT_CONFIG_NOSYSTEM: '1',
+            GITEA_TOKEN: 'gitea_secret_never_leak',
+            GITEA_URL: '',
+            GITEA_HOST: '',
+            FORGEJO_TOKEN: 'forgejo_secret_never_leak',
+            FORGEJO_URL: '',
+            FORGEJO_HOST: '',
+          },
+        },
+      )
+      assert.notEqual(unboundPollRes.code, 0)
+      assert.ok(signinEvidenceAuthSeen.length > beforeUnboundPoll)
+      for (const reqSeen of signinEvidenceAuthSeen.slice(beforeUnboundPoll)) {
+        assert.equal(reqSeen.authorization, undefined, `pr-poll.mjs did NOT send unbound ambient GITEA_TOKEN/FORGEJO_TOKEN to ${reqSeen.path}`)
+      }
+
+      const approveNoteFile = join(emptyGhCfg, 'unbound-approve-note.md')
+      writeFileSync(approveNoteFile, '[Codex CLI] Verified.\n')
+      const beforeUnboundApprove = signinEvidenceAuthSeen.length
+      const unboundApproveRes = await runNodeScript(
+        PR_APPROVE,
+        [signinPrUrl, '12', HEAD_1, BASE_1, approveNoteFile, '--origin', signinGitOrigin],
+        {
+          env: {
+            GIT_CONFIG_GLOBAL: gitCfgFile,
+            GIT_CONFIG_NOSYSTEM: '1',
+            GITEA_TOKEN: 'gitea_secret_never_leak',
+            GITEA_URL: '',
+            GITEA_HOST: '',
+          },
+        },
+      )
+      assert.notEqual(unboundApproveRes.code, 0)
+      assert.match(unboundApproveRes.stderr, /No credentials available/)
+      assert.equal(signinEvidenceAuthSeen.length, beforeUnboundApprove, 'pr-approve.mjs sends zero requests when only an unbound ambient token exists')
+
+      // 2) Distinct configured Gitea AND Forgejo instances simultaneously in the same environment:
+      // Each instance MUST receive ONLY its own product's token (never GITEA_TOKEN sent to Forgejo or FORGEJO_TOKEN sent to Gitea)!
+      const forgejoAuthSeen: Array<{ path: string; authorization: string | undefined }> = []
+      const giteaAuthSeen: Array<{ path: string; authorization: string | undefined }> = []
+      const makeTokenCheckedServer = (
+        expectedTok: string,
+        log: Array<{ path: string; authorization: string | undefined }>,
+      ) => createServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        log.push({ path: url.pathname, authorization: req.headers.authorization })
+        if (req.headers.authorization !== `token ${expectedTok}`) {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ message: `Expected token ${expectedTok}` }))
+          return
+        }
+        if (url.pathname === '/api/v1/user') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ id: 7, login: 'alice' }))
+          return
+        }
+        if (url.pathname === '/api/v1/repos/daq/service/pulls/12') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            number: 12,
+            state: 'open',
+            merged: false,
+            user: { id: 7, login: 'alice' },
+            head: { ref: 'feat/p', sha: HEAD_1, repo: { id: 1, full_name: 'daq/service' } },
+            base: { ref: 'main', sha: BASE_1, repo: { id: 1, full_name: 'daq/service' } },
+          }))
+          return
+        }
+        if (url.pathname === '/api/v1/repos/daq/service/pulls/12/reviews' || url.pathname === '/api/v1/repos/daq/service/issues/12/comments') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify([]))
+          return
+        }
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Not Found' }))
+      })
+      const giteaBoundServer = makeTokenCheckedServer('gitea-only-tok', giteaAuthSeen)
+      const forgejoBoundServer = makeTokenCheckedServer('forgejo-only-tok', forgejoAuthSeen)
+      const giteaBoundPort = await listenServer(giteaBoundServer)
+      const forgejoBoundPort = await listenServer(forgejoBoundServer)
+      const prevGiteaHost = process.env.GITEA_HOST
+      const prevForgejoTok = process.env.FORGEJO_TOKEN
+      const prevForgejoUrl = process.env.FORGEJO_URL
+      const prevForgejoHost = process.env.FORGEJO_HOST
+      try {
+        const giteaBoundOrigin = `http://127.0.0.1:${giteaBoundPort}`
+        const forgejoBoundOrigin = `http://127.0.0.1:${forgejoBoundPort}`
+        process.env.GITEA_TOKEN = 'gitea-only-tok'
+        process.env.GITEA_URL = giteaBoundOrigin
+        process.env.FORGEJO_TOKEN = 'forgejo-only-tok'
+        process.env.FORGEJO_URL = forgejoBoundOrigin
+
+        const giteaBoundEp = {
+          ...resolveTrustedForgeEndpoint({
+            origin: `${giteaBoundOrigin}/daq/service.git`,
+            prNumber: 12,
+            prUrl: `${giteaBoundOrigin}/daq/service/pulls/12`,
+          })!,
+          forge: 'gitea' as const,
+        }
+        const forgejoBoundEp = {
+          ...resolveTrustedForgeEndpoint({
+            origin: `${forgejoBoundOrigin}/daq/service.git`,
+            prNumber: 12,
+            prUrl: `${forgejoBoundOrigin}/daq/service/pulls/12`,
+          })!,
+          forge: 'gitea' as const,
+        }
+
+        // Desktop: Gitea gets gitea-only-tok, Forgejo gets forgejo-only-tok (NEVER GITEA_TOKEN!), unconfigured 3rd host gets NO auth header!
+        const desktopGitea = await fetchForgePullEvidence({ endpoint: giteaBoundEp, userDataDir: emptyGhCfg, projectCwd: emptyGhCfg, runner: {} as GitRunner })
+        assert.equal(desktopGitea.head, HEAD_1)
+        const desktopForgejo = await fetchForgePullEvidence({ endpoint: forgejoBoundEp, userDataDir: emptyGhCfg, projectCwd: emptyGhCfg, runner: {} as GitRunner })
+        assert.equal(desktopForgejo.head, HEAD_1)
+        assert.ok(giteaAuthSeen.length >= 3)
+        assert.ok(forgejoAuthSeen.length >= 3)
+        for (const r of giteaAuthSeen) assert.equal(r.authorization, 'token gitea-only-tok')
+        for (const r of forgejoAuthSeen) assert.equal(r.authorization, 'token forgejo-only-tok')
+
+        // Standalone pr-poll.mjs: same strict per-token origin isolation!
+        const dualEnv = {
+          GIT_CONFIG_GLOBAL: gitCfgFile,
+          GIT_CONFIG_NOSYSTEM: '1',
+          GITEA_TOKEN: 'gitea-only-tok',
+          GITEA_URL: giteaBoundOrigin,
+          FORGEJO_TOKEN: 'forgejo-only-tok',
+          FORGEJO_URL: forgejoBoundOrigin,
+        }
+        const giteaBeforePoll = giteaAuthSeen.length
+        const pollGitea = await runNodeScript(
+          PR_POLL,
+          ['12', join(emptyGhCfg, 'dual-gitea-state.json'), '--pr-url', `${giteaBoundOrigin}/daq/service/pulls/12`, '--origin', `${giteaBoundOrigin}/daq/service.git`, '--snapshot'],
+          { env: dualEnv },
+        )
+        assert.equal(pollGitea.code, 0, pollGitea.stderr)
+        for (const r of giteaAuthSeen.slice(giteaBeforePoll)) assert.equal(r.authorization, 'token gitea-only-tok')
+
+        const forgejoBeforePoll = forgejoAuthSeen.length
+        const pollForgejo = await runNodeScript(
+          PR_POLL,
+          ['12', join(emptyGhCfg, 'dual-forgejo-state.json'), '--pr-url', `${forgejoBoundOrigin}/daq/service/pulls/12`, '--origin', `${forgejoBoundOrigin}/daq/service.git`, '--snapshot'],
+          { env: dualEnv },
+        )
+        assert.equal(pollForgejo.code, 0, pollForgejo.stderr)
+        for (const r of forgejoAuthSeen.slice(forgejoBeforePoll)) assert.equal(r.authorization, 'token forgejo-only-tok')
+
+        // Third unrelated server on another port of 127.0.0.1 receives NEITHER GITEA_TOKEN NOR FORGEJO_TOKEN!
+        const beforeThirdHost = signinEvidenceAuthSeen.length
+        await assert.rejects(
+          fetchForgePullEvidence({
+            endpoint: verifiedSignin!,
+            userDataDir: emptyGhCfg,
+            projectCwd: emptyGhCfg,
+            runner: {} as GitRunner,
+          }),
+          /failed \(401\)/,
+        )
+        for (const reqSeen of signinEvidenceAuthSeen.slice(beforeThirdHost)) {
+          assert.equal(reqSeen.authorization, undefined, `third host received neither GITEA_TOKEN nor FORGEJO_TOKEN on ${reqSeen.path}`)
+        }
+      } finally {
+        if (prevGiteaHost === undefined) delete process.env.GITEA_HOST
+        else process.env.GITEA_HOST = prevGiteaHost
+        if (prevForgejoTok === undefined) delete process.env.FORGEJO_TOKEN
+        else process.env.FORGEJO_TOKEN = prevForgejoTok
+        if (prevForgejoUrl === undefined) delete process.env.FORGEJO_URL
+        else process.env.FORGEJO_URL = prevForgejoUrl
+        if (prevForgejoHost === undefined) delete process.env.FORGEJO_HOST
+        else process.env.FORGEJO_HOST = prevForgejoHost
+        await closeServer(giteaBoundServer)
+        await closeServer(forgejoBoundServer)
       }
     } finally {
       if (prevGiteaUrl === undefined) delete process.env.GITEA_URL

@@ -121,7 +121,7 @@ if (!process.versions.electron) {
         '        cfg.head,',
         '        cfg.base,',
         '        notePath,',
-        '      ], { encoding: "utf8", env: { ...process.env, GITEA_TOKEN: "e2e-tok" } })',
+        '      ], { encoding: "utf8", env: { ...process.env, GITEA_TOKEN: "e2e-tok", GITEA_URL: behavior.giteaOrigin } })',
         '      const parsedApprove = JSON.parse(out)',
         '      execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "approved", "--id", String(parsedApprove.id)], { stdio: "inherit" })',
         '      return',
@@ -358,6 +358,7 @@ class AgyStub {
       giteaServer.listen(0, '127.0.0.1', () => resolvePort(giteaServer.address().port))
     })
     const giteaOrigin = `http://127.0.0.1:${giteaPort}`
+    process.env.GITEA_URL = giteaOrigin
     const prUrl = `${giteaOrigin}/daq/daq-service/pulls/12`
 
     // Create bare remote origin + working repository with main (base) and feat/gitea-pr-12 (head1).

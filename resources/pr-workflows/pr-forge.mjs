@@ -250,63 +250,67 @@ export function resolveForgeEndpoint({
   }
 }
 
-function matchConfiguredEnvOrigin(endpoint, envVarNames) {
-  const configured = envVarNames
-    .map((name) => String(process.env[name] ?? '').trim())
-    .filter((v) => v.length > 0)
-  if (configured.length === 0) return 'unbound'
-  for (const raw of configured) {
+function matchesConfiguredEnvOrigin(endpoint, envVarNames) {
+  const targetOrigin = String(endpoint.httpOrigin ?? '').toLowerCase()
+  const protocol = endpoint.protocol || (targetOrigin.startsWith('http://') ? 'http' : 'https')
+  for (const name of envVarNames) {
+    const raw = String(process.env[name] ?? '').trim()
+    if (!raw) continue
     if (/^https?:\/\//i.test(raw)) {
       try {
-        if (new URL(raw).origin.toLowerCase() === String(endpoint.httpOrigin ?? '').toLowerCase()) return 'matches'
+        if (new URL(raw).origin.toLowerCase() === targetOrigin) return true
       } catch {
         // Malformed URL cannot match.
       }
-    } else {
-      const normalized = raw.replace(/^\/+|\/+$/g, '').toLowerCase()
-      if (normalized === String(endpoint.host ?? '').toLowerCase() || normalized === String(endpoint.hostname ?? '').toLowerCase()) {
-        return 'matches'
-      }
+      continue
+    }
+    const cleaned = raw.replace(/^\/+|\/+$/g, '')
+    if (!cleaned || /[\s/@\\]/.test(cleaned)) continue
+    try {
+      if (new URL(`${protocol}://${cleaned}`).origin.toLowerCase() === targetOrigin) return true
+    } catch {
+      // Malformed host[:port] cannot match.
     }
   }
-  return 'mismatches'
+  return false
 }
 
-function readEnvForgeCredential(endpoint) {
+function readOriginBoundEnvCredential(endpoint) {
   if (endpoint.forge === 'gitea') {
-    const envTok = (process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN || '').trim()
-    if (!envTok) return { cred: null, binding: 'unbound' }
-    return {
-      cred: { kind: 'token', token: envTok },
-      binding: matchConfiguredEnvOrigin(endpoint, ['GITEA_URL', 'GITEA_HOST', 'FORGEJO_URL', 'FORGEJO_HOST']),
+    const giteaTok = (process.env.GITEA_TOKEN || '').trim()
+    if (giteaTok && matchesConfiguredEnvOrigin(endpoint, ['GITEA_URL', 'GITEA_HOST'])) {
+      return { kind: 'token', token: giteaTok }
     }
+    const forgejoTok = (process.env.FORGEJO_TOKEN || '').trim()
+    if (forgejoTok && matchesConfiguredEnvOrigin(endpoint, ['FORGEJO_URL', 'FORGEJO_HOST'])) {
+      return { kind: 'token', token: forgejoTok }
+    }
+    return null
   }
   if (endpoint.forge === 'gitlab') {
-    const envTok = (process.env.GITLAB_TOKEN || '').trim()
-    if (!envTok) return { cred: null, binding: 'unbound' }
-    return {
-      cred: { kind: 'gitlab-token', token: envTok },
-      binding: matchConfiguredEnvOrigin(endpoint, ['GITLAB_URL', 'GITLAB_HOST']),
+    const gitlabTok = (process.env.GITLAB_TOKEN || '').trim()
+    if (gitlabTok && matchesConfiguredEnvOrigin(endpoint, ['GITLAB_URL', 'GITLAB_HOST'])) {
+      return { kind: 'gitlab-token', token: gitlabTok }
     }
+    return null
   }
   if (endpoint.forge === 'github') {
-    const envTok = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
-    if (!envTok) return { cred: null, binding: 'unbound' }
-    return {
-      cred: { kind: 'bearer', token: envTok },
-      binding: matchConfiguredEnvOrigin(endpoint, ['GH_HOST']),
+    const ghTok = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
+    if (ghTok && matchesConfiguredEnvOrigin(endpoint, ['GH_HOST'])) {
+      return { kind: 'bearer', token: ghTok }
     }
+    return null
   }
-  return { cred: null, binding: 'unbound' }
+  return null
 }
 
 export function readForgeCredentials(endpoint) {
-  const envResult = readEnvForgeCredential(endpoint)
-  // 1. An env token explicitly bound to this exact origin/host wins immediately.
-  if (envResult.binding === 'matches' && envResult.cred) {
-    return envResult.cred
+  // 1. Only use an environment token when that specific token's own origin/host env var matches this destination.
+  const envCred = readOriginBoundEnvCredential(endpoint)
+  if (envCred) {
+    return envCred
   }
-  // 2. Otherwise prefer host-scoped `git credential fill` so a second forge instance never receives another host's ambient token.
+  // 2. Otherwise use the destination's host-scoped Git credential (`git credential fill`), or return null for an unauthenticated request.
   try {
     const out = execFileSync('git', ['credential', 'fill'], {
       cwd: endpoint.cwd,
@@ -334,11 +338,7 @@ export function readForgeCredentials(endpoint) {
         : { kind: 'token', token: password }
     }
   } catch {
-    // Fall through to unbound ambient env token below if git credential fill failed or returned nothing.
-  }
-  // 3. Fall back to an unbound ambient env token ONLY when no host-scoped Git credential exists and no conflicting origin/host env var is set.
-  if (envResult.binding === 'unbound' && envResult.cred) {
-    return envResult.cred
+    // Fall through to unauthenticated request when no host-scoped Git credential exists.
   }
   return null
 }

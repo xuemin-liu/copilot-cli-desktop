@@ -86,7 +86,9 @@ async function main() {
 
   const cred = readForgeCredentials(endpoint)
   if (!cred) {
-    throw new Error(`No credentials available for ${endpoint.httpOrigin} (configure Git credentials or forge token).`)
+    throw new Error(
+      `No credentials available for ${endpoint.httpOrigin} (configure host-scoped Git credentials, or bind a forge token to this origin via GITEA_URL/FORGEJO_URL/GITLAB_URL).`,
+    )
   }
 
   if (endpoint.forge === 'gitea') {
