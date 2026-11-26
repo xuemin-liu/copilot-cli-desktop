@@ -26,9 +26,9 @@ export interface ReviewReservation {
   createdAt: number
   kept: boolean
   /**
-   * When a removal found that Git had taken the worktree out of the project while it had no changes, and only deleting
-   * its folder failed (a file still held open, on Windows). What was in the folder then is the desktop's to clear, not
-   * the person's; anything saved there later is not. Set only from such a removal: a kept record without it is the
+   * When the removal began that found Git had taken the worktree out of the project while it had no changes, and only
+   * deleting its folder failed (a file still held open, on Windows). What was in the folder before then is the
+   * desktop's to clear, not the person's; anything saved, moved or changed there from then on is not. Set only from such a removal: a kept record without it is the
    * person's for as long as its folder exists.
    */
   detachedAt?: number
@@ -81,10 +81,14 @@ export class ReviewReservations {
     }
     await this.save()
   }
-  /** Keeps the record with its folder. `detached` says a clean removal took the worktree out and only the folder stayed. */
-  async keep(launchId: string, detached = false): Promise<void> {
+  /**
+   * Keeps the record with its folder. `detachedAt` is given when a clean removal took the worktree out and only the
+   * folder stayed: the time that removal began, so nothing saved from then on counts as the desktop's leftover.
+   */
+  async keep(launchId: string, detachedAt?: number): Promise<void> {
+    const detached = detachedAt !== undefined && Number.isFinite(detachedAt)
     const r = this.records.get(launchId); if (!r || (r.kept && (r.detachedAt !== undefined || !detached))) return
-    this.records.set(launchId, { ...r, kept: true, ...(detached ? { detachedAt: this.now() } : {}) }); await this.save()
+    this.records.set(launchId, { ...r, kept: true, ...(detached ? { detachedAt } : {}) }); await this.save()
   }
   /** The leftover folder turned out to hold something saved after the removal: the record is the person's again. */
   async undetach(launchId: string): Promise<void> {

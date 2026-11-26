@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, renameSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
@@ -218,6 +218,17 @@ test('a folder a clean removal left behind goes on a later try, also with its .g
     assert.equal(keptNote.outcome === 'kept' && keptNote.reason, 'dirty')
     assert.match(keptNote.outcome === 'kept' ? keptNote.detail ?? '' : '', /recovery\.txt was saved after/)
     assert.ok(existsSync(join(noted.checkout, 'notes', 'recovery.txt')))
+    // So is a file moved in afterwards, although a move keeps the file's own creation and write times.
+    const movedInto = await leftover()
+    writeFileSync(join(f.root, 'old-note.txt'), 'written long before')
+    await new Promise((done) => setTimeout(done, 30))
+    const movedCutoff = Date.now()
+    await new Promise((done) => setTimeout(done, 30))
+    renameSync(join(f.root, 'old-note.txt'), join(movedInto.checkout, 'old-note.txt'))
+    assert.ok(statSync(join(movedInto.checkout, 'old-note.txt')).mtimeMs < movedCutoff, 'the move kept the write time')
+    const keptMoved = await removeReviewerAreaDetailed(movedInto, f.runner, { detachedAt: movedCutoff })
+    assert.equal(keptMoved.outcome === 'kept' && keptMoved.reason, 'dirty')
+    assert.ok(existsSync(join(movedInto.checkout, 'old-note.txt')))
     // Git gives a later review's worktree the entry name this one had ("checkout"). The old pointer then names an
     // entry that exists but belongs to the other checkout: still stale, and the other review is not touched.
     const first = await leftover()
@@ -269,16 +280,34 @@ test('a clean worktree whose folder cannot be deleted is reported as detached, a
     // A process whose working folder is the checkout (a reviewer's leftover child) keeps Windows from deleting it.
     holder = spawn(process.execPath, ['-e', 'process.stdout.write("up");setInterval(()=>{},1000)'], { cwd: area.checkout, stdio: ['ignore', 'pipe', 'ignore'] })
     await new Promise<void>((done, fail) => { holder!.stdout!.once('data', () => done()); holder!.once('error', fail) })
+    await new Promise((done) => setTimeout(done, 30))
     const started = Date.now()
-    const held = await removeReviewerAreaDetailed(area, f.runner, { retryDelaysMs: [5, 5], folderRetries: 1 })
+    // A note saved after Git took the worktree out, while the removal is still going on, is not its leftover.
+    const savingRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        const result = await f.runner.run(req)
+        if (req.args[0] === 'worktree' && req.args[1] === 'remove' && existsSync(area.checkout) && !existsSync(join(area.checkout, 'during.txt'))) {
+          writeFileSync(join(area.checkout, 'during.txt'), 'saved while the removal was running')
+        }
+        return result
+      },
+    } as unknown as typeof f.runner
+    const held = await removeReviewerAreaDetailed(area, savingRunner, { retryDelaysMs: [5, 5], folderRetries: 1 })
     assert.ok(Date.now() - started < 20_000, 'a held folder is given up on quickly')
+    const cutoff = held.outcome === 'kept' ? held.detachedAt : undefined
+    assert.ok(typeof cutoff === 'number' && cutoff >= started && cutoff <= statSync(join(area.checkout, 'during.txt')).mtimeMs, 'the cutoff is from before Git was asked')
     assert.equal(held.outcome, 'kept')
     assert.equal(held.outcome === 'kept' && held.reason, 'detached', 'Git took the clean worktree out; only the folder stayed')
     assert.ok(existsSync(area.checkout))
     assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), new RegExp(basename(area.root)))
     const exited = new Promise<void>((done) => holder!.once('exit', () => done()))
     holder.kill(); await exited; holder = null
-    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detachedAt: Date.now() }), { outcome: 'removed' })
+    const withNote = await removeReviewerAreaDetailed(area, f.runner, { detachedAt: cutoff })
+    assert.equal(withNote.outcome === 'kept' && withNote.reason, 'dirty', 'the note saved during the removal keeps the folder')
+    assert.ok(existsSync(join(area.checkout, 'during.txt')))
+    // Once the person has taken their note, what the removal left goes.
+    rmSync(join(area.checkout, 'during.txt'))
+    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detachedAt: cutoff }), { outcome: 'removed' })
     assert.equal(existsSync(area.root), false)
   } finally { holder?.kill(); f.cleanup() }
 })
@@ -298,14 +327,14 @@ test('a kept reservation records a detached removal, keeps it across a restart, 
     assert.equal(store.holder('o/r', 1, 'x')?.kept, true)
     assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, undefined)
     // A later clean removal that only left the folder upgrades it; a plain keep after that does not take it back.
-    await store.keep(a.launchId, true)
-    assert.equal(typeof store.holder('o/r', 1, 'x')?.detachedAt, 'number')
+    await store.keep(a.launchId, 1_000)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, 1_000)
     await store.keep(a.launchId)
-    assert.equal(typeof store.holder('o/r', 1, 'x')?.detachedAt, 'number')
-    await store.keep(b.launchId, true)
+    assert.equal(store.holder('o/r', 1, 'x')?.detachedAt, 1_000)
+    await store.keep(b.launchId, 2_000)
     const reread = new ReviewReservations(path)
-    assert.equal(typeof reread.holder('o/r', 1, 'x')?.detachedAt, 'number')
-    assert.equal(typeof reread.holder('o/r', 2, 'x')?.detachedAt, 'number')
+    assert.equal(reread.holder('o/r', 1, 'x')?.detachedAt, 1_000)
+    assert.equal(reread.holder('o/r', 2, 'x')?.detachedAt, 2_000)
     // A new start of the same review says what is in the way: changes for the person, or a folder still in use.
     const again = mk(3)
     await assert.rejects(store.reserve({ launchId: again.launchId, repository: 'o/r', number: 1, reviewer: 'x', project: f.root, root: again.root, checkout: join(again.root, 'checkout'), ref: `refs/desktop-review/${again.launchId}` }), /still in use and could not be deleted/)

@@ -1021,7 +1021,7 @@ async function sweepReviewerAreas():Promise<void>{
       const removal=await removeReviewerAreaDetailed(record,await meetingGitRunner(),record.detachedAt!==undefined?{detachedAt:record.detachedAt,folderRetries:1}:undefined).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
       if(record.taskId)reviewerTasks.delete(record.taskId)
       if(removal.outcome==='removed')await store.release(record.launchId)
-      else if(removal.reason==='detached')await store.keep(record.launchId,true)
+      else if(removal.reason==='detached')await store.keep(record.launchId,removal.detachedAt)
       else if(record.detachedAt!==undefined&&removal.reason==='dirty'){await store.undetach(record.launchId);workflowNotice=`Files were saved in the leftover review folder of PR #${record.number}, so it was kept: ${record.checkout}. Look at it, then delete the folder.`;broadcastState()}
       else if(!record.kept){await store.keep(record.launchId);workflowNotice=`The review worktree of PR #${record.number} has changes, so it was kept: ${record.checkout}. Look at it, then remove it with git worktree remove.`;broadcastState()}
     }
@@ -1104,7 +1104,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
     if(!tabId){
       const removal=await removeReviewerAreaDetailed(area,runner).catch(():ReviewerAreaRemovalResult=>({outcome:'kept',reason:'git-failed'}))
       if(removal.outcome==='removed')await store.release(launchId).catch(()=>{})
-      else await store.keep(launchId,removal.reason==='detached').catch(()=>{})
+      else await store.keep(launchId,removal.reason==='detached'?removal.detachedAt:undefined).catch(()=>{})
     }
     throw error
   }finally{reviewLaunches.delete(launchId)}
@@ -3777,7 +3777,7 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
   if (removal.outcome === 'removed') {
     await store?.release(seat.launchId).catch(() => {})
   } else if (seat.launchId) {
-    await store?.keep(seat.launchId, removal.reason === 'detached').catch(() => {})
+    await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
     seat.keptCheckoutPath = area.checkout
     const group = tempReviewers.group(seat.groupId)
     const msg = removal.reason === 'dirty'
@@ -4303,7 +4303,7 @@ async function launchTempReviewerSeat(
     await store.setCodexAuthSync(launchId, null).catch(() => {})
     const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
     if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
-    else await store.keep(launchId, removal.reason === 'detached').catch(() => {})
+    else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
     if (seat.generation === expectedGeneration) seat.area = null
     throw error
   } finally {
