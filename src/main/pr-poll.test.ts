@@ -10,6 +10,7 @@ import {
   clearForgeProbeCacheForTests,
   fetchForgePullEvidence,
   ghConfigMayKnowHost,
+  ghEnterpriseChildEnv,
   hashSeatReceiptToken,
   isItemExplicitApproval,
   resolveTrustedForgeEndpoint,
@@ -17,6 +18,7 @@ import {
   verifySeatOutcomeFromSnapshot,
   type ForgePullEvidenceSnapshot,
 } from './pr-forge-evidence.js'
+import type { GitRunner } from './git-runner.js'
 
 interface PrForgeModule {
   evaluateRevisionApprovals: (opts: Record<string, unknown>) => { approvalForHead: boolean }
@@ -408,6 +410,64 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       { env },
     )
     assert.equal(postRaceClean.stdout.trim(), 'NO_CHANGE')
+
+    // 4c. Marking WITHOUT --snapshot-id when a newly posted comment arrived after the oldest pending snapshot and was edited before --mark
+    // MUST NOT stamp the live edited version for an ID absent from the acknowledged snapshot!
+    const snapOldest = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
+      { env },
+    )
+    assert.equal(snapOldest.code, 0, snapOldest.stderr)
+    reviews.push({
+      id: 12,
+      state: 'COMMENT',
+      user: { id: 7, login: 'alice' },
+      body: 'Non-blocking: [Codex CLI] brand new review v1',
+      commit_id: HEAD_1,
+      comments_count: 0,
+      submitted_at: '2026-11-26T00:03:00Z',
+      updated_at: '2026-11-26T00:03:00Z',
+    })
+    const snapLaterWith12 = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
+      { env },
+    )
+    assert.equal(snapLaterWith12.code, 0, snapLaterWith12.stderr)
+    reviews[reviews.length - 1] = {
+      ...reviews[reviews.length - 1],
+      body: 'Blocking: [Codex CLI] edited review 12 before mark',
+      updated_at: '2026-11-26T00:03:30Z',
+    }
+    // Omitting --snapshot-id selects snapOldest (which did not contain #12); #12 must remain unseen/edited on the next poll!
+    await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '12,21,0', '--head', HEAD_1, '--base', BASE_1],
+      { env },
+    )
+    const wakeFor12 = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin],
+      { env },
+    )
+    assert.notEqual(wakeFor12.stdout.trim(), 'NO_CHANGE', 'missing ID from oldest snapshot must not be stamped with live edit')
+    const wake12Json = JSON.parse(wakeFor12.stdout)
+    assert.equal(wake12Json.edited, true)
+    assert.equal(wake12Json.newReviews[0].id, 12)
+    assert.match(wake12Json.newReviews[0].body, /edited review 12 before mark/)
+    await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '12,21,0', '--head', HEAD_1, '--base', BASE_1, '--snapshot-id', String(wake12Json.snapshotId)],
+      { env },
+    )
+    const cleanAfter12 = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin],
+      { env },
+    )
+    assert.equal(cleanAfter12.stdout.trim(), 'NO_CHANGE')
+    reviews.pop()
 
     // 5. Post approval for Claude Code via pr-approve.mjs using full PR URL as first arg (and verify refusal of finding-labeled notes + deduplication on repeat):
     for (const badNoteBody of [
@@ -1370,6 +1430,30 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     assert.equal(ghConfigMayKnowHost('unrelated.corp.example'), false)
     delete process.env.GH_HOST
 
+    // ghEnterpriseChildEnv binds ambient Enterprise tokens ONLY to an explicitly matching GH_HOST and strips them for any other/unbound host!
+    const matchingEnv = ghEnterpriseChildEnv('ghe1.corp.example', {
+      GH_HOST: 'ghe1.corp.example',
+      GH_ENTERPRISE_TOKEN: 'ent-tok-1',
+      GITHUB_ENTERPRISE_TOKEN: 'ent-tok-2',
+    })
+    assert.equal(matchingEnv.GH_ENTERPRISE_TOKEN, 'ent-tok-1')
+    assert.equal(matchingEnv.GITHUB_ENTERPRISE_TOKEN, 'ent-tok-2')
+
+    const mismatchedEnv = ghEnterpriseChildEnv('ghe2.corp.example', {
+      GH_HOST: 'ghe1.corp.example',
+      GH_ENTERPRISE_TOKEN: 'ent-tok-1',
+      GITHUB_ENTERPRISE_TOKEN: 'ent-tok-2',
+    })
+    assert.equal(mismatchedEnv.GH_ENTERPRISE_TOKEN, undefined, 'strips GH_ENTERPRISE_TOKEN for non-matching Enterprise host')
+    assert.equal(mismatchedEnv.GITHUB_ENTERPRISE_TOKEN, undefined, 'strips GITHUB_ENTERPRISE_TOKEN for non-matching Enterprise host')
+
+    const unboundEnv = ghEnterpriseChildEnv('ghe1.corp.example', {
+      GH_ENTERPRISE_TOKEN: 'ent-tok-1',
+      GITHUB_ENTERPRISE_TOKEN: 'ent-tok-2',
+    })
+    assert.equal(unboundEnv.GH_ENTERPRISE_TOKEN, undefined, 'strips unbound global GH_ENTERPRISE_TOKEN when GH_HOST is unset')
+    assert.equal(unboundEnv.GITHUB_ENTERPRISE_TOKEN, undefined, 'strips unbound global GITHUB_ENTERPRISE_TOKEN when GH_HOST is unset')
+
     // Unauthenticated host-pinned /api/v3/meta probe identifies GitHub Enterprise WITHOUT sending any Authorization / Private-Token header!
     const gheOrigin = `http://127.0.0.1:${ghePort}`
     const gheProbeEp = resolveTrustedForgeEndpoint({
@@ -1384,6 +1468,58 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     for (const seen of probeAuthHeadersSeen) {
       assert.equal(seen.authorization, undefined, `discovery probe ${seen.path} sent no Authorization header`)
       assert.equal(seen.privateToken, undefined, `discovery probe ${seen.path} sent no Private-Token header`)
+    }
+
+    // Gitea REQUIRE_SIGNIN_VIEW=true: first /api/v1/version probe is unauthenticated (gets 403), then retries ONLY with host-bound
+    // `git credential fill` credential (NEVER process-wide GITEA_TOKEN!) and resolves to 'gitea'!
+    const signinAuthSeen: Array<string | undefined> = []
+    const expectedBasic = `Basic ${Buffer.from('alice:host-bound-secret', 'utf8').toString('base64')}`
+    const signinGiteaServer = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      if (url.pathname === '/api/v1/version') {
+        signinAuthSeen.push(req.headers.authorization)
+        if (req.headers.authorization === expectedBasic) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ version: '1.22.0' }))
+          return
+        }
+        res.writeHead(403, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Only signed in user is allowed to call APIs.' }))
+        return
+      }
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ message: 'Not Found' }))
+    })
+    const signinPort = await listenServer(signinGiteaServer)
+    const prevGitCfgGlobal = process.env.GIT_CONFIG_GLOBAL
+    const prevGitCfgNoSys = process.env.GIT_CONFIG_NOSYSTEM
+    try {
+      const credsFile = join(emptyGhCfg, 'git-creds').replace(/\\/g, '/')
+      const gitCfgFile = join(emptyGhCfg, 'gitconfig')
+      writeFileSync(credsFile, `http://alice:host-bound-secret@127.0.0.1:${signinPort}\n`)
+      writeFileSync(gitCfgFile, `[credential]\n\thelper = store --file=${credsFile}\n`)
+      process.env.GIT_CONFIG_GLOBAL = gitCfgFile
+      process.env.GIT_CONFIG_NOSYSTEM = '1'
+      const signinOrigin = `http://127.0.0.1:${signinPort}`
+      const signinEp = resolveTrustedForgeEndpoint({
+        origin: `${signinOrigin}/daq/service.git`,
+        prNumber: 12,
+        prUrl: `${signinOrigin}/daq/service/pulls/12`,
+      })
+      assert.equal(signinEp?.forge, 'probe')
+      const verifiedSignin = await resolveVerifiedForgeKind({
+        endpoint: signinEp!,
+        projectCwd: emptyGhCfg,
+        runner: {} as GitRunner,
+      })
+      assert.equal(verifiedSignin?.forge, 'gitea', 'REQUIRE_SIGNIN_VIEW Gitea recovers via host-bound git credential after 403')
+      assert.deepEqual(signinAuthSeen, [undefined, expectedBasic], 'first probe unauthenticated, retry uses host-bound git credential only (never GITEA_TOKEN)')
+    } finally {
+      if (prevGitCfgGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = prevGitCfgGlobal
+      if (prevGitCfgNoSys === undefined) delete process.env.GIT_CONFIG_NOSYSTEM
+      else process.env.GIT_CONFIG_NOSYSTEM = prevGitCfgNoSys
+      await closeServer(signinGiteaServer)
     }
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {

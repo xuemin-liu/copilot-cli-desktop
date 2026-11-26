@@ -6,7 +6,7 @@
 //                                             [--allow-http-origin ORIGIN] [--marker "<prefix>"] [--invert] [--watch-head]
 //                                             [--allow-approver LOGIN]... [--require-tag "[CLI]"]... [--snapshot]
 //   node pr-poll.mjs <pr-or-url> <state-file> ... --init
-//   node pr-poll.mjs <pr-or-url> <state-file> ... --mark --through <reviewId>,<inlineId>,<issueId> --head <sha> [--base <sha>]
+//   node pr-poll.mjs <pr-or-url> <state-file> ... --mark --through <reviewId>,<inlineId>,<issueId> --head <sha> [--base <sha>] [--snapshot-id <id>]
 //   node pr-poll.mjs <pr-or-url> <state-file> ... --wait [seconds] [--max <seconds>]
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -93,8 +93,14 @@ async function evaluateOnce({ prArg, stateFile }) {
     for (const item of items) {
       if (maxId === null || item.id <= maxId) {
         const key = String(item.id)
-        if (deliveredMap && Object.hasOwn(deliveredMap, key)) {
-          nextMap[key] = deliveredMap[key]
+        if (deliveredMap !== null) {
+          if (Object.hasOwn(deliveredMap, key)) {
+            nextMap[key] = deliveredMap[key]
+          } else if (!Object.hasOwn(nextMap, key)) {
+            // Item ID <= watermark was NOT present in the acknowledged snapshot; store an empty sentinel instead of
+            // stamping the live version so a subsequent poll still wakes and delivers this unseen/edited item.
+            nextMap[key] = ''
+          }
         } else if (!Object.hasOwn(nextMap, key)) {
           nextMap[key] = item.versionKey
         }

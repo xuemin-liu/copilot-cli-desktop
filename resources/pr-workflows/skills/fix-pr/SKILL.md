@@ -53,7 +53,7 @@ When waiting for reviewer re-review after pushing or when no feedback has arrive
 - Use an async shell waiter so completion wakes this session without burning turns:
   - On GitHub, Gitea/Forgejo, or GitLab when `$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs` and `$COPILOT_DESKTOP_PR_STATE` are available:
     1. Capture a snapshot first (`node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --snapshot`).
-    2. After handling feedback, advance the state file explicitly with `--through`: `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha>` (`--mark` requires `--through R,I,C`).
+    2. After handling feedback, advance the state file explicitly with `--through` and the handled `snapshotId`: `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha> --snapshot-id <snapshotId>` (`--mark` requires `--through R,I,C`; passing `--snapshot-id` acknowledges the exact snapshot you handled).
     3. Wait for new or edited reviewer comments/approvals with `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --wait 60`.
   - On other hosts: run a bounded async poll script checking the PR's state, `head` and `base` SHAs, reviews, and non-`🤖 ` comments (including `updated_at` edits) every 30–60 seconds until new reviewer activity or closure appears.
 - Without a verified async wake-up tool, address all current feedback now and state clearly that automatic background waiting is unavailable.

@@ -181,19 +181,11 @@ export function resolveTrustedForgeEndpoint(options: {
   }
 }
 
-async function readCredentialsViaGit(
+async function readHostBoundGitCredentials(
   runner: GitRunner | null,
   cwd: string,
   endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'protocol' | 'host'>,
 ): Promise<Record<string, string>> {
-  if (endpoint.forge === 'gitea' || endpoint.forge === 'probe') {
-    const tok = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN
-    if (tok?.trim()) return { authorization: `token ${tok.trim()}` }
-  }
-  if (endpoint.forge === 'gitlab' || endpoint.forge === 'probe') {
-    const tok = process.env.GITLAB_TOKEN
-    if (tok?.trim() && endpoint.forge === 'gitlab') return { 'private-token': tok.trim() }
-  }
   if (!runner) return {}
   const credOut = await new Promise<string>((resolveOut) => {
     let settled = false
@@ -238,6 +230,22 @@ async function readCredentialsViaGit(
   return username
     ? { authorization: `Basic ${Buffer.from(`${username}:${password}`, 'utf8').toString('base64')}` }
     : { authorization: `token ${password}` }
+}
+
+async function readCredentialsViaGit(
+  runner: GitRunner | null,
+  cwd: string,
+  endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'protocol' | 'host'>,
+): Promise<Record<string, string>> {
+  if (endpoint.forge === 'gitea' || endpoint.forge === 'probe') {
+    const tok = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN
+    if (tok?.trim()) return { authorization: `token ${tok.trim()}` }
+  }
+  if (endpoint.forge === 'gitlab' || endpoint.forge === 'probe') {
+    const tok = process.env.GITLAB_TOKEN
+    if (tok?.trim() && endpoint.forge === 'gitlab') return { 'private-token': tok.trim() }
+  }
+  return readHostBoundGitCredentials(runner, cwd, endpoint)
 }
 
 async function safeForgeFetchResponse(httpOrigin: string, apiPath: string, authHeaders: Record<string, string>, timeoutMs = 25_000): Promise<{ data: unknown; headers: Headers }> {
@@ -347,7 +355,7 @@ async function probeVersionEndpoint(
   apiPath: string,
   authHeaders: Record<string, string>,
   timeoutMs = 6_000,
-): Promise<{ status: 'matched' } | { status: 'absent' } | { status: 'error'; reason: string }> {
+): Promise<{ status: 'matched' } | { status: 'absent' } | { status: 'error'; reason: string; httpStatus?: number }> {
   let res: Response
   try {
     const url = new URL(apiPath, `${httpOrigin}/`)
@@ -361,13 +369,13 @@ async function probeVersionEndpoint(
     return { status: 'error', reason: err instanceof Error ? err.message : String(err) }
   }
   if (res.status >= 300 && res.status < 400) {
-    return { status: 'error', reason: `HTTP ${res.status} redirect on ${apiPath}` }
+    return { status: 'error', reason: `HTTP ${res.status} redirect on ${apiPath}`, httpStatus: res.status }
   }
   if (res.status === 404 || res.status === 405 || res.status === 410 || res.status === 501) {
     return { status: 'absent' }
   }
   if (!res.ok) {
-    return { status: 'error', reason: `HTTP ${res.status} on ${apiPath}` }
+    return { status: 'error', reason: `HTTP ${res.status} on ${apiPath}`, httpStatus: res.status }
   }
   const text = await res.text().catch(() => '')
   try {
@@ -462,6 +470,25 @@ export function ghConfigMayKnowHost(hostname: string): boolean {
   return false
 }
 
+/**
+ * Builds the child environment for spawning `gh` against a GitHub Enterprise hostname.
+ * Ambient `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` are forwarded ONLY when explicitly bound to `hostname`
+ * via `GH_HOST`; for any other host they are stripped so `gh` uses only host-scoped `hosts.yml` credentials and
+ * never leaks one Enterprise server's token to another.
+ */
+export function ghEnterpriseChildEnv(hostname: string, baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = { ...baseEnv, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' }
+  const configuredHost = baseEnv.GH_HOST?.trim().toLowerCase() ?? ''
+  if (!configuredHost || configuredHost !== hostname.toLowerCase()) {
+    for (const key of Object.keys(childEnv)) {
+      if (/^(?:GH|GITHUB)_ENTERPRISE_TOKEN$/i.test(key)) {
+        delete childEnv[key]
+      }
+    }
+  }
+  return childEnv
+}
+
 function checkGhEnterpriseAuth(hostname: string, protocol: 'http' | 'https' = 'https'): Promise<boolean> {
   if (protocol === 'http' || !ghConfigMayKnowHost(hostname)) {
     return Promise.resolve(false)
@@ -478,7 +505,7 @@ function checkGhEnterpriseAuth(hostname: string, protocol: 'http' | 'https' = 'h
       'gh',
       ['auth', 'status', '--hostname', hostname],
       {
-        env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' },
+        env: ghEnterpriseChildEnv(hostname),
         windowsHide: true,
         timeout: 6_000,
       },
@@ -501,7 +528,7 @@ function runGhEnterpriseJson(hostname: string, apiPath: string, paginate = false
     const child = execFile(
       'gh',
       args,
-      { windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+      { env: ghEnterpriseChildEnv(hostname), windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
           rejectJson(new Error(String(stderr || err.message).trim()))
@@ -539,8 +566,15 @@ export async function resolveVerifiedForgeKind(options: {
 
   const probeErrors: string[] = []
 
-  // Keep forge discovery unauthenticated so process-wide credentials are never sent to an unverified host.
-  const giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', {}, 6_000)
+  // First probe is always unauthenticated so process-wide env tokens never reach unverified hosts.
+  // On 401/403 (e.g. Gitea REQUIRE_SIGNIN_VIEW or private GitLab), retry ONLY with host-bound `git credential fill` credentials.
+  let giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', {}, 6_000)
+  if (giteaProbe.status === 'error' && (giteaProbe.httpStatus === 401 || giteaProbe.httpStatus === 403)) {
+    const hostBoundGiteaAuth = await readHostBoundGitCredentials(runner, projectCwd, { ...endpoint, forge: 'gitea' })
+    if (Object.keys(hostBoundGiteaAuth).length > 0) {
+      giteaProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v1/version', hostBoundGiteaAuth, 6_000)
+    }
+  }
   if (giteaProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitea')
     return { ...endpoint, forge: 'gitea' }
@@ -562,7 +596,13 @@ export async function resolveVerifiedForgeKind(options: {
     return { ...endpoint, forge: 'github' }
   }
 
-  const gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', {}, 6_000)
+  let gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', {}, 6_000)
+  if (gitlabProbe.status === 'error' && (gitlabProbe.httpStatus === 401 || gitlabProbe.httpStatus === 403)) {
+    const hostBoundGitlabAuth = await readHostBoundGitCredentials(runner, projectCwd, { ...endpoint, forge: 'gitlab' })
+    if (Object.keys(hostBoundGitlabAuth).length > 0) {
+      gitlabProbe = await probeVersionEndpoint(endpoint.httpOrigin, '/api/v4/version', hostBoundGitlabAuth, 6_000)
+    }
+  }
   if (gitlabProbe.status === 'matched') {
     probedOriginKinds.set(endpoint.httpOrigin, 'gitlab')
     return { ...endpoint, forge: 'gitlab' }
