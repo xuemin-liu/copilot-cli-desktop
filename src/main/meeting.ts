@@ -374,9 +374,9 @@ export class MeetingHub {
     if (meeting.stage === 'waiting') {
       // While reviewers are being gathered the round waits for `release`, so a fast one cannot finish it alone.
       if (!meeting.gathering) this.openRound(meeting)
-    } else if (meeting.stage === 'reviewing' && (meeting.voters !== null || options.nextRound === true)) {
-      // A vote is answered by those it was put to, and a seat that replaces another starts with the next round: it is in
-      // the meeting, and gets nothing until the host posts again.
+    } else if (options.nextRound === true || (meeting.stage === 'reviewing' && meeting.voters !== null)) {
+      // A vote is answered by those it was put to, and a seat that replaces another starts with the next round, whatever
+      // the meeting is doing now: it is in the meeting, and gets nothing until the host posts again.
     } else {
       // Mid-round it answers this round; otherwise (host thinking, paused) its reply joins the next digest as a late one.
       // During a discussion it has no review for the others to answer: its review joins the next digest as a late one.
@@ -867,6 +867,12 @@ export class MeetingHub {
     this.cancel(meeting, tabId)
     this.appendTranscript(meeting, heading, `In round ${meeting.round}.`)
     const wasAwaited = meeting.awaiting.delete(tabId)
+    if (meeting.participants.size === 0 && meeting.stage === 'reviewing' && meeting.voters !== null) {
+      // The last of those a vote was put to is gone. The vote has failed, and the host is told: left waiting, it would be
+      // put to whoever joins next (the seat that replaces this one, say), whose single AGREE would close the meeting.
+      this.finishRound(meeting)
+      return
+    }
     if (meeting.participants.size === 0 && meeting.stage === 'reviewing') {
       this.backToWaiting(meeting)
     } else if (wasAwaited && meeting.awaiting.size === 0 && meeting.stage === 'reviewing') {

@@ -40,6 +40,11 @@ export interface MeetingReviewerGroup {
   projectPath: string
   /** The commit the reviewers' checkouts are pinned to; null for a plan-only meeting (no repository, or no commit yet). */
   commit: string | null
+  /**
+   * The permission mode the person was asked about and allowed for this run: every launch of every seat, a Retry
+   * included, uses it, whatever the setting says by then. Null until the person has answered.
+   */
+  allowAll: boolean | null
   /** `consent`: the person is being asked. `starting`: seats are coming up and round 1 is held. `active`: the gate is open. */
   stage: 'consent' | 'starting' | 'active' | 'ended'
   outcome: 'closed' | 'stopped' | null
@@ -99,7 +104,7 @@ export class MeetingReviewerRegistry {
     const id = randomUUID()
     const group: MeetingReviewerGroup = {
       id, meetingId: input.meetingId, hostTabId: input.hostTabId, profileId: input.profileId, projectPath: input.projectPath,
-      commit: null, stage: 'consent', outcome: null, seats: new Map(), notice: null,
+      commit: null, allowAll: null, stage: 'consent', outcome: null, seats: new Map(), notice: null,
     }
     for (const cli of input.clis) group.seats.set(cli, newSeat(id, cli, false))
     this.groups.set(id, group)

@@ -11,6 +11,7 @@ test('a run is recorded before anything starts, one per workspace and one per me
   const registry = new MeetingReviewerRegistry()
   const group = run(registry)
   assert.equal(group.stage, 'consent', 'recorded while the person is still being asked')
+  assert.equal(group.allowAll, null, 'no permission mode until the person has answered')
   assert.deepEqual([...group.seats.keys()], ['claude', 'codex'])
   assert.equal(registry.activeForProfile('p1'), group)
   assert.equal(registry.forMeeting('K7QF'), group)
