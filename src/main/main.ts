@@ -151,6 +151,7 @@ import {
   fetchForgePullEvidence,
   hashSeatReceiptToken,
   resolveTrustedForgeEndpoint,
+  resolveVerifiedForgeKind,
   verifySeatOutcomeFromSnapshot,
   type ForgePullEvidenceSnapshot,
   type ParsedForgeEndpoint,
@@ -162,6 +163,7 @@ import {
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
   prReviewAndFixRequest,
+  reconcileSeatWithEvidenceLoader,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
   resolveCopilotReviewerPreset,
@@ -3636,7 +3638,7 @@ async function resolveGitRevisionsForReview(
   folder: string,
   headInput?: string,
   baseInput?: string,
-): Promise<{ ok: true; head: string; base: string; branch: string | null } | { ok: false; message: string }> {
+): Promise<{ ok: true; head: string; base: string; mergeBase: string; branch: string | null } | { ok: false; message: string }> {
   const readGit = async (args: string[]): Promise<string | null> => {
     const res = await runner.run({ cwd: folder, args, kind: 'read', disableHooks: true, timeoutMs: 30_000, maxStdoutBytes: 64_000 }).catch(() => null)
     return res && res.exitCode === 0 ? res.stdout.toString('utf8').trim() : null
@@ -3656,25 +3658,28 @@ async function resolveGitRevisionsForReview(
     if (!SAFE_GIT_REF_INPUT.test(baseRef)) {
       return { ok: false, message: 'Invalid base revision.' }
     }
-    const merged = await readGit(['merge-base', baseRef, head])
-    const direct = merged ?? await readGit(['rev-parse', '--verify', `${baseRef}^{commit}`])
-    if (!direct || !/^[a-f0-9]{40,64}$/.test(direct)) {
+    // Preserve the exact target branch tip SHA (`rev-parse`) for PR base / live forge verification,
+    // while computing `mergeBase` separately when available.
+    const targetTip = await readGit(['rev-parse', '--verify', `${baseRef}^{commit}`])
+    const merged = await readGit(['merge-base', targetTip ?? baseRef, head])
+    const resolvedBase = targetTip ?? merged
+    if (!resolvedBase || !/^[a-f0-9]{40,64}$/.test(resolvedBase)) {
       return { ok: false, message: `Could not resolve base revision "${baseRef}" in ${folder}. Fetch the target branch first or pass a full commit SHA.` }
     }
-    return { ok: true, head, base: direct, branch }
+    return { ok: true, head, base: resolvedBase, mergeBase: merged ?? resolvedBase, branch }
   }
 
   for (const candidate of ['refs/remotes/origin/HEAD', 'refs/remotes/origin/main', 'refs/remotes/origin/master', 'main', 'master']) {
-    const exists = await readGit(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`])
-    if (!exists) continue
+    const targetTip = await readGit(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`])
+    if (!targetTip || !/^[a-f0-9]{40,64}$/.test(targetTip)) continue
     const mb = await readGit(['merge-base', candidate, head])
-    if (mb && /^[a-f0-9]{40,64}$/.test(mb) && mb !== head) {
-      return { ok: true, head, base: mb, branch }
+    if (targetTip !== head || (mb && mb !== head)) {
+      return { ok: true, head, base: targetTip, mergeBase: mb ?? targetTip, branch }
     }
   }
   const parent = await readGit(['rev-parse', '--verify', '--quiet', `${head}~1^{commit}`])
   if (parent && /^[a-f0-9]{40,64}$/.test(parent) && parent !== head) {
-    return { ok: true, head, base: parent, branch }
+    return { ok: true, head, base: parent, mergeBase: parent, branch }
   }
   return {
     ok: false,
@@ -3682,7 +3687,7 @@ async function resolveGitRevisionsForReview(
   }
 }
 
-const DEFAULT_TEMP_REVIEWER_TIMEOUT_MS = 20 * 60_000
+const DEFAULT_TEMP_REVIEWER_TIMEOUT_MS = 45 * 60_000
 const tempSeatTimers = new Map<string, NodeJS.Timeout>()
 const tempGroupVerifyQueues = new Map<string, Promise<void>>()
 
@@ -3769,7 +3774,7 @@ function explicitHttpOriginFromGitOrigin(rawOrigin: string): string | null {
 }
 
 async function loadForgeEvidenceForGroup(
-  group: TempReviewerGroup,
+  group: Pick<TempReviewerGroup, 'origin' | 'prNumber' | 'prUrl' | 'repository' | 'projectPath'>,
 ): Promise<{ supported: true; snapshot: ForgePullEvidenceSnapshot } | { supported: false }> {
   const allowHttpOrigin = explicitHttpOriginFromGitOrigin(group.origin)
   let endpoint: ParsedForgeEndpoint | null = resolveTrustedForgeEndpoint({
@@ -3791,8 +3796,12 @@ async function loadForgeEvidenceForGroup(
   }
   if (!endpoint) return { supported: false }
   const runner = await meetingGitRunner().catch(() => null)
+  const verifiedEndpoint = process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE
+    ? (endpoint as ParsedForgeEndpoint & { forge: 'github' | 'gitea' | 'gitlab' })
+    : await resolveVerifiedForgeKind({ endpoint, projectCwd: group.projectPath, runner })
+  if (!verifiedEndpoint) return { supported: false }
   const snapshot = await fetchForgePullEvidence({
-    endpoint,
+    endpoint: verifiedEndpoint,
     userDataDir: app.getPath('userData'),
     projectCwd: group.projectPath,
     runner,
@@ -3805,39 +3814,20 @@ async function reconcileTempReviewerSeatEvidence(
   seat: TempReviewerSeat,
   trigger: 'completed' | 'crashed' | 'receipt' | 'idle',
 ): Promise<MeetingResponse> {
-  const expectedGen = seat.generation
-  const isGroupEnded = (): boolean => group.stage === 'ended'
   const prev = tempGroupVerifyQueues.get(group.id) ?? Promise.resolve()
   let result: MeetingResponse = { ok: false, message: 'Verification skipped.' }
   const next = prev.catch(() => {}).then(async () => {
-    if (
-      shuttingDown()
-      || isGroupEnded()
-      || group.requiredSeats.get(seat.cli) !== seat
-      || seat.generation !== expectedGen
-    ) {
-      result = { ok: false, message: 'This temporary reviewer seat is no longer active.' }
-      return
-    }
-    if (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running') {
-      result = {
-        ok: seat.lifecycle === 'approved' || seat.lifecycle === 'findings',
-        message: `Seat already settled as ${seat.lifecycle}.`,
-      }
-      return
-    }
-
-    try {
-      const loaded = await loadForgeEvidenceForGroup(group)
-      if (
-        isGroupEnded()
-        || group.requiredSeats.get(seat.cli) !== seat
-        || seat.generation !== expectedGen
-      ) {
-        result = { ok: false, message: 'Seat changed while verifying PR evidence.' }
-        return
-      }
-      if (loaded.supported) {
+    result = await reconcileSeatWithEvidenceLoader({
+      registry: tempReviewers,
+      group,
+      seat,
+      trigger,
+      isShuttingDown: shuttingDown,
+      onClearTimer: clearTempSeatTimer,
+      onBroadcast: broadcastState,
+      loadEvidence: async () => {
+        const loaded = await loadForgeEvidenceForGroup(group)
+        if (!loaded.supported) return { supported: false }
         const verified = verifySeatOutcomeFromSnapshot({
           snapshot: loaded.snapshot,
           cli: seat.cli,
@@ -3850,76 +3840,9 @@ async function reconcileTempReviewerSeatEvidence(
           claimedEvidenceKeys: group.claimedEvidenceKeys,
           receipt: seat.submittedReceipt,
         })
-        if (verified) {
-          clearTempSeatTimer(seat)
-          tempReviewers.recordSeatOutcome(seat, verified.verdict, {
-            error: null,
-            claimedKeys: verified.claimedKeys,
-          })
-          broadcastState()
-          result = {
-            ok: true,
-            message: `Verified ${verified.verdict} on PR (${verified.claimedKeys.join(', ')}).`,
-          }
-          return
-        }
-      } else if (seat.submittedReceipt) {
-        clearTempSeatTimer(seat)
-        tempReviewers.recordSeatOutcome(seat, seat.submittedReceipt.kind, { error: null })
-        broadcastState()
-        result = {
-          ok: true,
-          message: `Recorded ${seat.submittedReceipt.kind} receipt #${seat.submittedReceipt.remoteId}.`,
-        }
-        return
-      }
-
-      if (trigger === 'receipt') {
-        result = {
-          ok: false,
-          message: `Could not verify review/comment receipt on the PR host for head ${group.head.slice(0, 12)}. Confirm your post landed on the PR and includes [${sessionCliLabel(seat.cli)}].`,
-        }
-        return
-      }
-      if (trigger === 'idle') {
-        result = { ok: false, message: 'No verified PR post yet.' }
-        return
-      }
-      clearTempSeatTimer(seat)
-      if (trigger === 'crashed') {
-        tempReviewers.recordSeatOutcome(seat, 'failed', {
-          error: 'Reviewer session exited with an error before posting to the PR; click Retry or Dismiss.',
-        })
-      } else {
-        tempReviewers.recordSeatOutcome(seat, 'incomplete', {
-          error: 'Reviewer exited without a verified review or approval on the PR; click Retry or Dismiss.',
-        })
-      }
-      broadcastState()
-      result = { ok: false, message: seat.error ?? 'Reviewer incomplete.' }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      if (trigger === 'receipt') {
-        result = { ok: false, message: `Could not verify receipt on PR host: ${detail}` }
-        return
-      }
-      if (trigger === 'idle') {
-        result = { ok: false, message: detail }
-        return
-      }
-      clearTempSeatTimer(seat)
-      if (trigger === 'crashed') {
-        tempReviewers.recordSeatOutcome(seat, 'failed', {
-          error: `Reviewer crashed and PR verification failed (${detail}); click Retry or Dismiss.`,
-        })
-      } else {
-        tempReviewers.recordSeatOutcome(seat, 'incomplete', {
-          error: `Could not verify reviewer output on the PR host (${detail}); click Retry or Dismiss.`,
-        })
-      }
-      broadcastState()
-      result = { ok: false, message: detail }
-    }
+        return { supported: true, verified }
+      },
+    })
   })
   tempGroupVerifyQueues.set(group.id, next)
   void next.finally(() => {
@@ -3973,28 +3896,37 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
 function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSeat): void {
   clearTempSeatTimer(seat)
   const expectedGen = seat.generation
+  const expectedRound = group.round
   const timeoutMs = configuredTempReviewerTimeoutMs()
   const key = tempSeatTimerKey(seat)
   const timer = setTimeout(() => {
     tempSeatTimers.delete(key)
-    if (
-      shuttingDown()
-      || group.stage === 'ended'
-      || group.requiredSeats.get(seat.cli) !== seat
-      || seat.generation !== expectedGen
-      || (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running')
-    ) {
-      return
-    }
-    tempReviewers.recordSeatOutcome(seat, 'timed-out', {
-      error: `Reviewer timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s without completing its PR review; click Retry or Dismiss.`,
-    })
-    broadcastState()
-    void stopAndCloseTempReviewerTabOnly(seat).then(async () => {
+    void (async () => {
+      const isSeatStillActive = (): boolean => (
+        !shuttingDown()
+        && group.stage !== 'ended'
+        && group.round === expectedRound
+        && group.requiredSeats.get(seat.cli) === seat
+        && seat.generation === expectedGen
+        && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
+      )
+      if (!isSeatStillActive()) {
+        return
+      }
+      // Reconcile against PR host evidence first in case the reviewer already posted right before the deadline.
+      const checkRes = await reconcileTempReviewerSeatEvidence(group, seat, 'idle').catch(() => ({ ok: false }))
+      if (checkRes.ok || !isSeatStillActive()) {
+        return
+      }
+      tempReviewers.recordSeatOutcome(seat, 'timed-out', {
+        error: `Reviewer timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s without completing its PR review; click Retry or Dismiss.`,
+      })
+      broadcastState()
+      await stopAndCloseTempReviewerTabOnly(seat)
       await cleanupReviewerSeatCredentials(seat.area).catch(() => {})
       if (seat.launchId) await reviewReservations()?.setCodexAuthSync(seat.launchId, null).catch(() => {})
       broadcastState()
-    })
+    })()
   }, timeoutMs)
   timer.unref?.()
   tempSeatTimers.set(key, timer)
@@ -4551,6 +4483,9 @@ async function startTempReviewersFlow(options: {
           message: `Local head ${revisions.head.slice(0, 12)} does not match ${ghRepo} ${prLabel} remote head ${snapshot.head.slice(0, 12)}. Push or fetch the pull request branch first.`,
         }
       }
+      if (/^[a-f0-9]{40,64}$/i.test(snapshot.base)) {
+        revisions.base = snapshot.base.toLowerCase()
+      }
       const me = await api('user').catch(() => null) as { id?: unknown } | null
       if (me && snapshot.author === me.id) {
         verifiedOwnPull = true
@@ -4563,6 +4498,35 @@ async function startTempReviewersFlow(options: {
       consentWarnings.push(
         `Could not pre-verify ${ghRepo} ${prLabel} ownership via GitHub CLI; confirm you trust this pull request branch before starting unsandboxed reviewers.`,
       )
+    }
+  } else if (prNumber !== null || prUrl) {
+    // On Gitea/GitLab/GHE, sync the authoritative forge target branch tip SHA when reachable so divergent target branches match.
+    const preForge = await loadForgeEvidenceForGroup({
+      origin,
+      prNumber,
+      prUrl,
+      repository,
+      projectPath: checkoutRoot,
+    }).catch(() => null)
+    if (preForge?.supported) {
+      if (!preForge.snapshot.open) {
+        return { ok: false, message: `${repository} ${prLabel} is closed.` }
+      }
+      if (!preForge.snapshot.sameRepo) {
+        return {
+          ok: false,
+          message: `Pull requests from external forks cannot be reviewed by unsandboxed temporary reviewer sessions.`,
+        }
+      }
+      if (preForge.snapshot.head && revisions.head !== preForge.snapshot.head) {
+        return {
+          ok: false,
+          message: `Local head ${revisions.head.slice(0, 12)} does not match ${prLabel} remote head ${preForge.snapshot.head.slice(0, 12)}. Push or fetch the pull request branch first.`,
+        }
+      }
+      if (/^[a-f0-9]{40,64}$/i.test(preForge.snapshot.base)) {
+        revisions.base = preForge.snapshot.base.toLowerCase()
+      }
     }
   }
 
@@ -4859,8 +4823,33 @@ async function advanceGroupTempReviewers(
             message: `Local head ${revisions.head.slice(0, 12)} does not match ${ghRepo} ${group.prLabel} remote head ${snapshot.head.slice(0, 12)}. Push the pull request branch first.`,
           }
         }
+        if (/^[a-f0-9]{40,64}$/i.test(snapshot.base)) {
+          revisions.base = snapshot.base.toLowerCase()
+        }
       } catch {
         // Proceed to origin branch reachability check below if GitHub CLI read is transiently unavailable.
+      }
+    } else if (!ghRepo && (group.prNumber !== null || group.prUrl) && !process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE) {
+      const preForge = await loadForgeEvidenceForGroup(group).catch(() => null)
+      if (preForge?.supported) {
+        if (!preForge.snapshot.open) {
+          return { ok: false, message: `${group.repository} ${group.prLabel} is closed.` }
+        }
+        if (!preForge.snapshot.sameRepo) {
+          return {
+            ok: false,
+            message: 'Pull requests from external forks cannot be reviewed by unsandboxed temporary reviewer sessions.',
+          }
+        }
+        if (preForge.snapshot.head && revisions.head !== preForge.snapshot.head) {
+          return {
+            ok: false,
+            message: `Local head ${revisions.head.slice(0, 12)} does not match ${group.prLabel} remote head ${preForge.snapshot.head.slice(0, 12)}. Push the pull request branch first.`,
+          }
+        }
+        if (/^[a-f0-9]{40,64}$/i.test(preForge.snapshot.base)) {
+          revisions.base = preForge.snapshot.base.toLowerCase()
+        }
       }
     }
     const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
@@ -7735,7 +7724,7 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
       broadcastState()
       return snapshot()
     }
-    const reset = tempReviewers.resetSeatGeneration(groupId, payload)
+    const reset = tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     broadcastState()
     try {
       await launchTempReviewerSeat(group, reset, profile)

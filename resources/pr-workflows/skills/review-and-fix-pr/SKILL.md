@@ -29,7 +29,7 @@ Never spawn CLI processes manually or self-approve your own PR — Desktop creat
 
 ### 1. Inspect the PR on Its Host and Start Hidden Reviewers
 1. Inspect `git remote -v`, your current branch, and `git rev-parse HEAD`, and access the PR/MR on its host using the tool or API matching that repository (`gh pr view` / `gh api` / `pr-poll.mjs` on GitHub; `tea` or `/api/v1/repos/<owner>/<repo>/pulls/<index>` + `git credential fill` on Gitea/Forgejo; `glab` or `/api/v4/projects/<encoded-path>/merge_requests/<iid>` on GitLab; etc.):
-   - Resolve the open PR/MR number, full web URL (`prUrl`), exact full `head` commit SHA, and `base` commit SHA (`git merge-base <target-branch> HEAD`).
+   - Resolve the open PR/MR number, full web URL (`prUrl`), exact full `head` commit SHA, and the PR's target branch tip `base` SHA (`baseRefOid` / `pull.base.sha` from the PR host, or `git rev-parse origin/<target-branch>` — pass the target branch tip SHA rather than `git merge-base` so approvals and live checks match the PR host's `base` SHA).
    - Ensure your local commits are pushed to the PR's source branch.
    - Capture the current review/comment watermark **on the PR host** before starting reviewers (when `$COPILOT_DESKTOP_PR_TOOLS` is set on GitHub, Gitea/Forgejo, or GitLab, run `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <author-state.json> --pr-url "<url>" --snapshot` and mark already-handled watermarks via `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <author-state.json> --pr-url "<url>" --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha>`, or address any pre-existing open review comments first).
 2. Launch the hidden reviewer sessions via Desktop:

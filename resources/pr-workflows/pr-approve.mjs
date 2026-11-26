@@ -45,10 +45,13 @@ async function main() {
 
   const body = `Approved at ${head}\n\n${note}\n\nReviewed base: ${base}`
 
-  if (endpoint.forge === 'github' && (endpoint.hostname === 'github.com' || process.env.PR_POLL_GH)) {
+  if (endpoint.forge === 'github') {
     const gh = process.env.PR_POLL_GH || 'gh'
+    const hostArgs = endpoint.hostname && endpoint.hostname !== 'github.com' && !process.env.PR_POLL_GH
+      ? ['--hostname', endpoint.hostname]
+      : []
     const api = (args, input) =>
-      execFileSync(gh, ['api', ...args], { encoding: 'utf8', input, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 })
+      execFileSync(gh, ['api', ...hostArgs, ...args], { encoding: 'utf8', input, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 })
     const root = `repos/${endpoint.repoPath}/pulls/${endpoint.prNumber}`
     const actor = Number(api(['user', '--jq', '.id']))
     const existing = api([`${root}/comments`, '--paginate', '--jq', '.[] | {id, body, original_commit_id, user: .user.id}'])

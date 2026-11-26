@@ -81,8 +81,13 @@ function parsePrHttpUrl(rawUrl) {
   const prIdx = segments.findIndex((seg) => /^(?:pulls?|pull-requests|pullrequest)$/i.test(seg))
   if (prIdx >= 1 && POSITIVE_INT_RE.test(segments[prIdx + 1] ?? '')) {
     const segName = segments[prIdx].toLowerCase()
+    if (segName === 'pull-requests' || segName === 'pullrequest') {
+      throw new Error(
+        `Unsupported forge URL (${parsed.origin}${parsed.pathname}): pr-poll.mjs / pr-approve.mjs supports GitHub, Gitea/Forgejo, and GitLab; query Bitbucket or Azure DevOps directly.`,
+      )
+    }
     const repoPath = segments.slice(0, prIdx).filter((s) => s !== '_git').join('/')
-    const forgeHint = parsed.hostname.toLowerCase() === 'github.com'
+    const forgeHint = parsed.hostname.toLowerCase() === 'github.com' || segName === 'pull'
       ? 'github'
       : segName === 'pulls'
         ? 'gitea'
@@ -170,12 +175,21 @@ export function resolveForgeEndpoint({
 
   let httpOrigin = parsedUrl?.httpOrigin ?? null
   if (!httpOrigin && parsedOrigin) {
+    let allowedHostMatches = false
+    if (allowedHttpOrigin) {
+      try {
+        allowedHostMatches = new URL(allowedHttpOrigin).hostname.toLowerCase() === parsedOrigin.hostname
+      } catch {
+        allowedHostMatches = false
+      }
+    }
     if (parsedOrigin.scheme === 'http' || parsedOrigin.scheme === 'https') {
       httpOrigin = `${parsedOrigin.scheme}://${parsedOrigin.host}`
-    } else if (allowedHttpOrigin && new URL(allowedHttpOrigin).hostname.toLowerCase() === parsedOrigin.hostname) {
+    } else if (allowedHostMatches) {
       httpOrigin = allowedHttpOrigin
     } else {
-      httpOrigin = `https://${parsedOrigin.host}`
+      // Non-HTTP(S) schemes (e.g. ssh://git@host:2222/...) must use hostname without the SSH port.
+      httpOrigin = `https://${parsedOrigin.hostname}`
     }
   }
 
@@ -189,14 +203,37 @@ export function resolveForgeEndpoint({
     }
   }
 
+  const hostname = parsedUrl?.hostname ?? parsedOrigin?.hostname ?? 'github.com'
+  if (
+    !explicitForge
+    && (hostname === 'bitbucket.org' || hostname === 'dev.azure.com' || hostname.endsWith('.visualstudio.com') || parsedOrigin?.repoPath?.includes('/_git/'))
+  ) {
+    throw new Error(
+      `Unsupported forge host (${hostname}): pr-poll.mjs / pr-approve.mjs supports GitHub, Gitea/Forgejo, and GitLab; query Bitbucket or Azure DevOps directly.`,
+    )
+  }
+  const effectiveHost = parsedUrl?.host
+    ?? (parsedOrigin && (parsedOrigin.scheme === 'http' || parsedOrigin.scheme === 'https') ? parsedOrigin.host : parsedOrigin?.hostname)
+    ?? 'github.com'
+
+  let normalizedRepoOption = repoOption && !/^https?:\/\//i.test(repoOption) ? repoOption.trim().replace(/^\/+|\/+$/g, '') : ''
+  if (normalizedRepoOption) {
+    const lowerOpt = normalizedRepoOption.toLowerCase()
+    for (const prefix of [`${effectiveHost.toLowerCase()}/`, `${hostname.toLowerCase()}/`]) {
+      if (lowerOpt.startsWith(prefix) && normalizedRepoOption.slice(prefix.length).includes('/')) {
+        normalizedRepoOption = normalizedRepoOption.slice(prefix.length)
+        break
+      }
+    }
+  }
+
   const repoPath = (
-    (repoOption && !/^https?:\/\//i.test(repoOption) ? repoOption.trim().replace(/^\/+|\/+$/g, '') : '')
+    normalizedRepoOption
     || parsedUrl?.repoPath
     || parsedOrigin?.repoPath
     || ''
   )
 
-  const hostname = parsedUrl?.hostname ?? parsedOrigin?.hostname ?? 'github.com'
   const forge = explicitForge
     || parsedUrl?.forgeHint
     || (hostname === 'github.com' ? 'github' : 'gitea')
@@ -205,7 +242,7 @@ export function resolveForgeEndpoint({
     forge,
     httpOrigin: httpOrigin ?? 'https://github.com',
     hostname,
-    host: parsedUrl?.host ?? parsedOrigin?.host ?? 'github.com',
+    host: effectiveHost,
     protocol: httpOrigin?.startsWith('http://') ? 'http' : 'https',
     repoPath,
     prNumber,
@@ -323,12 +360,16 @@ function runGh(ghBin, args) {
 }
 
 export async function fetchForgePullSnapshot(endpoint, { includeActor = true, ghBin = process.env.PR_POLL_GH || 'gh' } = {}) {
-  if (endpoint.forge === 'github' && (endpoint.hostname === 'github.com' || process.env.PR_POLL_GH)) {
+  if (endpoint.forge === 'github') {
+    const hostArgs = endpoint.hostname && endpoint.hostname !== 'github.com' && !process.env.PR_POLL_GH
+      ? ['--hostname', endpoint.hostname]
+      : []
     const repo = endpoint.repoPath || runGh(ghBin, ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']).trim()
     const pr = endpoint.prNumber
     const meta = JSON.parse(
       runGh(ghBin, [
         'api',
+        ...hostArgs,
         `repos/${repo}/pulls/${pr}`,
         '--jq',
         '{state: (if .merged then "MERGED" else (.state | ascii_upcase) end), headRefOid: .head.sha, baseRefName: .base.ref, baseRefOid: .base.sha, authorId: .user.id, authorLogin: .user.login, headRepoId: .head.repo.id, baseRepoId: .base.repo.id}',
@@ -337,13 +378,13 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
     let actor = null
     if (includeActor) {
       try {
-        actor = JSON.parse(runGh(ghBin, ['api', 'user', '--jq', '{id: .id, login: .login}']))
+        actor = JSON.parse(runGh(ghBin, ['api', ...hostArgs, 'user', '--jq', '{id: .id, login: .login}']))
       } catch {
         actor = null
       }
     }
     const listGh = (path, projection) =>
-      runGh(ghBin, ['api', '--paginate', path, '--jq', `.[] | ${projection}`])
+      runGh(ghBin, ['api', ...hostArgs, '--paginate', path, '--jq', `.[] | ${projection}`])
         .split(/\r?\n/)
         .filter((line) => line.trim() !== '')
         .map((line) => JSON.parse(line))
@@ -394,25 +435,27 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
     const repoApi = `/api/v1/repos/${endpoint.repoPath}`
     const { data: pull } = await forgeFetchJson(endpoint, `${repoApi}/pulls/${endpoint.prNumber}`, { cred })
     const actorRes = includeActor ? await forgeFetchJson(endpoint, '/api/v1/user', { cred }).catch(() => ({ data: null })) : { data: null }
-    const [rawReviews, rawInline, rawIssue] = await Promise.all([
+    const [rawReviews, rawIssue] = await Promise.all([
       forgePaginateArray(endpoint, `${repoApi}/pulls/${endpoint.prNumber}/reviews`, cred),
-      forgePaginateArray(endpoint, `${repoApi}/pulls/comments`, cred).then(
-        (all) => all.filter((c) => String(c.pull_request_url ?? '').endsWith(`/${endpoint.prNumber}`) || !c.pull_request_url),
-        () => [],
-      ),
       forgePaginateArray(endpoint, `${repoApi}/issues/${endpoint.prNumber}/comments`, cred),
     ])
-    // Also collect per-review inline comments on Gitea reviews if present
-    const reviewComments = [...rawInline]
-    const seenInlineIds = new Set(reviewComments.map((c) => Number(c.id)))
+    // Gitea exposes inline diff comments per review at /pulls/{index}/reviews/{id}/comments, keyed on `comments_count`.
+    const reviewComments = []
+    const seenInlineIds = new Set()
     for (const r of rawReviews) {
-      if (Number(r.pull_comments_count) > 0 && Number.isSafeInteger(Number(r.id))) {
-        const sub = await forgePaginateArray(endpoint, `${repoApi}/pulls/${endpoint.prNumber}/reviews/${r.id}/comments`, cred).catch(() => [])
-        for (const c of sub) {
-          if (!seenInlineIds.has(Number(c.id))) {
-            seenInlineIds.add(Number(c.id))
-            reviewComments.push(c)
-          }
+      const reviewId = Number(r.id)
+      if (!Number.isSafeInteger(reviewId) || reviewId < 1) continue
+      const countField = r.comments_count ?? r.pull_comments_count
+      const shouldFetch = countField === undefined ? true : Number(countField) > 0
+      if (!shouldFetch) continue
+      const sub = await forgePaginateArray(endpoint, `${repoApi}/pulls/${endpoint.prNumber}/reviews/${reviewId}/comments`, cred)
+      for (const c of sub) {
+        if (!seenInlineIds.has(Number(c.id))) {
+          seenInlineIds.add(Number(c.id))
+          reviewComments.push({
+            ...c,
+            _parentCommitId: r.commit_id ?? null,
+          })
         }
       }
     }
@@ -459,7 +502,9 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
           user: c.user?.login ?? '',
           userId: c.user?.id ?? null,
           body,
-          commitId: (c.original_commit_id ?? c.commit_id) ? String(c.original_commit_id ?? c.commit_id).toLowerCase() : null,
+          commitId: (c.original_commit_id ?? c.commit_id ?? c._parentCommitId)
+            ? String(c.original_commit_id ?? c.commit_id ?? c._parentCommitId).toLowerCase()
+            : null,
           inReplyTo: c.resolver ? null : null,
           updatedAt,
           versionKey: itemVersionKey({ updatedAt, body }),
@@ -540,24 +585,37 @@ export async function fetchForgePullSnapshot(endpoint, { includeActor = true, gh
   }
 }
 
-const WORDING_RE = /\b(approved?|lgtm|looks good to me)\b/i
-const NEGATED_APPROVAL_RE = /\b(not|n't|cannot|can't|no longer|never)\s+(yet\s+)?approv/i
+const EXPLICIT_APPROVAL_FIRST_LINE_RE = /^Approved at ([0-9a-f]{40,64})(?:\b|$)/i
 const REVIEWED_BASE_RE = /\bReviewed base:\s*([0-9a-f]{40,64})\b/i
+const FINDING_LABEL_LINE_RE = /^\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s+)?(?:\*\*|__|`)?(?:blocking|non-blocking|nit)(?:\*\*|__|`)?(?:\s*\[[^\]]+\])?\s*[:—–-]/im
+const FINDING_BOLD_RE = /\*\*(?:blocking|non-blocking|nit)\*\*/i
 
-export function isExplicitTextApprovalForRevision(item, headSha, baseSha) {
-  const raw = String(item.body ?? '').trim()
-  if (!raw) return false
-  // Strip markdown blockquotes so a quoted "Approved at <sha>" never counts as an approval.
-  const unquoted = raw
+export function hasAffirmativeFindingLabel(body) {
+  const unquoted = String(body ?? '')
     .split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('>'))
     .join('\n')
-    .trim()
-  if (!unquoted || NEGATED_APPROVAL_RE.test(unquoted) || !WORDING_RE.test(unquoted)) return false
-  const headMatches = (unquoted.match(/\b[0-9a-f]{40,64}\b/gi) ?? []).some((tok) => tok.toLowerCase() === headSha.toLowerCase())
-  if (!headMatches) return false
+  return FINDING_LABEL_LINE_RE.test(unquoted) || FINDING_BOLD_RE.test(unquoted)
+}
+
+export function isExplicitTextApprovalForRevision(item, headSha, baseSha, requireExplicitBase = false) {
+  const raw = String(item.body ?? '').trim()
+  if (!raw) return false
+  // Strip markdown blockquotes so a quoted "Approved at <sha>" never counts as an approval.
+  const unquotedLines = raw
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('>'))
+  const unquoted = unquotedLines.join('\n').trim()
+  if (!unquoted) return false
+  const firstNonEmpty = unquotedLines.find((line) => line.trim() !== '')?.trim() ?? ''
+  const headMatch = EXPLICIT_APPROVAL_FIRST_LINE_RE.exec(firstNonEmpty)
+  if (!headMatch || headMatch[1].toLowerCase() !== headSha.toLowerCase()) return false
+  if (hasAffirmativeFindingLabel(unquoted)) return false
   const baseMatch = REVIEWED_BASE_RE.exec(unquoted)
   if (baseMatch && baseSha && baseMatch[1].toLowerCase() !== baseSha.toLowerCase()) {
+    return false
+  }
+  if (requireExplicitBase && (!baseMatch || !baseSha || baseMatch[1].toLowerCase() !== baseSha.toLowerCase())) {
     return false
   }
   return true
@@ -597,21 +655,22 @@ export function evaluateRevisionApprovals({
   const approvingItems = []
   for (const r of reviews) {
     if ((r.body ?? '').startsWith(marker)) continue
-    const textApproves = isTrustedApprover(r) && isExplicitTextApprovalForRevision(r, headSha, baseSha)
+    const textApproves = isTrustedApprover(r) && isExplicitTextApprovalForRevision(r, headSha, baseSha, baseChangedSinceWatermark)
     const formalApproves = r.state === 'APPROVED'
       && String(r.commitId ?? '').toLowerCase() === headSha.toLowerCase()
+      && !hasAffirmativeFindingLabel(r.body ?? '')
       && (!baseChangedSinceWatermark || (REVIEWED_BASE_RE.exec(r.body ?? '')?.[1]?.toLowerCase() === baseSha.toLowerCase()))
     if (textApproves || formalApproves) {
       approvingItems.push({ kind: 'review', id: r.id, body: r.body ?? '', formal: formalApproves, user: r.user })
     }
   }
   for (const c of inline) {
-    if (isTrustedApprover(c) && isExplicitTextApprovalForRevision(c, headSha, baseSha)) {
+    if (isTrustedApprover(c) && isExplicitTextApprovalForRevision(c, headSha, baseSha, baseChangedSinceWatermark)) {
       approvingItems.push({ kind: 'inline', id: c.id, body: c.body ?? '', formal: false, user: c.user })
     }
   }
   for (const c of issue) {
-    if (isTrustedApprover(c) && isExplicitTextApprovalForRevision(c, headSha, baseSha)) {
+    if (isTrustedApprover(c) && isExplicitTextApprovalForRevision(c, headSha, baseSha, baseChangedSinceWatermark)) {
       approvingItems.push({ kind: 'issue', id: c.id, body: c.body ?? '', formal: false, user: c.user })
     }
   }

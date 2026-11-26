@@ -110,8 +110,18 @@ async function evaluateOnce({ prArg, stateFile }) {
     const target = Object.fromEntries(keys.map((key, index) => [key, through?.[index] ?? now[key]]))
     const next = { ...state }
     for (const key of keys) next[key] = flag('--mark') ? Math.max(state[key] ?? 0, target[key]) : now[key]
-    next.headSha = (headOpt ?? now.headSha).toLowerCase()
-    next.baseSha = (baseOpt ?? now.baseSha).toLowerCase()
+    const nextHeadSha = (headOpt ?? now.headSha).toLowerCase()
+    const nextBaseSha = (baseOpt ?? now.baseSha).toLowerCase()
+    if (flag('--init') || state.headSha === undefined || state.headSha !== nextHeadSha) {
+      next.initialBaseForHead = nextBaseSha
+      next.baseMovedForHead = false
+    } else {
+      const initialBase = state.initialBaseForHead ?? state.baseSha ?? nextBaseSha
+      next.initialBaseForHead = initialBase
+      next.baseMovedForHead = Boolean(state.baseMovedForHead || initialBase !== nextBaseSha)
+    }
+    next.headSha = nextHeadSha
+    next.baseSha = nextBaseSha
     const prevVersions = typeof state.versions === 'object' && state.versions !== null ? state.versions : {}
     next.versions = {
       reviews: buildVersionMap(reviews, flag('--mark') ? next.maxReviewId : null, prevVersions.reviews),
@@ -165,6 +175,10 @@ async function evaluateOnce({ prArg, stateFile }) {
 
   const headChanged = state.headSha !== undefined && state.headSha !== meta.headRefOid
   const baseChanged = state.baseSha !== undefined && state.baseSha !== meta.baseRefOid
+  const baseMovedForCurrentHead = Boolean(
+    baseChanged
+    || (!headChanged && state.headSha === meta.headRefOid && (state.baseMovedForHead || (state.initialBaseForHead && state.initialBaseForHead !== meta.baseRefOid))),
+  )
   const open = meta.state === 'OPEN'
   const revisionWake = baseChanged || (flag('--watch-head') && headChanged)
 
@@ -184,7 +198,7 @@ async function evaluateOnce({ prArg, stateFile }) {
         issue,
         headSha: meta.headRefOid,
         baseSha: meta.baseRefOid,
-        baseChangedSinceWatermark: baseChanged,
+        baseChangedSinceWatermark: baseMovedForCurrentHead,
         allowedApproverLogins: allowedApprovers,
         actorId: meta.actorId,
         actorLogin: meta.actorLogin,
@@ -193,12 +207,10 @@ async function evaluateOnce({ prArg, stateFile }) {
       })
     : { approvalForHead: false, approvedTags: [], missingTags: requiredTags, approvingItems: [] }
 
-  const WORDING_RE = /\b(approved?|lgtm|looks good to me)\b/i
-  const NEGATED_RE = /\b(not|n't|cannot|can't|no longer|never)\s+(yet\s+)?approv/i
   const approvingHintItem = (item) =>
-    item.state === 'APPROVED' || (WORDING_RE.test(item.body ?? '') && !NEGATED_RE.test(item.body ?? ''))
+    item.state === 'APPROVED' || /^Approved at [0-9a-f]{40,64}\b/im.test(item.body ?? '')
   const approvalHint = authorMode && (fullApproval.approvalForHead || [...newReviews, ...newInline, ...newIssue].some(approvingHintItem))
-  const approvedReview = authorMode && reviews.some((item) => item.state === 'APPROVED' && item.commitId === meta.headRefOid && !baseChanged)
+  const approvedReview = authorMode && reviews.some((item) => item.state === 'APPROVED' && item.commitId === meta.headRefOid && !baseMovedForCurrentHead)
 
   const shape = ({ versionKey: _vk, userId: _uid, ...item }) =>
     (item.body ?? '').length > CLIP

@@ -116,12 +116,11 @@ if (!process.versions.electron) {
         '      writeFileSync(notePath, "[Antigravity CLI] Verified round 2 fix and checks pass.\\n")',
         '      const out = execFileSync(process.execPath, [',
         '        join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-approve.mjs"),',
-        '        "daq/daq-service",',
+        '        `${behavior.giteaOrigin}/daq/daq-service/pulls/12`,',
         '        "12",',
         '        cfg.head,',
         '        cfg.base,',
         '        notePath,',
-        '        "--pr-url", `${behavior.giteaOrigin}/daq/daq-service/pulls/12`,',
         '      ], { encoding: "utf8", env: { ...process.env, GITEA_TOKEN: "e2e-tok" } })',
         '      const parsedApprove = JSON.parse(out)',
         '      execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "approved", "--id", String(parsedApprove.id)], { stdio: "inherit" })',
@@ -267,6 +266,11 @@ class AgyStub {
       for await (const c of req) chunks.push(c)
       const bodyText = Buffer.concat(chunks).toString('utf8')
 
+      if (url.pathname === '/api/v1/version') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ version: '1.22.0' }))
+        return
+      }
       if (url.pathname === '/api/v1/user') {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ id: 7, login: 'e2e-user' }))
@@ -319,7 +323,8 @@ class AgyStub {
         res.end(JSON.stringify(found ?? { message: 'Not found' }))
         return
       }
-      if (url.pathname === '/api/v1/repos/daq/daq-service/pulls/12/comments') {
+      const reviewComments = /^\/api\/v1\/repos\/daq\/daq-service\/pulls\/12\/reviews\/(\d+)\/comments$/.exec(url.pathname)
+      if (reviewComments) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify([]))
         return
@@ -369,9 +374,8 @@ class AgyStub {
     await writeFile(join(repo, 'service.ts'), 'export const version = 1\n')
     git('add', '.')
     git('commit', '-q', '-m', 'initial main')
-    const baseSha = git('rev-parse', 'HEAD')
+    const mergeBaseSha = git('rev-parse', 'HEAD')
     git('push', '-q', originBare, 'main:refs/heads/main')
-    git('update-ref', 'refs/remotes/origin/main', baseSha)
 
     git('checkout', '-q', '-b', 'feat/gitea-pr-12')
     await writeFile(join(repo, 'service.ts'), 'export const version = 2\n')
@@ -380,6 +384,18 @@ class AgyStub {
     const head1Sha = git('rev-parse', 'HEAD')
     git('push', '-q', originBare, 'feat/gitea-pr-12:refs/heads/feat/gitea-pr-12')
     git('update-ref', 'refs/remotes/origin/feat/gitea-pr-12', head1Sha)
+
+    // Advance target branch `main` AFTER branching `feat/gitea-pr-12` so `origin/main` tip !== `merge-base(origin/main, head1Sha)`!
+    // This verifies divergent branches work end-to-end across resolveGitRevisionsForReview, pr-approve.mjs, and pr_reviewers_finish("approved").
+    git('checkout', '-q', 'main')
+    await writeFile(join(repo, 'unrelated-main.ts'), 'export const mainExtra = true\n')
+    git('add', '.')
+    git('commit', '-q', '-m', 'advance main past merge-base')
+    const baseSha = git('rev-parse', 'HEAD')
+    assert.notEqual(baseSha, mergeBaseSha, 'target branch tip advanced past merge-base')
+    git('push', '-q', originBare, 'main:refs/heads/main')
+    git('update-ref', 'refs/remotes/origin/main', baseSha)
+    git('checkout', '-q', 'feat/gitea-pr-12')
 
     giteaBase = baseSha
     giteaHead = head1Sha
@@ -517,7 +533,7 @@ class AgyStub {
             pr: 12,
             pr_url: prUrl,
             head: head1Sha,
-            base: baseSha,
+            base: 'origin/main',
           },
         },
       },
@@ -527,6 +543,7 @@ class AgyStub {
     const startPayload = JSON.parse(startRes.json.result.content[0].text)
     const groupId = startPayload.group.id
     assert.equal(startPayload.group.prNumber, 12)
+    assert.equal(startPayload.group.base, baseSha, 'divergent origin/main resolves to target branch tip SHA, not merge-base')
     assert.deepEqual(startPayload.expectedReviewerTags, ['[Antigravity CLI]'])
 
     let incompletePayload = null
@@ -626,7 +643,7 @@ class AgyStub {
           name: 'pr_reviewers_round',
           arguments: {
             head: head2Sha,
-            base: baseSha,
+            base: 'origin/main',
             summary: `🤖 Bumped version to 3 in ${head2Sha}`,
           },
         },

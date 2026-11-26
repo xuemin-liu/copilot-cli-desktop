@@ -5,13 +5,29 @@ import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
+import { pathToFileURL } from 'node:url'
 import {
+  clearForgeProbeCacheForTests,
+  fetchForgePullEvidence,
   hashSeatReceiptToken,
   isItemExplicitApproval,
   resolveTrustedForgeEndpoint,
+  resolveVerifiedForgeKind,
   verifySeatOutcomeFromSnapshot,
   type ForgePullEvidenceSnapshot,
 } from './pr-forge-evidence.js'
+
+interface PrForgeModule {
+  evaluateRevisionApprovals: (opts: Record<string, unknown>) => { approvalForHead: boolean }
+  resolveForgeEndpoint: (opts: Record<string, unknown>) => {
+    forge: string
+    httpOrigin: string
+    hostname: string
+    host: string
+    repoPath: string
+    prNumber: number
+  }
+}
 
 const TOOLS_DIR = resolve('resources/pr-workflows')
 const PR_POLL = join(TOOLS_DIR, 'pr-poll.mjs')
@@ -69,6 +85,23 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
   let currentHead = HEAD_1
   let currentBase = BASE_1
   let nextCommentId = 500
+  const reviewInlineByReviewId = new Map<number, Array<Record<string, unknown>>>([
+    [
+      11,
+      [
+        {
+          id: 21,
+          path: 'src/index.ts',
+          position: 4,
+          user: { id: 7, login: 'alice' },
+          body: 'Non-blocking: [Codex CLI] inline review comment on Gitea review #11',
+          original_commit_id: HEAD_1,
+          created_at: '2026-11-26T00:00:30Z',
+          updated_at: '2026-11-26T00:00:30Z',
+        },
+      ],
+    ],
+  ])
   const reviews: Array<Record<string, unknown>> = [
     {
       id: 10,
@@ -76,8 +109,19 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       user: { id: 7, login: 'alice' },
       body: 'Non-blocking: [Claude Code] check edge case',
       commit_id: HEAD_1,
+      comments_count: 0,
       submitted_at: '2026-11-26T00:00:00Z',
       updated_at: '2026-11-26T00:00:00Z',
+    },
+    {
+      id: 11,
+      state: 'COMMENT',
+      user: { id: 7, login: 'alice' },
+      body: '',
+      commit_id: HEAD_1,
+      comments_count: 1,
+      submitted_at: '2026-11-26T00:00:30Z',
+      updated_at: '2026-11-26T00:00:30Z',
     },
   ]
   const issueComments: Array<Record<string, unknown>> = []
@@ -88,6 +132,11 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     for await (const c of req) chunks.push(c as Buffer)
     const rawBody = Buffer.concat(chunks).toString('utf8')
 
+    if (url.pathname === '/api/v1/version') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: '1.22.0' }))
+      return
+    }
     if (url.pathname === '/api/v1/user') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ id: 7, login: 'alice' }))
@@ -139,9 +188,12 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       res.end(JSON.stringify(found ?? { message: 'Not found' }))
       return
     }
-    if (url.pathname === '/api/v1/repos/daq/service/pulls/12/comments') {
+    const giteaReviewComments = /^\/api\/v1\/repos\/daq\/service\/pulls\/12\/reviews\/(\d+)\/comments$/.exec(url.pathname)
+    if (giteaReviewComments) {
+      const page = Number(url.searchParams.get('page') ?? '1')
+      const list = page === 1 ? (reviewInlineByReviewId.get(Number(giteaReviewComments[1])) ?? []) : []
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify([]))
+      res.end(JSON.stringify(list))
       return
     }
     if (url.pathname === '/api/v1/repos/daq/service/issues/12/comments') {
@@ -199,7 +251,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     assert.notEqual(hostMismatch.code, 0)
     assert.match(hostMismatch.stderr, /does not match Git origin host/i)
 
-    // 3. Initial snapshot on Gitea succeeds when origin matches http://127.0.0.1:<port>:
+    // 3. Initial snapshot on Gitea succeeds when origin matches http://127.0.0.1:<port>, including per-review inline comments:
     const snap1 = await runNodeScript(
       PR_POLL,
       ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
@@ -210,13 +262,46 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     assert.equal(snap1Json.forge, 'gitea')
     assert.equal(snap1Json.headSha, HEAD_1)
     assert.equal(snap1Json.baseSha, BASE_1)
-    assert.equal(snap1Json.newReviews.length, 1)
+    assert.equal(snap1Json.newReviews.length, 1, 'empty-body grouped inline review #11 is suppressed from newReviews')
+    assert.equal(snap1Json.newInline.length, 1, 'inline comment #21 fetched from /pulls/12/reviews/11/comments')
+    assert.equal(snap1Json.newInline[0].id, 21)
     assert.equal(snap1Json.approvalForHead, false)
 
-    // Mark review 10 as handled:
+    // Verify Desktop resolveVerifiedForgeKind (/api/v1/version probe) + fetchForgePullEvidence + parentReviewId receipt matching on Gitea:
+    clearForgeProbeCacheForTests()
+    const prevGiteaTok = process.env.GITEA_TOKEN
+    process.env.GITEA_TOKEN = 'test-gitea-token'
+    try {
+      const trustedEp = resolveTrustedForgeEndpoint({ origin: gitOrigin, prNumber: 12, prUrl })
+      assert.equal(trustedEp?.forge, 'probe')
+      const verifiedEp = await resolveVerifiedForgeKind({ endpoint: trustedEp!, projectCwd: dir, runner: null })
+      assert.equal(verifiedEp?.forge, 'gitea')
+      const liveEv = await fetchForgePullEvidence({ endpoint: verifiedEp!, userDataDir: dir, projectCwd: dir, runner: null })
+      const inlineEv = liveEv.items.find((i) => i.kind === 'inline' && i.id === 21)
+      assert.ok(inlineEv, 'Desktop fetchForgePullEvidence reads Gitea /reviews/11/comments')
+      assert.equal(inlineEv.parentReviewId, 11)
+      const parentReceiptMatch = verifySeatOutcomeFromSnapshot({
+        snapshot: liveEv,
+        cli: 'codex',
+        totalRequiredSeats: 2,
+        head: HEAD_1,
+        base: BASE_1,
+        baseMovedInGroup: false,
+        roundStartedAtMs: Date.parse('2026-11-26T00:00:00Z'),
+        marker: '🤖 ',
+        claimedEvidenceKeys: new Set(),
+        receipt: { kind: 'findings', remoteId: 11, itemType: 'review' },
+      })
+      assert.deepEqual(parentReceiptMatch, { verdict: 'findings', claimedKeys: ['inline:21'] })
+    } finally {
+      if (prevGiteaTok === undefined) delete process.env.GITEA_TOKEN
+      else process.env.GITEA_TOKEN = prevGiteaTok
+    }
+
+    // Mark review 11 and inline 21 as handled:
     const mark1 = await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '10,0,0', '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
       { env },
     )
     assert.equal(mark1.code, 0, mark1.stderr)
@@ -258,34 +343,34 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     // Mark the edited version so versions map updates:
     await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '10,0,0', '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
       { env },
     )
 
-    // 5. Post approval for Claude Code via pr-approve.mjs (and verify deduplication on repeat):
+    // 5. Post approval for Claude Code via pr-approve.mjs using full PR URL as first arg (and verify deduplication on repeat):
     const noteClaude = join(dir, 'claude-approve.md')
     writeFileSync(noteClaude, '[Claude Code] Verified build and unit tests pass.\n')
     const approve1 = await runNodeScript(
       PR_APPROVE,
-      ['daq/service', '12', HEAD_1, BASE_1, noteClaude, '--pr-url', prUrl, '--origin', gitOrigin],
+      [prUrl, '12', HEAD_1, BASE_1, noteClaude, '--origin', gitOrigin],
       { env },
     )
     assert.equal(approve1.code, 0, approve1.stderr)
-    assert.equal(reviews.length, 2)
-    assert.match(String(reviews[1]!.body), new RegExp(`^Approved at ${HEAD_1}\\n\\n\\[Claude Code\\][\\s\\S]*Reviewed base: ${BASE_1}$`))
+    assert.equal(reviews.length, 3)
+    assert.match(String(reviews[2]!.body), new RegExp(`^Approved at ${HEAD_1}\\n\\n\\[Claude Code\\][\\s\\S]*Reviewed base: ${BASE_1}$`))
 
     const approveDup = await runNodeScript(
       PR_APPROVE,
-      ['daq/service', '12', HEAD_1, BASE_1, noteClaude, '--pr-url', prUrl, '--origin', gitOrigin],
+      ['omaha-ignored/daq/service'.replace('omaha-ignored', `127.0.0.1:${port}`), '12', HEAD_1, BASE_1, noteClaude, '--pr-url', prUrl, '--origin', gitOrigin],
       { env },
     )
     assert.equal(approveDup.code, 0, approveDup.stderr)
-    assert.equal(reviews.length, 2, 'pr-approve.mjs deduplicates matching existing approval')
+    assert.equal(reviews.length, 3, 'pr-approve.mjs deduplicates matching existing approval even with host-prefixed repo arg')
 
     // Mark watermark past review 501, then verify full-list approvalForHead STILL stays true across --mark!
     await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', `${nextCommentId},0,0`, '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', `${nextCommentId},21,0`, '--head', HEAD_1, '--base', BASE_1],
       { env },
     )
     const afterMarkSnap = await runNodeScript(
@@ -366,12 +451,21 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     // Mark watermarks at (HEAD_1, BASE_1):
     await runNodeScript(
       PR_POLL,
-      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', `${nextCommentId},0,${nextCommentId}`, '--head', HEAD_1, '--base', BASE_1],
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', `${nextCommentId},21,${nextCommentId}`, '--head', HEAD_1, '--base', BASE_1],
       { env },
     )
 
+    // Also add a legacy unbound "Approved at <head>" comment (WITHOUT "Reviewed base:") before moving base:
+    issueComments.push({
+      id: ++nextCommentId,
+      user: { id: 7, login: 'alice' },
+      body: `Approved at ${HEAD_1}\n\n[Claude Code] legacy unbound approval without Reviewed base`,
+      created_at: '2026-11-26T00:06:30Z',
+      updated_at: '2026-11-26T00:06:30Z',
+    })
+
     // 6. Move ONLY the PR base (BASE_1 -> BASE_2) while HEAD_1 stays unchanged!
-    // Watcher (--invert --watch-head) MUST wake with baseChanged: true AND approvalForHead MUST become false!
+    // Watcher (--invert --watch-head) MUST wake with baseChanged: true AND approvalForHead MUST become false (even with legacy unbound "Approved at <head>")!
     currentBase = BASE_2
     const baseMovedWake = await runNodeScript(
       PR_POLL,
@@ -382,7 +476,39 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     const baseMovedJson = JSON.parse(baseMovedWake.stdout)
     assert.equal(baseMovedJson.headChanged, false)
     assert.equal(baseMovedJson.baseChanged, true, 'base-only move wakes --watch-head')
-    assert.equal(baseMovedJson.approvalForHead, false, 'approval bound to BASE_1 is invalidated when base moves to BASE_2')
+
+    const authorBaseMovedSnap = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot', '--require-tag', '[Claude Code]'],
+      { env },
+    )
+    assert.equal(JSON.parse(authorBaseMovedSnap.stdout).approvalForHead, false, 'legacy unbound and BASE_1 approvals invalidated when base moves to BASE_2')
+
+    // Even AFTER --mark records BASE_2 for the same HEAD_1, baseMovedForHead persists so unbound approvals stay invalid until a BASE_2 approval is posted!
+    await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', `${nextCommentId},21,${nextCommentId}`, '--head', HEAD_1, '--base', BASE_2],
+      { env },
+    )
+    const postMarkAfterBaseMove = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot', '--require-tag', '[Claude Code]'],
+      { env },
+    )
+    assert.equal(JSON.parse(postMarkAfterBaseMove.stdout).approvalForHead, false, 'baseMovedForHead persists across --mark for unchanged head')
+
+    const approveBase2 = await runNodeScript(
+      PR_APPROVE,
+      [prUrl, '12', HEAD_1, BASE_2, noteClaude, '--origin', gitOrigin],
+      { env },
+    )
+    assert.equal(approveBase2.code, 0, approveBase2.stderr)
+    const reapprovedBase2 = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot', '--require-tag', '[Claude Code]'],
+      { env },
+    )
+    assert.equal(JSON.parse(reapprovedBase2.stdout).approvalForHead, true, 'new approval bound to Reviewed base: BASE_2 restores approvalForHead')
   } finally {
     await closeServer(giteaServer)
     rmSync(dir, { recursive: true, force: true })
@@ -542,30 +668,81 @@ test('pr-seat-receipt.mjs posts seat-scoped token + metadata to loopback /pr-sea
   }
 })
 
-test('pr-forge-evidence verifies seat outcomes accurately, rejects mixed approval+findings, and excludes Bitbucket/ADO from Gitea adapter', () => {
-  assert.equal(
-    resolveTrustedForgeEndpoint({
-      origin: 'https://bitbucket.org/workspace/repo.git',
-      prNumber: 5,
-      prUrl: 'https://bitbucket.org/workspace/repo/pull-requests/5',
-    }),
-    null,
-  )
-  assert.equal(
-    resolveTrustedForgeEndpoint({
-      origin: 'https://dev.azure.com/org/proj/_git/repo',
-      prNumber: 5,
-      prUrl: 'https://dev.azure.com/org/proj/_git/repo/pullrequest/5',
-    }),
-    null,
-  )
+test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged chatter, round acknowledgements, SSH custom ports, and unknown-host probing', async () => {
+  const { evaluateRevisionApprovals, resolveForgeEndpoint } = (await import(
+    pathToFileURL(join(TOOLS_DIR, 'pr-forge.mjs')).href
+  )) as PrForgeModule
+  clearForgeProbeCacheForTests()
+  // Bitbucket (Cloud & Server) and Azure DevOps (Cloud & Server) return null in Desktop so seat receipts apply, and throw clearly in CLI helpers:
+  for (const [origin, prUrl] of [
+    ['https://bitbucket.org/workspace/repo.git', 'https://bitbucket.org/workspace/repo/pull-requests/5'],
+    ['https://bitbucket.corp.example/scm/proj/repo.git', 'https://bitbucket.corp.example/scm/proj/repo/pull-requests/5'],
+    ['https://dev.azure.com/org/proj/_git/repo', 'https://dev.azure.com/org/proj/_git/repo/pullrequest/5'],
+    ['https://ado.corp.example/tfs/DefaultCollection/proj/_git/repo', 'https://ado.corp.example/tfs/DefaultCollection/proj/_git/repo/pullrequest/5'],
+  ] as const) {
+    assert.equal(resolveTrustedForgeEndpoint({ origin, prNumber: 5, prUrl }), null)
+    assert.throws(() => resolveForgeEndpoint({ prInput: prUrl, originOption: origin }), /Unsupported forge/)
+  }
+
+  // Self-hosted Gitea URLs start as 'probe' until /api/v1/version confirms Gitea; unknown 404 hosts resolve to null (not Gitea!):
   const giteaEp = resolveTrustedForgeEndpoint({
     origin: 'http://omaha:3001/daq/daq-service.git',
     prNumber: 12,
     prUrl: 'http://omaha:3001/daq/daq-service/pulls/12',
   })
-  assert.equal(giteaEp?.forge, 'gitea')
+  assert.equal(giteaEp?.forge, 'probe')
   assert.equal(giteaEp?.httpOrigin, 'http://omaha:3001')
+
+  const unknownServer = createServer((_req, res) => {
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ message: 'Not Found' }))
+  })
+  const unknownPort = await listenServer(unknownServer)
+  try {
+    const unknownOrigin = `http://127.0.0.1:${unknownPort}`
+    const unknownEp = resolveTrustedForgeEndpoint({
+      origin: `${unknownOrigin}/org/repo.git`,
+      prNumber: 9,
+      prUrl: `${unknownOrigin}/org/repo/pulls/9`,
+    })
+    assert.equal(unknownEp?.forge, 'probe')
+    const verifiedUnknown = await resolveVerifiedForgeKind({ endpoint: unknownEp!, projectCwd: tmpdir(), runner: null })
+    assert.equal(verifiedUnknown, null, 'unknown non-Gitea/non-GitLab server returns null instead of 404ing on Gitea API')
+  } finally {
+    await closeServer(unknownServer)
+  }
+
+  // SSH non-default port (ssh://git@gitea.example.com:2222/...) NEVER leaks :2222 into HTTPS origin/host:
+  const sshDesktopEp = resolveTrustedForgeEndpoint({
+    origin: 'ssh://git@gitea.example.com:2222/daq/daq-service.git',
+    prNumber: 12,
+    prUrl: null,
+  })
+  assert.equal(sshDesktopEp?.httpOrigin, 'https://gitea.example.com')
+  assert.equal(sshDesktopEp?.host, 'gitea.example.com')
+
+  const sshCliEp = resolveForgeEndpoint({
+    prInput: '12',
+    originOption: 'ssh://git@gitea.example.com:2222/daq/daq-service.git',
+  })
+  assert.equal(sshCliEp.httpOrigin, 'https://gitea.example.com')
+  assert.equal(sshCliEp.host, 'gitea.example.com')
+
+  // Host-prefixed repoOption ('omaha:3001/daq/daq-service') is normalized cleanly, and GitHub Enterprise '/pull/<n>' URLs infer forge 'github':
+  const hostPrefixedEp = resolveForgeEndpoint({
+    prInput: '12',
+    repoOption: 'omaha:3001/daq/daq-service',
+    prUrlOption: 'http://omaha:3001/daq/daq-service/pulls/12',
+    originOption: 'http://omaha:3001/daq/daq-service.git',
+  })
+  assert.equal(hostPrefixedEp.repoPath, 'daq/daq-service')
+  const gheEp = resolveForgeEndpoint({
+    prInput: 'https://github.corp.example/org/repo/pull/42',
+    originOption: 'git@github.corp.example:org/repo.git',
+  })
+  assert.equal(gheEp.forge, 'github')
+  assert.equal(gheEp.hostname, 'github.corp.example')
+  assert.equal(gheEp.repoPath, 'org/repo')
 
   const roundStart = Date.parse('2026-11-26T02:00:00Z')
   const snapshot: ForgePullEvidenceSnapshot = {
@@ -607,7 +784,7 @@ test('pr-forge-evidence verifies seat outcomes accurately, rejects mixed approva
         commitId: HEAD_1,
         createdAtMs: roundStart + 2_000,
       },
-      // Clean base-bound approval from Codex:
+      // Clean base-bound approval from Codex PLUS a polite tagged round acknowledgement note in the same round (must stay 'approved'!):
       {
         kind: 'issue',
         id: 4,
@@ -616,6 +793,15 @@ test('pr-forge-evidence verifies seat outcomes accurately, rejects mixed approva
         body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Codex CLI] checks ran`,
         commitId: null,
         createdAtMs: roundStart + 3_000,
+      },
+      {
+        kind: 'issue',
+        id: 5,
+        user: 'alice',
+        userId: 7,
+        body: '[Codex CLI] Round 2: both earlier findings are verified fixed, thanks.',
+        commitId: null,
+        createdAtMs: roundStart + 3_500,
       },
     ],
   }
@@ -645,24 +831,124 @@ test('pr-forge-evidence verifies seat outcomes accurately, rejects mixed approva
     marker: '🤖 ',
     claimedEvidenceKeys: claimed,
   })
-  assert.deepEqual(codexOutcome, { verdict: 'approved', claimedKeys: ['issue:4'] })
+  assert.deepEqual(codexOutcome, { verdict: 'approved', claimedKeys: ['issue:4'] }, 'tagged non-finding acknowledgement note does not downgrade approval')
 
-  // Negated or quoted approvals never match isItemExplicitApproval:
-  assert.equal(
-    isItemExplicitApproval(
-      {
-        kind: 'issue',
-        id: 9,
-        user: 'alice',
-        userId: 7,
-        body: `> Approved at ${HEAD_1}\nNot approved yet at ${HEAD_1}`,
-        commitId: null,
-        createdAtMs: roundStart,
-      },
-      HEAD_1,
-      BASE_1,
+  // Findings review naming head SHA + the word "approved" MUST NEVER match approval in either Desktop or pr-forge.mjs!
+  for (const nonApprovalBody of [
+    `[Claude Code] Review of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
+    `this cannot be approved at ${HEAD_1} until fixed`,
+    `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\nNon-blocking: [Claude Code] still needs a null check`,
+    `> Approved at ${HEAD_1}\nNot approved yet at ${HEAD_1}`,
+  ]) {
+    assert.equal(
+      isItemExplicitApproval(
+        { kind: 'issue', id: 9, user: 'alice', userId: 7, body: nonApprovalBody, commitId: null, createdAtMs: roundStart },
+        HEAD_1,
+        BASE_1,
+        false,
+      ),
       false,
-    ),
-    false,
-  )
+      `Desktop rejected non-approval: ${nonApprovalBody.slice(0, 48)}`,
+    )
+    const cliEval = evaluateRevisionApprovals({
+      reviews: [],
+      inline: [],
+      issue: [{ id: 9, user: 'alice', userId: 7, body: nonApprovalBody }],
+      headSha: HEAD_1,
+      baseSha: BASE_1,
+      actorId: 7,
+      actorLogin: 'alice',
+    })
+    assert.equal(cliEval.approvalForHead, false, `pr-forge.mjs rejected non-approval: ${nonApprovalBody.slice(0, 48)}`)
+  }
+
+  // Findings review naming head SHA + "approved" settles as 'findings' (never 'approved'):
+  const findingsWithApprovedWord = verifySeatOutcomeFromSnapshot({
+    snapshot: {
+      ...snapshot,
+      items: [
+        {
+          kind: 'review',
+          id: 55,
+          state: 'COMMENTED',
+          user: 'alice',
+          userId: 7,
+          body: `[Claude Code] Review of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
+          commitId: HEAD_1,
+          createdAtMs: roundStart + 1_000,
+        },
+      ],
+    },
+    cli: 'claude',
+    totalRequiredSeats: 2,
+    head: HEAD_1,
+    base: BASE_2,
+    baseMovedInGroup: false,
+    roundStartedAtMs: roundStart,
+    marker: '🤖 ',
+    claimedEvidenceKeys: new Set(),
+  })
+  assert.deepEqual(findingsWithApprovedWord, { verdict: 'findings', claimedKeys: ['review:55'] })
+
+  // With 1 required seat, untagged author conversation chatter ("Testing this on macOS now") neither turns a silent exit into 'findings' nor overrides a valid approval!
+  const singleSeatSilentWithChatter = verifySeatOutcomeFromSnapshot({
+    snapshot: {
+      ...snapshot,
+      items: [
+        {
+          kind: 'issue',
+          id: 70,
+          user: 'alice',
+          userId: 7,
+          body: 'Testing this on macOS now',
+          commitId: null,
+          createdAtMs: roundStart + 1_000,
+        },
+      ],
+    },
+    cli: 'claude',
+    totalRequiredSeats: 1,
+    head: HEAD_1,
+    base: BASE_2,
+    baseMovedInGroup: false,
+    roundStartedAtMs: roundStart,
+    marker: '🤖 ',
+    claimedEvidenceKeys: new Set(),
+  })
+  assert.equal(singleSeatSilentWithChatter, null, 'untagged conversation chatter does not turn silent single seat into findings')
+
+  const singleSeatApprovedWithChatter = verifySeatOutcomeFromSnapshot({
+    snapshot: {
+      ...snapshot,
+      items: [
+        {
+          kind: 'issue',
+          id: 70,
+          user: 'alice',
+          userId: 7,
+          body: 'Testing this on macOS now',
+          commitId: null,
+          createdAtMs: roundStart + 1_000,
+        },
+        {
+          kind: 'issue',
+          id: 71,
+          user: 'alice',
+          userId: 7,
+          body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Claude Code] all green`,
+          commitId: null,
+          createdAtMs: roundStart + 2_000,
+        },
+      ],
+    },
+    cli: 'claude',
+    totalRequiredSeats: 1,
+    head: HEAD_1,
+    base: BASE_2,
+    baseMovedInGroup: true,
+    roundStartedAtMs: roundStart,
+    marker: '🤖 ',
+    claimedEvidenceKeys: new Set(),
+  })
+  assert.deepEqual(singleSeatApprovedWithChatter, { verdict: 'approved', claimedKeys: ['issue:71'] })
 })

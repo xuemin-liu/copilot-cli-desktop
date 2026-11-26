@@ -417,8 +417,9 @@ export function buildReviewerBrief(options: {
   const skillRef = options.reviewPrSkillPath
     ? `Read and follow the packaged \`review-pr\` workflow in "${options.reviewPrSkillPath}" for this single managed round.`
     : 'Follow the `review-pr` workflow for this single managed round.'
+  const approveTargetArg = options.prUrl || options.repository
   const approveHelperHint = options.prToolsDir && options.prNumber !== null
-    ? `\n   - When \`$COPILOT_DESKTOP_PR_TOOLS\` is available on GitHub, Gitea/Forgejo, or GitLab, you may post your current-head approval with \`node "${options.prToolsDir}/pr-approve.mjs" "${options.repository}" ${options.prNumber} ${options.head} ${options.base} <temp-note-file>${options.prUrl ? ` --pr-url "${options.prUrl}"` : ''}\` (where \`<temp-note-file>\` starts with \`${tag} \` so the comment begins \`Approved at ${options.head}\\n\\n${tag} ...\\n\\nReviewed base: ${options.base}\`).`
+    ? `\n   - When \`$COPILOT_DESKTOP_PR_TOOLS\` is available on GitHub, Gitea/Forgejo, or GitLab, you may post your current-head approval with \`node "${options.prToolsDir}/pr-approve.mjs" "${approveTargetArg}" ${options.prNumber} ${options.head} ${options.base} <temp-note-file>\` (where \`<temp-note-file>\` starts with \`${tag} \` so the comment begins \`Approved at ${options.head}\\n\\n${tag} ...\\n\\nReviewed base: ${options.base}\`).`
     : ''
   const receiptHint = options.prToolsDir && options.seatReceiptConfigPath
     ? `\n   - Immediately after your review or approval comment lands on the PR host, register its numeric remote review/comment ID with Desktop via \`node "${options.prToolsDir}/pr-seat-receipt.mjs" --kind <approved|findings> --id <remote-id>\`.`
@@ -827,7 +828,7 @@ export class TempReviewerRegistry {
     return group
   }
 
-  resetSeatGeneration(groupId: string, cli: ReviewerCli, options?: { keepArea?: boolean }): TempReviewerSeat {
+  resetSeatGeneration(groupId: string, cli: ReviewerCli, options?: { keepArea?: boolean; clearForceSkip?: boolean }): TempReviewerSeat {
     const group = this.groups.get(groupId)
     const seat = group?.requiredSeats.get(cli)
     if (!group || group.stage === 'ended' || !seat) throw new Error('That reviewer seat is not active')
@@ -845,7 +846,7 @@ export class TempReviewerRegistry {
     seat.seatReceiptTokenHash = null
     seat.submittedReceipt = null
     seat.roundStartedAt = Date.now()
-    if (!options?.keepArea) {
+    if (options?.clearForceSkip === true) {
       group.skippedSeatsForHead.delete(cli)
     }
     group.lastObservedHostSettledKey = null
@@ -1072,5 +1073,136 @@ export class TempReviewerRegistry {
 
   wakeAll(): void {
     for (const waiter of [...this.waiters]) waiter.resolve()
+  }
+}
+
+/**
+ * Reconciles a temporary reviewer seat's completion or receipt against remote forge evidence while guarding against
+ * concurrent round advances, retries, or timeout transitions (`timed-out`) that occur while `loadEvidence` is in flight.
+ */
+export async function reconcileSeatWithEvidenceLoader(options: {
+  registry: TempReviewerRegistry
+  group: TempReviewerGroup
+  seat: TempReviewerSeat
+  trigger: 'completed' | 'crashed' | 'receipt' | 'idle'
+  isShuttingDown?: () => boolean
+  onClearTimer?: (seat: TempReviewerSeat) => void
+  onBroadcast?: () => void
+  loadEvidence: () => Promise<
+    | { supported: true; verified: { verdict: 'approved' | 'findings'; claimedKeys: string[] } | null }
+    | { supported: false }
+  >
+}): Promise<{ ok: boolean; message: string }> {
+  const {
+    registry,
+    group,
+    seat,
+    trigger,
+    isShuttingDown = () => false,
+    onClearTimer,
+    onBroadcast,
+    loadEvidence,
+  } = options
+
+  const expectedGen = seat.generation
+  const expectedRound = group.round
+  const isGroupEnded = (): boolean => group.stage === 'ended'
+  const isStillActiveInRound = (): boolean => (
+    !isShuttingDown()
+    && !isGroupEnded()
+    && group.round === expectedRound
+    && group.requiredSeats.get(seat.cli) === seat
+    && seat.generation === expectedGen
+    && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
+  )
+
+  if (
+    isShuttingDown()
+    || isGroupEnded()
+    || group.round !== expectedRound
+    || group.requiredSeats.get(seat.cli) !== seat
+    || seat.generation !== expectedGen
+  ) {
+    return { ok: false, message: 'This temporary reviewer seat is no longer active.' }
+  }
+  if (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running') {
+    return {
+      ok: seat.lifecycle === 'approved' || seat.lifecycle === 'findings',
+      message: `Seat already settled as ${seat.lifecycle}.`,
+    }
+  }
+
+  try {
+    const loaded = await loadEvidence()
+    if (!isStillActiveInRound()) {
+      return { ok: false, message: 'Seat changed or timed out while verifying PR evidence.' }
+    }
+    if (loaded.supported) {
+      if (loaded.verified) {
+        onClearTimer?.(seat)
+        registry.recordSeatOutcome(seat, loaded.verified.verdict, {
+          error: null,
+          claimedKeys: loaded.verified.claimedKeys,
+        })
+        onBroadcast?.()
+        return {
+          ok: true,
+          message: `Verified ${loaded.verified.verdict} on PR (${loaded.verified.claimedKeys.join(', ')}).`,
+        }
+      }
+    } else if (seat.submittedReceipt) {
+      onClearTimer?.(seat)
+      registry.recordSeatOutcome(seat, seat.submittedReceipt.kind, { error: null })
+      onBroadcast?.()
+      return {
+        ok: true,
+        message: `Recorded ${seat.submittedReceipt.kind} receipt #${seat.submittedReceipt.remoteId}.`,
+      }
+    }
+
+    if (trigger === 'receipt') {
+      return {
+        ok: false,
+        message: `Could not verify review/comment receipt on the PR host for head ${group.head.slice(0, 12)}. Confirm your post landed on the PR and includes [${sessionCliLabel(seat.cli)}].`,
+      }
+    }
+    if (trigger === 'idle') {
+      return { ok: false, message: 'No verified PR post yet.' }
+    }
+    onClearTimer?.(seat)
+    if (trigger === 'crashed') {
+      registry.recordSeatOutcome(seat, 'failed', {
+        error: 'Reviewer session exited with an error before posting to the PR; click Retry or Dismiss.',
+      })
+    } else {
+      registry.recordSeatOutcome(seat, 'incomplete', {
+        error: 'Reviewer exited without a verified review or approval on the PR; click Retry or Dismiss.',
+      })
+    }
+    onBroadcast?.()
+    return { ok: false, message: seat.error ?? 'Reviewer incomplete.' }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (!isStillActiveInRound()) {
+      return { ok: false, message: detail }
+    }
+    if (trigger === 'receipt') {
+      return { ok: false, message: `Could not verify receipt on PR host: ${detail}` }
+    }
+    if (trigger === 'idle') {
+      return { ok: false, message: detail }
+    }
+    onClearTimer?.(seat)
+    if (trigger === 'crashed') {
+      registry.recordSeatOutcome(seat, 'failed', {
+        error: `Reviewer crashed and PR verification failed (${detail}); click Retry or Dismiss.`,
+      })
+    } else {
+      registry.recordSeatOutcome(seat, 'incomplete', {
+        error: `Could not verify reviewer output on the PR host (${detail}); click Retry or Dismiss.`,
+      })
+    }
+    onBroadcast?.()
+    return { ok: false, message: detail }
   }
 }

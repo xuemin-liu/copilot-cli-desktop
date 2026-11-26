@@ -1,16 +1,19 @@
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { GitRunner } from './git-runner.js'
 import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
 import { githubCliApi } from './workflow-github.js'
 
 const SHA_RE = /^[0-9a-f]{40,64}$/i
-const WORDING_RE = /\b(approved?|lgtm|looks good to me)\b/i
-const NEGATED_APPROVAL_RE = /\b(not|n't|cannot|can't|no longer|never)\s+(yet\s+)?approv/i
+const EXPLICIT_APPROVAL_FIRST_LINE_RE = /^Approved at ([0-9a-f]{40,64})(?:\b|$)/i
 const REVIEWED_BASE_RE = /\bReviewed base:\s*([0-9a-f]{40,64})\b/i
+const FINDING_LABEL_LINE_RE = /^\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s+)?(?:\*\*|__|`)?(?:blocking|non-blocking|nit)(?:\*\*|__|`)?(?:\s*\[[^\]]+\])?\s*[:—–-]/im
+const FINDING_BOLD_RE = /\*\*(?:blocking|non-blocking|nit)\*\*/i
 
 export interface ForgeEvidenceItem {
   kind: 'review' | 'inline' | 'issue'
   id: number
+  parentReviewId?: number
   state?: string
   user: string
   userId: string | number | null
@@ -32,13 +35,19 @@ export interface ForgePullEvidenceSnapshot {
 }
 
 export interface ParsedForgeEndpoint {
-  forge: 'github' | 'gitea' | 'gitlab'
+  forge: 'github' | 'gitea' | 'gitlab' | 'probe'
   httpOrigin: string
   host: string
   hostname: string
   protocol: 'https' | 'http'
   repoPath: string
   prNumber: number
+}
+
+const probedOriginKinds = new Map<string, 'github' | 'gitea' | 'gitlab' | 'unsupported'>()
+
+export function clearForgeProbeCacheForTests(): void {
+  probedOriginKinds.clear()
 }
 
 function parseRemoteOrigin(rawOrigin: string): {
@@ -108,11 +117,16 @@ export function resolveTrustedForgeEndpoint(options: {
   if (!parsedOrigin && !parsedUrl) return null
   if (options.prNumber === null || !Number.isSafeInteger(options.prNumber) || options.prNumber < 1) return null
 
+  // For non-HTTP(S) origins (e.g. ssh://git@host:2222/...), never carry the SSH port into HTTPS!
   const httpOrigin = parsedUrl
     ? parsedUrl.origin.toLowerCase()
     : parsedOrigin!.scheme === 'http' || parsedOrigin!.scheme === 'https'
       ? `${parsedOrigin!.scheme}://${parsedOrigin!.host}`
-      : `https://${parsedOrigin!.host}`
+      : options.allowHttpOrigin && (() => {
+          try { return new URL(options.allowHttpOrigin).hostname.toLowerCase() === parsedOrigin!.hostname } catch { return false }
+        })()
+        ? new URL(options.allowHttpOrigin!).origin.toLowerCase()
+        : `https://${parsedOrigin!.hostname}`
 
   if (httpOrigin.startsWith('http://')) {
     const originIsSameHttp = parsedOrigin?.scheme === 'http' && `http://${parsedOrigin.host}` === httpOrigin
@@ -123,28 +137,33 @@ export function resolveTrustedForgeEndpoint(options: {
   }
 
   const hostname = parsedUrl?.hostname.toLowerCase() ?? parsedOrigin!.hostname
-  const host = parsedUrl?.host.toLowerCase() ?? parsedOrigin!.host
+  const host = parsedUrl?.host.toLowerCase()
+    ?? (parsedOrigin!.scheme === 'http' || parsedOrigin!.scheme === 'https' ? parsedOrigin!.host : parsedOrigin!.hostname)
+  const pathStr = parsedUrl?.pathname ?? ''
+
+  // Bitbucket (Cloud & Server/DC) and Azure DevOps (Cloud & Server) have no built-in REST poller here; return null so seat receipts apply.
   if (
     hostname === 'bitbucket.org'
     || hostname === 'dev.azure.com'
     || hostname.endsWith('.visualstudio.com')
+    || /\/(?:pull-requests|pullrequest|_git)\//i.test(pathStr)
   ) {
     return null
   }
-  const pathStr = parsedUrl?.pathname ?? ''
-  const forge: 'github' | 'gitea' | 'gitlab' = /\/merge_requests\//i.test(pathStr)
+
+  const forge: ParsedForgeEndpoint['forge'] = /\/merge_requests\//i.test(pathStr)
     ? 'gitlab'
     : hostname === 'github.com'
       ? 'github'
-      : 'gitea'
+      : 'probe'
 
   let repoPath = parsedOrigin?.repoPath ?? ''
   if (!repoPath && parsedUrl) {
     const segs = parsedUrl.pathname.split('/').filter(Boolean).map((s) => decodeURIComponent(s))
     const mrIdx = segs.findIndex((s) => s.toLowerCase() === 'merge_requests')
-    const prIdx = segs.findIndex((s) => /^(?:pulls?|pull-requests|pullrequest)$/i.test(s))
+    const prIdx = segs.findIndex((s) => /^(?:pulls?)$/i.test(s))
     if (mrIdx >= 2) repoPath = segs.slice(0, segs[mrIdx - 1] === '-' ? mrIdx - 1 : mrIdx).join('/')
-    else if (prIdx >= 1) repoPath = segs.slice(0, prIdx).filter((s) => s !== '_git').join('/')
+    else if (prIdx >= 1) repoPath = segs.slice(0, prIdx).join('/')
   }
   if (!repoPath) return null
 
@@ -162,19 +181,17 @@ export function resolveTrustedForgeEndpoint(options: {
 async function readCredentialsViaGit(
   runner: GitRunner | null,
   cwd: string,
-  endpoint: ParsedForgeEndpoint,
+  endpoint: Pick<ParsedForgeEndpoint, 'forge' | 'protocol' | 'host'>,
 ): Promise<Record<string, string>> {
-  if (endpoint.forge === 'gitea') {
+  if (endpoint.forge === 'gitea' || endpoint.forge === 'probe') {
     const tok = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN
     if (tok?.trim()) return { authorization: `token ${tok.trim()}` }
   }
-  if (endpoint.forge === 'gitlab') {
+  if (endpoint.forge === 'gitlab' || endpoint.forge === 'probe') {
     const tok = process.env.GITLAB_TOKEN
-    if (tok?.trim()) return { 'private-token': tok.trim() }
+    if (tok?.trim() && endpoint.forge === 'gitlab') return { 'private-token': tok.trim() }
   }
   if (!runner) return {}
-  // Note: GitRunner does not pass stdin, so use child_process execFile directly with GIT_TERMINAL_PROMPT=0!
-  const { execFile } = await import('node:child_process')
   const credOut = await new Promise<string>((resolveOut) => {
     const child = execFile(
       'git',
@@ -206,7 +223,7 @@ async function readCredentialsViaGit(
     : { authorization: `token ${password}` }
 }
 
-async function safeForgeGetJson(httpOrigin: string, apiPath: string, authHeaders: Record<string, string>): Promise<unknown> {
+async function safeForgeFetchResponse(httpOrigin: string, apiPath: string, authHeaders: Record<string, string>, timeoutMs = 25_000): Promise<{ data: unknown; headers: Headers }> {
   const url = new URL(apiPath, `${httpOrigin}/`)
   if (url.origin.toLowerCase() !== httpOrigin.toLowerCase()) {
     throw new Error('Forge path escaped configured origin')
@@ -215,7 +232,7 @@ async function safeForgeGetJson(httpOrigin: string, apiPath: string, authHeaders
     method: 'GET',
     headers: { accept: 'application/json', ...authHeaders },
     redirect: 'manual',
-    signal: AbortSignal.timeout(25_000),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (res.status >= 300 && res.status < 400) {
     throw new Error(`Refusing HTTP ${res.status} redirect from ${httpOrigin}`)
@@ -224,7 +241,115 @@ async function safeForgeGetJson(httpOrigin: string, apiPath: string, authHeaders
     throw new Error(`Forge GET ${url.pathname} failed (${res.status})`)
   }
   const text = await res.text()
-  return text.trim() ? JSON.parse(text) : null
+  return {
+    data: text.trim() ? JSON.parse(text) : null,
+    headers: res.headers,
+  }
+}
+
+async function safeForgeGetJson(httpOrigin: string, apiPath: string, authHeaders: Record<string, string>, timeoutMs = 25_000): Promise<unknown> {
+  return (await safeForgeFetchResponse(httpOrigin, apiPath, authHeaders, timeoutMs)).data
+}
+
+async function safeForgePaginateArray(
+  httpOrigin: string,
+  basePath: string,
+  authHeaders: Record<string, string>,
+  forge: 'gitea' | 'gitlab',
+  maxPages = 20,
+): Promise<unknown[]> {
+  const results: unknown[] = []
+  for (let page = 1; page <= maxPages; page += 1) {
+    const sep = basePath.includes('?') ? '&' : '?'
+    const pageParam = forge === 'gitlab' ? `per_page=100&page=${page}` : `limit=50&page=${page}`
+    const { data, headers } = await safeForgeFetchResponse(httpOrigin, `${basePath}${sep}${pageParam}`, authHeaders)
+    if (!Array.isArray(data) || data.length === 0) break
+    results.push(...data)
+    if (forge === 'gitlab') {
+      const nextPage = headers.get('x-next-page')
+      if (!nextPage || !/^\d+$/.test(nextPage.trim())) break
+    } else if (data.length < 50) {
+      break
+    }
+  }
+  return results
+}
+
+function checkGhEnterpriseAuth(hostname: string): Promise<boolean> {
+  return new Promise((resolveAuth) => {
+    const child = execFile(
+      'gh',
+      ['auth', 'status', '--hostname', hostname],
+      { windowsHide: true, timeout: 8_000 },
+      (err) => resolveAuth(!err),
+    )
+    child.stdin?.end()
+  })
+}
+
+function runGhEnterpriseJson(hostname: string, apiPath: string, paginate = false): Promise<unknown> {
+  return new Promise((resolveJson, rejectJson) => {
+    const args = ['api', '--hostname', hostname, ...(paginate ? ['--paginate', '--slurp'] : []), apiPath]
+    const child = execFile(
+      'gh',
+      args,
+      { windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          rejectJson(new Error(String(stderr || err.message).trim()))
+          return
+        }
+        const parsed = String(stdout).trim() ? JSON.parse(String(stdout)) : null
+        if (paginate && Array.isArray(parsed)) {
+          resolveJson(parsed.flat())
+          return
+        }
+        resolveJson(parsed)
+      },
+    )
+    child.stdin?.end()
+  })
+}
+
+/**
+ * Resolves a `'probe'` self-hosted endpoint into a positively verified forge (`'gitea'`, `'github'` for GitHub Enterprise,
+ * or `'gitlab'`), returning `null` when the host is an unknown or unauthenticated forge so Desktop falls back to seat receipts.
+ */
+export async function resolveVerifiedForgeKind(options: {
+  endpoint: ParsedForgeEndpoint
+  projectCwd: string
+  runner: GitRunner | null
+}): Promise<(ParsedForgeEndpoint & { forge: 'github' | 'gitea' | 'gitlab' }) | null> {
+  const { endpoint, projectCwd, runner } = options
+  if (endpoint.forge !== 'probe') {
+    return endpoint as ParsedForgeEndpoint & { forge: 'github' | 'gitea' | 'gitlab' }
+  }
+  const cached = probedOriginKinds.get(endpoint.httpOrigin)
+  if (cached) {
+    return cached === 'unsupported' ? null : { ...endpoint, forge: cached }
+  }
+
+  const giteaAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitea' })
+  const giteaVer = await safeForgeGetJson(endpoint.httpOrigin, '/api/v1/version', giteaAuth, 6_000).catch(() => null)
+  if (giteaVer && typeof giteaVer === 'object' && typeof (giteaVer as { version?: unknown }).version === 'string') {
+    probedOriginKinds.set(endpoint.httpOrigin, 'gitea')
+    return { ...endpoint, forge: 'gitea' }
+  }
+
+  if (await checkGhEnterpriseAuth(endpoint.hostname)) {
+    probedOriginKinds.set(endpoint.httpOrigin, 'github')
+    return { ...endpoint, forge: 'github' }
+  }
+
+  const gitlabAuth = await readCredentialsViaGit(runner, projectCwd, { ...endpoint, forge: 'gitlab' })
+  const gitlabVer = await safeForgeGetJson(endpoint.httpOrigin, '/api/v4/version', gitlabAuth, 6_000).catch(() => null)
+  if (gitlabVer && typeof gitlabVer === 'object' && typeof (gitlabVer as { version?: unknown }).version === 'string') {
+    probedOriginKinds.set(endpoint.httpOrigin, 'gitlab')
+    return { ...endpoint, forge: 'gitlab' }
+  }
+
+  probedOriginKinds.set(endpoint.httpOrigin, 'unsupported')
+  return null
 }
 
 function parseTimestampMs(raw: unknown): number | null {
@@ -234,7 +359,7 @@ function parseTimestampMs(raw: unknown): number | null {
 }
 
 export async function fetchForgePullEvidence(options: {
-  endpoint: ParsedForgeEndpoint
+  endpoint: ParsedForgeEndpoint & { forge: 'github' | 'gitea' | 'gitlab' }
   userDataDir: string
   projectCwd: string
   runner: GitRunner | null
@@ -249,16 +374,31 @@ export async function fetchForgePullEvidence(options: {
     return raw
   }
 
-  if (endpoint.forge === 'github' && endpoint.hostname === 'github.com') {
-    const api = await githubCliApi(userDataDir)
+  if (endpoint.forge === 'github') {
     const root = `repos/${endpoint.repoPath}/pulls/${endpoint.prNumber}`
-    const [pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
-      api(root) as Promise<Record<string, unknown>>,
-      api('user').catch(() => null) as Promise<{ id?: number; login?: string } | null>,
-      api(`${root}/reviews?per_page=100`, true) as Promise<unknown[]>,
-      api(`${root}/comments?per_page=100`, true) as Promise<unknown[]>,
-      api(`repos/${endpoint.repoPath}/issues/${endpoint.prNumber}/comments?per_page=100`, true) as Promise<unknown[]>,
-    ])
+    let pullRaw: Record<string, unknown>
+    let meRaw: { id?: number; login?: string } | null
+    let reviewsRaw: unknown[]
+    let inlineRaw: unknown[]
+    let issueRaw: unknown[]
+    if (endpoint.hostname === 'github.com') {
+      const api = await githubCliApi(userDataDir)
+      ;[pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
+        api(root) as Promise<Record<string, unknown>>,
+        api('user').catch(() => null) as Promise<{ id?: number; login?: string } | null>,
+        api(`${root}/reviews?per_page=100`, true) as Promise<unknown[]>,
+        api(`${root}/comments?per_page=100`, true) as Promise<unknown[]>,
+        api(`repos/${endpoint.repoPath}/issues/${endpoint.prNumber}/comments?per_page=100`, true) as Promise<unknown[]>,
+      ])
+    } else {
+      ;[pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
+        runGhEnterpriseJson(endpoint.hostname, root) as Promise<Record<string, unknown>>,
+        runGhEnterpriseJson(endpoint.hostname, 'user').catch(() => null) as Promise<{ id?: number; login?: string } | null>,
+        runGhEnterpriseJson(endpoint.hostname, `${root}/reviews?per_page=100`, true) as Promise<unknown[]>,
+        runGhEnterpriseJson(endpoint.hostname, `${root}/comments?per_page=100`, true) as Promise<unknown[]>,
+        runGhEnterpriseJson(endpoint.hostname, `repos/${endpoint.repoPath}/issues/${endpoint.prNumber}/comments?per_page=100`, true) as Promise<unknown[]>,
+      ])
+    }
     const headObj = (pullRaw.head ?? {}) as { sha?: string; repo?: { id?: number } | null }
     const baseObj = (pullRaw.base ?? {}) as { sha?: string; repo?: { id?: number } | null }
     const items: ForgeEvidenceItem[] = []
@@ -279,9 +419,11 @@ export async function fetchForgePullEvidence(options: {
     for (const c of Array.isArray(inlineRaw) ? inlineRaw : []) {
       const rec = c as Record<string, unknown>
       const user = (rec.user ?? {}) as { id?: number; login?: string }
+      const parentReviewId = typeof rec.pull_request_review_id === 'number' ? rec.pull_request_review_id : undefined
       items.push({
         kind: 'inline',
         id: Number(rec.id),
+        ...(parentReviewId !== undefined ? { parentReviewId } : {}),
         user: user.login ?? '',
         userId: user.id ?? null,
         body: typeof rec.body === 'string' ? rec.body : '',
@@ -318,49 +460,67 @@ export async function fetchForgePullEvidence(options: {
   const authHeaders = await readCredentialsViaGit(runner, projectCwd, endpoint)
   if (endpoint.forge === 'gitea') {
     const repoApi = `/api/v1/repos/${endpoint.repoPath}`
-    const [pullRaw, meRaw, reviewsRaw, inlineRaw, issueRaw] = await Promise.all([
+    const [pullRaw, meRaw, reviewsRaw, issueRaw] = await Promise.all([
       safeForgeGetJson(endpoint.httpOrigin, `${repoApi}/pulls/${endpoint.prNumber}`, authHeaders) as Promise<Record<string, unknown>>,
       safeForgeGetJson(endpoint.httpOrigin, '/api/v1/user', authHeaders).catch(() => null) as Promise<{ id?: number; login?: string } | null>,
-      safeForgeGetJson(endpoint.httpOrigin, `${repoApi}/pulls/${endpoint.prNumber}/reviews?limit=50`, authHeaders).catch(() => []) as Promise<unknown[]>,
-      safeForgeGetJson(endpoint.httpOrigin, `${repoApi}/pulls/${endpoint.prNumber}/comments?limit=50`, authHeaders).catch(() => []) as Promise<unknown[]>,
-      safeForgeGetJson(endpoint.httpOrigin, `${repoApi}/issues/${endpoint.prNumber}/comments?limit=50`, authHeaders).catch(() => []) as Promise<unknown[]>,
+      safeForgePaginateArray(endpoint.httpOrigin, `${repoApi}/pulls/${endpoint.prNumber}/reviews`, authHeaders, 'gitea'),
+      safeForgePaginateArray(endpoint.httpOrigin, `${repoApi}/issues/${endpoint.prNumber}/comments`, authHeaders, 'gitea'),
     ])
     const headObj = (pullRaw.head ?? {}) as { sha?: string; repo?: { id?: number } | null }
     const baseObj = (pullRaw.base ?? {}) as { sha?: string; repo?: { id?: number } | null }
     const items: ForgeEvidenceItem[] = []
-    for (const r of Array.isArray(reviewsRaw) ? reviewsRaw : []) {
+    const seenInlineIds = new Set<number>()
+    for (const r of reviewsRaw) {
       const rec = r as Record<string, unknown>
+      const reviewId = Number(rec.id)
       const user = (rec.user ?? {}) as { id?: number; login?: string }
       const rawState = String(rec.state ?? '').toUpperCase()
+      const reviewCommitId = typeof rec.commit_id === 'string' ? rec.commit_id.toLowerCase() : null
       items.push({
         kind: 'review',
-        id: Number(rec.id),
+        id: reviewId,
         state: rawState === 'APPROVED' ? 'APPROVED' : rawState === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : 'COMMENTED',
         user: user.login ?? '',
         userId: user.id ?? null,
         body: typeof rec.body === 'string' ? rec.body : '',
-        commitId: typeof rec.commit_id === 'string' ? rec.commit_id.toLowerCase() : null,
+        commitId: reviewCommitId,
         createdAtMs: parseTimestampMs(rec.updated_at ?? rec.submitted_at),
       })
+      if (Number.isSafeInteger(reviewId) && reviewId > 0) {
+        const countField = rec.comments_count ?? rec.pull_comments_count
+        const shouldFetchInline = countField === undefined ? true : Number(countField) > 0
+        if (shouldFetchInline) {
+          const inlineRaw = await safeForgePaginateArray(
+            endpoint.httpOrigin,
+            `${repoApi}/pulls/${endpoint.prNumber}/reviews/${reviewId}/comments`,
+            authHeaders,
+            'gitea',
+          )
+          for (const c of inlineRaw) {
+            const cRec = c as Record<string, unknown>
+            const cId = Number(cRec.id)
+            if (seenInlineIds.has(cId)) continue
+            seenInlineIds.add(cId)
+            const cUser = (cRec.user ?? {}) as { id?: number; login?: string }
+            items.push({
+              kind: 'inline',
+              id: cId,
+              parentReviewId: reviewId,
+              user: cUser.login ?? '',
+              userId: cUser.id ?? null,
+              body: typeof cRec.body === 'string' ? cRec.body : '',
+              commitId: typeof cRec.original_commit_id === 'string'
+                ? cRec.original_commit_id.toLowerCase()
+                : typeof cRec.commit_id === 'string'
+                  ? cRec.commit_id.toLowerCase()
+                  : reviewCommitId,
+              createdAtMs: parseTimestampMs(cRec.updated_at ?? cRec.created_at),
+            })
+          }
+        }
+      }
     }
-    for (const c of Array.isArray(inlineRaw) ? inlineRaw : []) {
-      const rec = c as Record<string, unknown>
-      const user = (rec.user ?? {}) as { id?: number; login?: string }
-      items.push({
-        kind: 'inline',
-        id: Number(rec.id),
-        user: user.login ?? '',
-        userId: user.id ?? null,
-        body: typeof rec.body === 'string' ? rec.body : '',
-        commitId: typeof rec.original_commit_id === 'string'
-          ? rec.original_commit_id.toLowerCase()
-          : typeof rec.commit_id === 'string'
-            ? rec.commit_id.toLowerCase()
-            : null,
-        createdAtMs: parseTimestampMs(rec.updated_at ?? rec.created_at),
-      })
-    }
-    for (const c of Array.isArray(issueRaw) ? issueRaw : []) {
+    for (const c of issueRaw) {
       const rec = c as Record<string, unknown>
       const user = (rec.user ?? {}) as { id?: number; login?: string }
       items.push({
@@ -392,11 +552,11 @@ export async function fetchForgePullEvidence(options: {
   const [mrRaw, meRaw, notesRaw] = await Promise.all([
     safeForgeGetJson(endpoint.httpOrigin, mrApi, authHeaders) as Promise<Record<string, unknown>>,
     safeForgeGetJson(endpoint.httpOrigin, '/api/v4/user', authHeaders).catch(() => null) as Promise<{ id?: number; username?: string } | null>,
-    safeForgeGetJson(endpoint.httpOrigin, `${mrApi}/notes?per_page=100`, authHeaders).catch(() => []) as Promise<unknown[]>,
+    safeForgePaginateArray(endpoint.httpOrigin, `${mrApi}/notes`, authHeaders, 'gitlab'),
   ])
   const diffRefs = (mrRaw.diff_refs ?? {}) as { head_sha?: string; base_sha?: string }
   const items: ForgeEvidenceItem[] = []
-  for (const n of Array.isArray(notesRaw) ? notesRaw : []) {
+  for (const n of notesRaw) {
     const rec = n as Record<string, unknown>
     if (rec.system) continue
     const author = (rec.author ?? {}) as { id?: number; username?: string }
@@ -425,14 +585,22 @@ export async function fetchForgePullEvidence(options: {
   }
 }
 
-export function isItemExplicitApproval(item: ForgeEvidenceItem, head: string, base: string, baseMovedInGroup: boolean): boolean {
-  if (!SHA_RE.test(head) || !SHA_RE.test(base)) return false
-  const raw = item.body.trim()
-  const unquoted = raw
+export function hasAffirmativeFindingLabel(body: string): boolean {
+  const unquoted = body
     .split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('>'))
     .join('\n')
-    .trim()
+  return FINDING_LABEL_LINE_RE.test(unquoted) || FINDING_BOLD_RE.test(unquoted)
+}
+
+export function isItemExplicitApproval(item: ForgeEvidenceItem, head: string, base: string, baseMovedInGroup: boolean): boolean {
+  if (!SHA_RE.test(head) || !SHA_RE.test(base)) return false
+  const raw = item.body.trim()
+  const unquotedLines = raw
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('>'))
+  const unquoted = unquotedLines.join('\n').trim()
+  if (hasAffirmativeFindingLabel(unquoted)) return false
 
   const baseMatch = REVIEWED_BASE_RE.exec(unquoted)
   if (baseMatch && baseMatch[1]!.toLowerCase() !== base.toLowerCase()) return false
@@ -442,9 +610,10 @@ export function isItemExplicitApproval(item: ForgeEvidenceItem, head: string, ba
     return true
   }
 
-  if (!unquoted || NEGATED_APPROVAL_RE.test(unquoted) || !WORDING_RE.test(unquoted)) return false
-  const namesHead = (unquoted.match(/\b[0-9a-f]{40,64}\b/gi) ?? []).some((tok) => tok.toLowerCase() === head.toLowerCase())
-  if (!namesHead) return false
+  if (!unquoted) return false
+  const firstNonEmpty = unquotedLines.find((line) => line.trim() !== '')?.trim() ?? ''
+  const headMatch = EXPLICIT_APPROVAL_FIRST_LINE_RE.exec(firstNonEmpty)
+  if (!headMatch || headMatch[1]!.toLowerCase() !== head.toLowerCase()) return false
   if (baseMovedInGroup && (!baseMatch || baseMatch[1]!.toLowerCase() !== base.toLowerCase())) return false
   return true
 }
@@ -483,6 +652,17 @@ export function verifySeatOutcomeFromSnapshot(options: {
     return false
   }
 
+  const matchesReceipt = (item: ForgeEvidenceItem): boolean => {
+    if (!receipt) return false
+    if (item.id === receipt.remoteId && (!receipt.itemType || receipt.itemType === 'any' || receipt.itemType === item.kind)) {
+      return true
+    }
+    if (item.parentReviewId !== undefined && item.parentReviewId === receipt.remoteId && (!receipt.itemType || receipt.itemType === 'any' || receipt.itemType === 'review')) {
+      return true
+    }
+    return false
+  }
+
   const keyOf = (item: ForgeEvidenceItem): string => `${item.kind}:${item.id}`
   const eligible = snapshot.items.filter((item) => {
     const key = keyOf(item)
@@ -491,9 +671,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
     if (item.kind === 'review' && item.state === 'COMMENTED' && item.body.trim() === '') return false
     if (item.commitId !== null && item.commitId !== head.toLowerCase()) return false
     if (item.createdAtMs !== null && item.createdAtMs + 5_000 < roundStartedAtMs) return false
-    if (receipt && item.id === receipt.remoteId && (!receipt.itemType || receipt.itemType === 'any' || receipt.itemType === item.kind)) {
-      return true
-    }
+    if (matchesReceipt(item)) return true
     if (totalRequiredSeats > 1 && !item.body.includes(tag)) return false
     return true
   })
@@ -505,7 +683,15 @@ export function verifySeatOutcomeFromSnapshot(options: {
     if (totalRequiredSeats > 1 && !item.body.includes(tag)) return false
     return true
   })
-  const findingItems = eligible.filter((item) => item !== approvalItem && !isItemExplicitApproval(item, head, base, baseMovedInGroup))
+
+  const findingItems = eligible.filter((item) => {
+    if (item === approvalItem || isItemExplicitApproval(item, head, base, baseMovedInGroup)) return false
+    if (receipt?.kind === 'findings' && matchesReceipt(item)) return true
+    const hasSeatAttribution = totalRequiredSeats === 1 || item.body.includes(tag)
+    if (!hasSeatAttribution) return false
+    if (item.kind === 'review' && item.state === 'CHANGES_REQUESTED') return true
+    return hasAffirmativeFindingLabel(item.body)
+  })
 
   // Never count as approved if this seat also posted open findings in the same round!
   if (approvalItem && findingItems.length === 0 && (!receipt || receipt.kind === 'approved')) {
