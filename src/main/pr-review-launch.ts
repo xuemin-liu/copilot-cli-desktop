@@ -194,38 +194,81 @@ async function ensureCommitIn(runner: GitRunner, cwd: string, prefix: readonly s
   if (!await present()) throw new Error('The pull request\'s base commit could not be fetched; the next check tries again')
 }
 
-async function ensureAgnosticCommit(
+const REPO_AGENT_EXEC_CONFIG_RE = /^(?:\.mcp\.json|\.claude\/settings(?:\.local)?\.json|\.claude\/hooks\/|\.codex\/config\.toml|\.github\/copilot\/settings(?:\.local)?\.json|\.gemini\/settings\.json)(?:$|\/)/i
+
+async function isOnOriginBranch(
+  runner: GitRunner,
+  cwd: string,
+  prefix: readonly string[],
+  sha: string,
+): Promise<boolean> {
+  const refs = await git(
+    runner,
+    cwd,
+    [...prefix, 'for-each-ref', `--contains=${sha}`, '--format=%(refname)', 'refs/remotes/origin'],
+    'read',
+  ).catch(() => '')
+  return refs.split(/\r?\n/).some((line) => line.startsWith('refs/remotes/origin/'))
+}
+
+/**
+ * Ensures `sha` is reachable from `origin`'s own branch refs (`refs/heads/*:refs/remotes/origin/*`).
+ * Never fetches `refs/pull/*`, `refs/merge-requests/*`, or unreferenced SHAs, blocking external-fork PR
+ * commits and unpushed local-only commits across all Git hosts.
+ */
+async function ensureOriginBranchCommit(
   runner: GitRunner,
   cwd: string,
   prefix: readonly string[],
   origin: string,
   sha: string,
-  prNumber: number | null,
 ): Promise<void> {
-  const present = async (): Promise<boolean> =>
-    git(runner, cwd, [...prefix, 'cat-file', '-e', `${sha}^{commit}`], 'read').then(() => true, () => false)
-  if (await present()) return
+  if (await isOnOriginBranch(runner, cwd, prefix, sha)) return
   const trimmedOrigin = origin.trim()
   if (trimmedOrigin) {
-    await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, sha], 'network').catch(() => {})
-    if (await present()) return
-    if (prNumber !== null && Number.isSafeInteger(prNumber) && prNumber >= 1) {
-      for (const refSpec of [`+refs/pull/${prNumber}/head`, `+refs/merge-requests/${prNumber}/head`]) {
-        await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, refSpec], 'network').catch(() => {})
-        if (await present()) return
-      }
-    }
-    await git(runner, cwd, [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin], 'network').catch(() => {})
+    await git(
+      runner,
+      cwd,
+      [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, '+refs/heads/*:refs/remotes/origin/*'],
+      'network',
+    ).catch(() => {})
   }
-  if (!await present()) {
-    throw new Error(`Commit ${sha.slice(0, 12)} is not in this local repository and could not be fetched from origin. Fetch the pull request branch in your session first, then try again.`)
+  if (!await isOnOriginBranch(runner, cwd, prefix, sha)) {
+    throw new Error(
+      `Commit ${sha.slice(0, 12)} is not on any branch of origin. Push the pull request branch to origin first; pull requests from external forks cannot be reviewed here.`,
+    )
   }
 }
 
 /**
- * Forge-agnostic worktree setup for temporary PR reviewers (works with GitHub, Gitea, GitLab, Bitbucket, Azure DevOps,
- * or purely local Git repositories). Uses commits already in the local Git object database first and falls back to
- * fetching from `origin` only when a revision is missing locally.
+ * Verifies that `head` and `base` belong to `origin`'s own branches (never an external fork ref or unpushed local commit)
+ * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs.
+ */
+export async function inspectReviewCommitAgentConfigs(
+  runner: GitRunner,
+  project: string,
+  origin: string,
+  head: string,
+  base: string,
+): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }> {
+  if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
+  const root = resolve(project)
+  await ensureOriginBranchCommit(runner, root, [], origin, head)
+  await ensureOriginBranchCommit(runner, root, [], origin, base)
+  const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(() => '')
+  const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(() => '')
+  const filterConfigs = (raw: string): string[] =>
+    [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && REPO_AGENT_EXEC_CONFIG_RE.test(line)))]
+  return {
+    modifiedAgentConfigs: filterConfigs(diffPaths),
+    presentAgentConfigs: filterConfigs(treePaths),
+  }
+}
+
+/**
+ * Forge-agnostic worktree setup for temporary PR reviewers (works with GitHub, Gitea, GitLab, Bitbucket, Azure DevOps).
+ * Verifies both `head` and `base` are reachable from `origin` branch refs (`refs/heads/*`) so external fork PR commits
+ * are never checked out into an unsandboxed session.
  */
 export async function prepareAgnosticReviewWorktree(
   runner: GitRunner,
@@ -234,12 +277,12 @@ export async function prepareAgnosticReviewWorktree(
   area: ReviewerArea,
   head: string,
   base: string,
-  prNumber: number | null = null,
+  _prNumber: number | null = null,
 ): Promise<void> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
   area.project = resolve(project)
-  await ensureAgnosticCommit(runner, area.project, [], origin, head, prNumber)
-  await ensureAgnosticCommit(runner, area.project, [], origin, base, null)
+  await ensureOriginBranchCommit(runner, area.project, [], origin, head)
+  await ensureOriginBranchCommit(runner, area.project, [], origin, base)
   await git(runner, area.project, ['update-ref', area.ref, head], 'write')
   await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, head])
   area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read')
@@ -256,7 +299,7 @@ export async function refreshAgnosticReviewWorktree(
   origin: string,
   head: string,
   base: string,
-  prNumber: number | null = null,
+  _prNumber: number | null = null,
 ): Promise<string> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
   const current = await git(runner, area.root, reviewGit(area, ['rev-parse', '--verify', '--quiet', 'HEAD']), 'read').catch(() => '')
@@ -264,8 +307,8 @@ export async function refreshAgnosticReviewWorktree(
     const status = await git(runner, area.root, reviewGit(area, ['status', '--porcelain=v1', '--untracked-files=normal']), 'read')
     if (status) throw new Error('The reviewer\'s checkout has changes; inspect it before the review continues')
   }
-  await ensureAgnosticCommit(runner, area.root, reviewGit(area, []), origin, base, null)
-  await ensureAgnosticCommit(runner, area.root, reviewGit(area, []), origin, head, prNumber)
+  await ensureOriginBranchCommit(runner, area.root, reviewGit(area, []), origin, base)
+  await ensureOriginBranchCommit(runner, area.root, reviewGit(area, []), origin, head)
   if (REVIEW_REF.test(area.ref)) {
     await git(runner, area.root, reviewGit(area, ['update-ref', area.ref, head]), 'write')
   }

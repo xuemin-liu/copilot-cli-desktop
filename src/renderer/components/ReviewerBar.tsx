@@ -86,7 +86,8 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
               {group.seats.map((seat) => {
                 const peeking = seat.tabId !== null && peekTabId === seat.tabId
                 const canPeek = seat.tabId !== null
-                const canRecover = !ended && (seat.verdict === 'failed' || seat.verdict === 'stopped')
+                const canRetry = !ended && seat.verdict !== 'starting'
+                const canDismiss = !ended
                 return (
                   <li
                     key={seat.cli}
@@ -107,26 +108,26 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                         {peeking ? 'Hide' : 'Peek'}
                       </button>
                     )}
-                    {canRecover && (
-                      <>
-                        <button
-                          type="button"
-                          className="meeting-bar-button"
-                          disabled={busy}
-                          onClick={() => runAction(group.id, 'retry', seat.cli)}
-                        >
-                          Retry
-                        </button>
-                        <button
-                          type="button"
-                          className="meeting-bar-button"
-                          disabled={busy}
-                          title={`Remove ${sessionCliLabel(seat.cli)} from required reviewers for this run`}
-                          onClick={() => runAction(group.id, 'dismiss', seat.cli)}
-                        >
-                          Dismiss
-                        </button>
-                      </>
+                    {canRetry && (
+                      <button
+                        type="button"
+                        className="meeting-bar-button"
+                        disabled={busy}
+                        onClick={() => runAction(group.id, 'retry', seat.cli)}
+                      >
+                        Retry
+                      </button>
+                    )}
+                    {canDismiss && (
+                      <button
+                        type="button"
+                        className="meeting-bar-button"
+                        disabled={busy}
+                        title={`Remove ${sessionCliLabel(seat.cli)} from required reviewers for this run`}
+                        onClick={() => runAction(group.id, 'dismiss', seat.cli)}
+                      >
+                        Dismiss
+                      </button>
                     )}
                   </li>
                 )

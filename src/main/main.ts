@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerArea, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -3702,8 +3702,20 @@ async function launchTempReviewerSeat(
     }
     const title = `Review ${group.prLabel} · ${sessionCliLabel(seat.cli)}`
 
+    const isSeatCancelled = (): boolean => (
+      shuttingDown()
+      || group.stage === 'ended'
+      || group.requiredSeats.get(seat.cli) !== seat
+      || seat.lifecycle === 'stopped'
+    )
+
     if (seat.cli === 'copilot') {
-      const reviewerPreset: PermissionPreset = profile.permissionPreset === 'read-only' ? 'default' : profile.permissionPreset
+      if (profile.permissionPreset === 'read-only') {
+        throw new Error(
+          `${profile.name} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Change the workspace permission preset in Settings or remove Copilot CLI from Pull request reviewers.`,
+        )
+      }
+      const reviewerPreset: PermissionPreset = profile.permissionPreset
       const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: reviewerPreset, launch: { ...profile.launch, worktree: false } }
       const id = `tab-${nextTabSequence++}`
       allocatedTabId = id
@@ -3724,11 +3736,11 @@ async function launchTempReviewerSeat(
       } finally {
         pendingSessionCreations--
       }
-      if (shuttingDown() || group.stage === 'ended') throw new Error('Temporary review stopped while launching')
+      if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
       assertWorkspaceListed(profile)
       const { args, deterministicSessionId } = finalizeSessionArgs(plan, 'new', null)
       if (copilotCapabilities.supportedOptions.includes('--add-dir')) {
-        args.push('--add-dir', area.checkout, '--add-dir', area.helper, '--add-dir', prWorkflows.tools)
+        args.push('--add-dir', area.checkout, '--add-dir', area.helper)
       }
       const session = new PtySession({
         file: plan.file,
@@ -3768,13 +3780,12 @@ async function launchTempReviewerSeat(
       refreshMenus()
       wireSessionEvents(id, session)
       await queueTabTransition(id, async () => {
-        if (shuttingDown() || group.stage === 'ended') throw new Error('Temporary review stopped')
+        if (isSeatCancelled()) throw new Error('Temporary review stopped')
         await session.start()
       })
       const deadline = Date.now() + 60_000
       let sent = false
-      const isGroupEnded = (): boolean => group.stage === 'ended'
-      while (Date.now() < deadline && !shuttingDown() && !isGroupEnded() && !sent) {
+      while (Date.now() < deadline && !isSeatCancelled() && !sent) {
         const current = tabsState.tabs.find((t) => t.id === id)
         if (!current || managedTabs.get(id)?.session !== session || current.status === 'crashed' || current.status === 'completed') {
           throw new Error('The Copilot reviewer session exited before starting its review')
@@ -3785,6 +3796,7 @@ async function launchTempReviewerSeat(
         }
         if (!sent) await new Promise((resolveWait) => setTimeout(resolveWait, 250))
       }
+      if (isSeatCancelled()) throw new Error('Temporary review stopped')
       if (!sent) throw new Error('The Copilot reviewer session did not reach an interactive prompt in time')
       seat.lifecycle = 'running'
       broadcastState()
@@ -3792,17 +3804,18 @@ async function launchTempReviewerSeat(
     }
 
     const cli = seat.cli
+    const savedConfig = profile.otherCli?.[cli]
+    if (cli === 'codex' && savedConfig?.sandbox === 'read-only') {
+      throw new Error(
+        `${profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Change Codex sandbox in Workspace Settings or remove Codex CLI from Pull request reviewers.`,
+      )
+    }
     const resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${sessionCliLabel(cli)} is not installed`)
     const help = await otherCliHelp(resolution)
-    const savedConfig = profile.otherCli?.[cli]
-    // Drop read-only sandbox override for Codex reviewers so gh / curl / git fetch can reach the PR host over the network.
-    const effectiveConfig: PerCliConfig | undefined = cli === 'codex' && savedConfig?.sandbox === 'read-only'
-      ? Object.fromEntries(Object.entries(savedConfig).filter(([key]) => key !== 'sandbox'))
-      : savedConfig
-    const configArgs = await otherCliLaunchArgs(cli, resolution, effectiveConfig)
+    const configArgs = await otherCliLaunchArgs(cli, resolution, savedConfig)
     const addDirArgs = help && helpListsFlag(help, '--add-dir')
-      ? ['--add-dir', area.helper, '--add-dir', prWorkflows.tools]
+      ? ['--add-dir', area.helper]
       : []
     const env: NodeJS.ProcessEnv = {
       ...withCopilotPathAdditions(process.env, resolution.pathAdditions),
@@ -3817,7 +3830,7 @@ async function launchTempReviewerSeat(
     } else {
       cliArgs = [...configArgs, ...addDirArgs, prompt]
     }
-    if (shuttingDown() || group.stage === 'ended') throw new Error('Temporary review stopped while launching')
+    if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')
     assertWorkspaceListed(profile)
     const id = `tab-${nextTabSequence++}`
     allocatedTabId = id
@@ -3861,9 +3874,10 @@ async function launchTempReviewerSeat(
     wireSessionEvents(id, session)
     reportOtherCliFolder(id, session, area.checkout)
     await queueTabTransition(id, async () => {
-      if (shuttingDown() || group.stage === 'ended') throw new Error('Temporary review stopped')
+      if (isSeatCancelled()) throw new Error('Temporary review stopped')
       await session.start()
     })
+    if (isSeatCancelled()) throw new Error('Temporary review stopped')
     seat.lifecycle = 'running'
     broadcastState()
   } catch (error) {
@@ -3898,8 +3912,15 @@ async function launchTempReviewerSeat(
 
 let tempReviewerConsentChain: Promise<void> = Promise.resolve()
 
-async function askTempReviewerConsent(repository: string, prLabel: string, clis: readonly ReviewerCli[], requireExplicitConsent: boolean): Promise<boolean> {
-  if (!requireExplicitConsent) return true
+async function askTempReviewerConsent(
+  repository: string,
+  prLabel: string,
+  clis: readonly ReviewerCli[],
+  requireExplicitConsent: boolean,
+  warnings: readonly string[] = [],
+): Promise<boolean> {
+  const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
+  if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && warnings.length === 0) return true
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -3914,8 +3935,16 @@ async function askTempReviewerConsent(repository: string, prLabel: string, clis:
       `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
       'Each reviewer runs in a hidden background tab inside an isolated detached Git worktree, accesses the pull request using your configured CLI and Git credentials, and posts its review comments and approvals directly on the pull request.',
     ]
+    if (nonCopilotReviewers.length > 0) {
+      details.push(
+        `Non-Copilot reviewers (${nonCopilotReviewers.map((cli) => sessionCliLabel(cli)).join(', ')}) send repository code and pull request context to their configured provider using that CLI's credentials.`,
+      )
+    }
+    for (const warning of warnings) {
+      details.push(warning)
+    }
     const { response } = await dialog.showMessageBox(owner, {
-      type: 'question',
+      type: warnings.length > 0 ? 'warning' : 'question',
       title: 'Temporary PR reviewers',
       message: `Start temporary PR reviewer session(s) for ${repository} ${prLabel}?`,
       detail: details.join('\n\n'),
@@ -4025,6 +4054,18 @@ async function startTempReviewersFlow(options: {
   }
 
   const clis = options.profile.reviewerClis ?? desktopConfig.reviewerClis
+  if (clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
+    return {
+      ok: false,
+      message: `${options.profile.name} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Change the workspace permission preset in Settings or remove Copilot CLI from Pull request reviewers.`,
+    }
+  }
+  if (clis.includes('codex') && options.profile.otherCli?.codex?.sandbox === 'read-only') {
+    return {
+      ok: false,
+      message: `${options.profile.name} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Change Codex sandbox in Workspace Settings or remove Codex CLI from Pull request reviewers.`,
+    }
+  }
   const inUseSeats = Math.max(tempReviewerTabCount(tabsState), tempReviewers.activeSeatCount())
   if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) {
     return {
@@ -4032,6 +4073,64 @@ async function startTempReviewersFlow(options: {
       message: `Cannot start ${clis.length} temporary reviewer session(s): ${inUseSeats}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce configured reviewer CLIs.`,
     }
   }
+
+  let verifiedOwnPull = false
+  const consentWarnings: string[] = []
+  if (ghRepo && prNumber !== null) {
+    try {
+      const api = await githubCliApi(app.getPath('userData'))
+      const snapshot = await readGithubPull(api, ghRepo, prNumber, { checks: false })
+      if (!snapshot.open) {
+        return { ok: false, message: `${ghRepo} ${prLabel} is closed.` }
+      }
+      if (!snapshot.baseRepository || snapshot.headRepository.toLowerCase() !== snapshot.baseRepository.toLowerCase()) {
+        return {
+          ok: false,
+          message: `Pull requests from external forks (${snapshot.headRepository}) cannot be reviewed by unsandboxed temporary reviewer sessions.`,
+        }
+      }
+      if (revisions.head !== snapshot.head) {
+        return {
+          ok: false,
+          message: `Local head ${revisions.head.slice(0, 12)} does not match ${ghRepo} ${prLabel} remote head ${snapshot.head.slice(0, 12)}. Push or fetch the pull request branch first.`,
+        }
+      }
+      const me = await api('user').catch(() => null) as { id?: unknown } | null
+      if (me && snapshot.author === me.id) {
+        verifiedOwnPull = true
+      } else {
+        consentWarnings.push(
+          `${ghRepo} ${prLabel} was not opened by your GitHub account. Reviewing it runs unsandboxed CLI sessions inside its checkout.`,
+        )
+      }
+    } catch {
+      consentWarnings.push(
+        `Could not pre-verify ${ghRepo} ${prLabel} ownership via GitHub CLI; confirm you trust this pull request branch before starting unsandboxed reviewers.`,
+      )
+    }
+  }
+
+  let configInspection: { modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }
+  try {
+    configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutRoot, origin, revisions.head, revisions.base)
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : 'Could not verify pull request revisions on origin.' }
+  }
+  if (!verifiedOwnPull && consentWarnings.length === 0) {
+    consentWarnings.push(
+      `Confirm that you trust ${repository} ${prLabel} before starting unsandboxed CLI reviewer sessions inside its checkout.`,
+    )
+  }
+  if (configInspection.modifiedAgentConfigs.length > 0) {
+    consentWarnings.push(
+      `Warning: this pull request adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
+    )
+  } else if (!verifiedOwnPull && configInspection.presentAgentConfigs.length > 0) {
+    consentWarnings.push(
+      `Warning: this repository contains repo-local CLI/MCP configuration (${configInspection.presentAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
+    )
+  }
+
   let created: { group: TempReviewerGroup; hostKey: string }
   try {
     created = tempReviewers.createGroup({
@@ -4059,7 +4158,7 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent)
+      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, consentWarnings)
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -4283,23 +4382,43 @@ async function advanceGroupTempReviewers(
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
   if (!revisions.ok) return { ok: false, message: revisions.message }
   try {
+    const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
+    if (configInspection.modifiedAgentConfigs.length > 0) {
+      const activeClis = [...group.requiredSeats.keys()]
+      const approved = await askTempReviewerConsent(
+        group.repository,
+        group.prLabel,
+        activeClis,
+        true,
+        [`Warning: round ${group.round + 1} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`],
+      )
+      if (!approved) {
+        return { ok: false, message: 'Temporary PR reviewer round advance cancelled by user.' }
+      }
+    }
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary)
     const isGroupEnded = (): boolean => group.stage === 'ended'
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId) ?? null
     const prWorkflows = bundledPrWorkflows()
+    const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
+      if (!profile) return
+      await cleanupTempReviewerSeat(seat)
+      if (isGroupEnded() || !group.requiredSeats.has(seat.cli)) return
+      const reset = tempReviewers.resetSeatGeneration(group.id, seat.cli)
+      broadcastState()
+      try {
+        await launchTempReviewerSeat(group, reset, profile)
+      } catch (error) {
+        tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
+      }
+    }
     for (const seat of [...group.requiredSeats.values()]) {
       if (isGroupEnded()) break
-      if (seat.lifecycle === 'stopped' && profile) {
-        // Reviewer CLI exited after posting its previous round review; relaunch it cleanly at the new head SHA.
-        await cleanupTempReviewerSeat(seat)
-        if (isGroupEnded()) break
-        const reset = tempReviewers.resetSeatGeneration(group.id, seat.cli)
-        broadcastState()
-        try {
-          await launchTempReviewerSeat(group, reset, profile)
-        } catch (error) {
-          tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
-        }
+      if (!group.requiredSeats.has(seat.cli)) continue
+      // Non-Copilot interactive TUIs (claude, codex) stay open at an idle prompt without an activity stream after a turn,
+      // and stopped seats exited after posting their previous review. Relaunch both cleanly on the new head SHA.
+      if (seat.lifecycle === 'stopped' || (seat.lifecycle === 'running' && seat.cli !== 'copilot')) {
+        await relaunchSeatAtNewHead(seat)
         continue
       }
       if (seat.area) {
@@ -4324,16 +4443,25 @@ async function advanceGroupTempReviewers(
         const managed = managedTabs.get(seat.tabId)
         if (managed && managed.session.activity === 'idle' && meetingPromptSettled(seat.tabId)) {
           const refreshed = await refreshAgnosticReviewWorktree(runner, seat.area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
-          if (refreshed) {
-            seat.checkedOut = refreshed
-            seat.checkedOutBase = revisions.base
+          if (!refreshed) {
+            await relaunchSeatAtNewHead(seat)
+            continue
           }
+          seat.checkedOut = refreshed
+          seat.checkedOutBase = revisions.base
           const label = sessionCliLabel(seat.cli)
-          sendSessionTask(
+          const sent = sendSessionTask(
             seat.tabId,
-            `Round ${group.round} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Fetch/checkout ${revisions.head} in this detached worktree, inspect the delta and 🤖 replies on the PR, run checks, and post your updated review or "Approved at ${revisions.head} [${label}]" directly on the PR.`,
+            `Round ${group.round} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" and including "[${label}]" directly on the PR.`,
             false,
           )
+          if (sent.result !== 'sent') {
+            await relaunchSeatAtNewHead(seat)
+          }
+        } else if (managed) {
+          // Active Copilot seat is in its watch loop (e.g. pr-poll.mjs --invert --watch-head) and will detach-checkout revisions.head on wakeup.
+          seat.checkedOut = revisions.head
+          seat.checkedOutBase = revisions.base
         }
       }
     }

@@ -8,7 +8,7 @@ user-invocable: true
 
 Orchestrate temporary hidden PR reviewer sessions (configured in **Desktop Settings → General → Pull request reviewers** or overridden per workspace) while **this foreground session runs `fix-pr` directly on the PR**.
 
-- **Each hidden reviewer session** runs in its own isolated detached `git worktree` and executes the **`review-pr`** workflow **directly against the PR on its remote repository host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, etc.), posting its inline findings, review summaries, and `Approved at <full-head-sha> [<CLI Label>]` approvals **directly onto the PR** (never a local-only review).
+- **Each hidden reviewer session** runs in its own isolated detached `git worktree` and executes the **`review-pr`** workflow **directly against the PR on its remote repository host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, etc.), posting its inline findings, review summaries, and `Approved at <full-head-sha>` approvals (tagged with `[<CLI Label>]`) **directly onto the PR** (never a local-only review).
 - **This foreground session** executes the **`fix-pr`** workflow **directly against that same PR on its repository host**, reading the comments and reviews posted on the PR, pushing fixes to the PR branch, posting `🤖 `-prefixed replies on the PR threads, and closing the hidden reviewer sessions once every active reviewer CLI has approved the current `head` SHA on the PR.
 
 ## Choosing Your Desktop Coordination Channel
@@ -60,7 +60,7 @@ Follow the **`fix-pr`** workflow (`resources/pr-workflows/skills/fix-pr/SKILL.md
      6. Resume polling the PR host for re-reviews on `<new-full-head-sha>`.
 4. **Current-head approval gate (on the PR itself)**:
    - Confirm **directly on the PR host** that:
-     1. **Every currently active reviewer seat** (`expectedReviewerTags` from `group.seats`) has posted an explicit current-head approval on the PR starting with `Approved at <current-full-head-sha>` (matching its `[<CLI Label>]` tag when multiple reviewer CLIs are active, or `Approved at <current-full-head-sha>` / formal `APPROVED` review at `<current-full-head-sha>` when only one reviewer seat is active).
+     1. **Every currently active reviewer seat** (`expectedReviewerTags` from `group.seats`) has posted an explicit current-head approval on the PR whose first line starts with `Approved at <current-full-head-sha>` and whose body contains its `[<CLI Label>]` tag (either on line 1 as `Approved at <sha> [<CLI Label>]` or in the body below line 1 as `Approved at <sha>\n\n[<CLI Label>] ...` from `pr-approve.mjs`; when only one reviewer seat is active, a formal `APPROVED` review at `<current-full-head-sha>` also counts).
      2. Zero valid unaddressed findings remain on the PR (if one reviewer approved `<current-full-head-sha>` while another posted valid findings on `<current-full-head-sha>`, fix, push, reply `🤖 `, and get fresh approvals from all active reviewers on the new `head` SHA).
      3. The PR is still open at `<current-full-head-sha>`.
 

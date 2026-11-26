@@ -91,9 +91,29 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
   assert.match(activeHtml, /needs approval/)
   assert.match(activeHtml, /Hide/)
   assert.match(activeHtml, /Peek/)
-  assert.match(activeHtml, /Retry/)
-  assert.match(activeHtml, /Dismiss/)
+  assert.equal((activeHtml.match(/>Retry</g) ?? []).length, 3, 'Retry is available on reviewing, needsAttention, and failed seats')
+  assert.equal((activeHtml.match(/>Dismiss</g) ?? []).length, 3, 'Dismiss is available on all active seats')
   assert.match(activeHtml, /Stop reviewers/)
+
+  // Starting seats expose Dismiss (so a stuck launch can be dropped) without Retry:
+  const startingGroup: TempReviewerGroupView = {
+    ...group,
+    stage: 'starting',
+    seats: [{
+      cli: 'copilot',
+      tabId: null,
+      verdict: 'starting',
+      checkedOut: 'a'.repeat(40),
+      needsAttention: false,
+      error: null,
+      keptCheckoutPath: null,
+    }],
+  }
+  const startingHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[startingGroup]} activeTabId="tab-1" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+  )
+  assert.equal((startingHtml.match(/>Retry</g) ?? []).length, 0)
+  assert.equal((startingHtml.match(/>Dismiss</g) ?? []).length, 1)
 
   // When focus moves into the peeked reviewer terminal (activeTabId === 'tab-2'), Hide and Peek remain available:
   const focusedOnReviewerHtml = renderToStaticMarkup(

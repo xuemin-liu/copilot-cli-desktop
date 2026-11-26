@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import {
+  inspectReviewCommitAgentConfigs,
   makeReviewerArea,
   planReviewerArea,
   prepareAgnosticReviewWorktree,
@@ -115,7 +116,8 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
     assert.match(brief, /review-pr\/SKILL\.md/)
     assert.match(brief, /Post all reviews, inline findings, thread replies, and approvals directly onto the PR on its remote host/)
     assert.ok(brief.includes(tag), `brief includes reviewer tag ${tag}`)
-    assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`))
+    assert.ok(brief.includes(`Approved at ${HEAD}\\n\\n${tag}`), 'documents pr-approve.mjs multi-line tagged format')
+    assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`), 'documents single-line tagged format')
     assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
 })
@@ -254,40 +256,81 @@ test('dismissing the last required seat ends the group as stopped, never approve
   assert.equal(group.outcome, 'stopped')
 })
 
-test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and cleanupReviewerSeatCredentials manage isolated worktrees cleanly', async () => {
+test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectReviewCommitAgentConfigs enforce same-repo origin branches and detect repo-local agent configs', async () => {
   const gitExe = await resolveGitExecutable()
   assert.ok(gitExe, 'git executable required')
   const dir = mkdtempSync(join(tmpdir(), 'agnostic-worktree-'))
   try {
+    const upstream = join(dir, 'upstream.git')
     const repo = join(dir, 'gitea-clone')
+    const forkClone = join(dir, 'fork-clone')
     const hooks = join(dir, 'hooks')
+    mkdirSync(upstream, { recursive: true })
     mkdirSync(repo, { recursive: true })
     mkdirSync(hooks, { recursive: true })
     const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, 'gitconfig') }
     writeFileSync(join(dir, 'gitconfig'), '[user]\n\tname = Test\n\temail = test@example.com\n[core]\n\tautocrlf = false\n')
-    execFileSync(gitExe.path, ['init', '-q'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['init', '-q', '--bare'], { cwd: upstream, env: gitEnv })
+    execFileSync(gitExe.path, ['init', '-q', '-b', 'main'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['remote', 'add', 'origin', upstream], { cwd: repo, env: gitEnv })
     writeFileSync(join(repo, 'app.ts'), 'export const v = 1\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'base'], { cwd: repo, env: gitEnv })
     const baseSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'main'], { cwd: repo, env: gitEnv })
 
+    execFileSync(gitExe.path, ['checkout', '-q', '-b', 'feat/round-1'], { cwd: repo, env: gitEnv })
     writeFileSync(join(repo, 'app.ts'), 'export const v = 2\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-1'], { cwd: repo, env: gitEnv })
     const head1Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
 
     const runner = new GitRunner({ gitPath: gitExe.path, hooksDirectory: hooks, baseEnvironment: gitEnv })
+
+    // Unpushed local-only commits are rejected before launching reviewers:
+    const unpushedArea = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    await assert.rejects(
+      prepareAgnosticReviewWorktree(runner, repo, upstream, unpushedArea, head1Sha, baseSha, 12),
+      /not on any branch of origin/,
+    )
+
+    // External fork PR commits exposed only under refs/pull/<n>/head (not refs/heads/*) are rejected even if prNumber matches:
+    execFileSync(gitExe.path, ['clone', '-q', upstream, forkClone], { env: gitEnv })
+    writeFileSync(join(forkClone, '.mcp.json'), '{"mcpServers":{"evil":{"command":"sh"}}}\n')
+    execFileSync(gitExe.path, ['add', '.'], { cwd: forkClone, env: gitEnv })
+    execFileSync(gitExe.path, ['commit', '-q', '-m', 'fork-pr'], { cwd: forkClone, env: gitEnv })
+    const forkSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: forkClone, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', `${forkSha}:refs/pull/99/head`], { cwd: forkClone, env: gitEnv })
+    await assert.rejects(
+      prepareAgnosticReviewWorktree(runner, repo, upstream, unpushedArea, forkSha, baseSha, 99),
+      /not on any branch of origin/,
+    )
+
+    // Once pushed to a real repository branch on origin, prepareAgnosticReviewWorktree succeeds:
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
+    const cleanInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head1Sha, baseSha)
+    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [] })
+
     const area = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
-    await prepareAgnosticReviewWorktree(runner, repo, 'http://omaha:3001/daq/daq-service.git', area, head1Sha, baseSha, 12)
+    await prepareAgnosticReviewWorktree(runner, repo, upstream, area, head1Sha, baseSha, 12)
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 2\n')
     assert.deepEqual(await reviewCheckoutState(runner, area), { head: head1Sha, clean: true })
 
+    // Round 2 modifying .mcp.json and .claude/settings.json is pushed to origin and detected by inspectReviewCommitAgentConfigs:
     writeFileSync(join(repo, 'app.ts'), 'export const v = 3\n')
+    writeFileSync(join(repo, '.mcp.json'), '{"mcpServers":{}}\n')
+    mkdirSync(join(repo, '.claude'), { recursive: true })
+    writeFileSync(join(repo, '.claude', 'settings.json'), '{}\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-2'], { cwd: repo, env: gitEnv })
     const head2Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
 
-    const refreshed = await refreshAgnosticReviewWorktree(runner, area, '', head2Sha, baseSha, 12)
+    const configInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head2Sha, baseSha)
+    assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), ['.claude/settings.json', '.mcp.json'])
+    assert.deepEqual(configInspect.presentAgentConfigs.sort(), ['.claude/settings.json', '.mcp.json'])
+
+    const refreshed = await refreshAgnosticReviewWorktree(runner, area, upstream, head2Sha, baseSha, 12)
     assert.equal(refreshed, head2Sha)
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 3\n')
 
@@ -306,7 +349,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and cleanupR
       head: head2Sha,
       base: baseSha,
       clis: ['copilot'],
-      origin: 'http://omaha:3001/daq/daq-service.git',
+      origin: upstream,
     })
     group.requiredSeats.get('copilot')!.area = area
     await shutdownActiveReviewerSeats(registry.list(), reservations, async () => { stoppedSeat = true })

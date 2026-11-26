@@ -244,7 +244,7 @@ fi
 work=$(mktemp -d) || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$work"; if [ -n "$task_report" ]; then rm -f -- "$task_report"; fi' EXIT
 max_time=30
-if [ "$command" = pr-wait ] || { [ "$command" = pr-reviewers ] && { [ "$action" = wait ] || [ "$action" = start ]; }; }; then max_time=90; fi
+if [ "$command" = pr-reviewers ] && { [ "$action" = wait ] || [ "$action" = start ]; }; then max_time=90; fi
 {
   printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = %s\nmax-redirs = 0\n' "$max_time"
   printf 'header = "Authorization: Bearer %s"\n' "$token"
@@ -284,7 +284,7 @@ if [ "$changes" -eq 1 ]; then
   if ! grep -q '[^[:space:]]' "$work/changes"; then printf '# No uncommitted changes.' > "$work/changes"; fi
   printf 'form = "changes=<%s"\n' "$(quote "$work/changes")" >> "$work/config"
 fi
-if [ "$command" = pr-read ] || [ "$command" = pr-wait ] || [ "$command" = pr-reviewers ]; then
+if [ "$command" = pr-read ] || [ "$command" = pr-reviewers ]; then
   printf 'form-string = "format=pr-json"\n' >> "$work/config"
   if [ -n "$page" ]; then printf 'form-string = "page=%s"\n' "$page" >> "$work/config"; fi
   curl --fail-with-body -K - < "$work/config"
