@@ -10,17 +10,29 @@ import {
   validateOtherCliConfig,
 } from './agent-cli-settings.js'
 
-test('buildOtherCliLaunchArgs emits Claude approval and model as separate tokens', () => {
+test('buildOtherCliLaunchArgs emits Claude approval and model as separate tokens, including allow-all', () => {
   assert.deepEqual(
     buildOtherCliLaunchArgs('claude', { approval: 'plan', model: 'claude-sonnet-5' }),
     ['--permission-mode', 'plan', '--model', 'claude-sonnet-5'],
   )
+  assert.deepEqual(
+    buildOtherCliLaunchArgs('claude', { approval: 'allow-all', model: 'claude-sonnet-5' }),
+    ['--dangerously-skip-permissions', '--model', 'claude-sonnet-5'],
+  )
 })
 
-test('buildOtherCliLaunchArgs emits Codex approval and sandbox independently', () => {
+test('buildOtherCliLaunchArgs emits Codex approval and sandbox independently, and allow-all supersedes sandbox', () => {
   assert.deepEqual(
     buildOtherCliLaunchArgs('codex', { approval: 'never', sandbox: 'read-only', model: 'gpt-5-codex' }),
     ['--ask-for-approval', 'never', '--sandbox', 'read-only', '--model', 'gpt-5-codex'],
+  )
+  assert.deepEqual(
+    buildOtherCliLaunchArgs('codex', { approval: 'never', sandbox: 'danger-full-access' }),
+    ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access'],
+  )
+  assert.deepEqual(
+    buildOtherCliLaunchArgs('codex', { approval: 'allow-all', sandbox: 'read-only', model: 'gpt-5-codex' }),
+    ['--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5-codex'],
   )
   // Approval without sandbox leaves sandbox untouched.
   assert.deepEqual(buildOtherCliLaunchArgs('codex', { approval: 'on-request' }), ['--ask-for-approval', 'on-request'])

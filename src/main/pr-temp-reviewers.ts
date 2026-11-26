@@ -3,6 +3,8 @@ import { rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { parseSafeHttpUrl } from './external-targets.js'
+import { helpListsFlag, type PerCliConfig } from './agent-cli-settings.js'
+import type { PermissionPreset } from './permission-presets.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import type { ReviewerArea } from './pr-review-launch.js'
 import type { ReviewReservation, ReviewReservations } from './pr-review-reservations.js'
@@ -231,6 +233,71 @@ export function prReviewAndFixRequest(text: string): PrReviewAndFixRequest | nul
 
 export function reviewerPromptLine(prTarget: string, briefPath: string): string {
   return `Review ${prTarget} by reading and following the instructions in "${briefPath}".`
+}
+
+/**
+ * Resolves the Copilot CLI permission preset for a hidden temporary PR reviewer session.
+ * When `reviewerAllowAll` is enabled (the default), uses `full-access` (`--allow-all`) so hidden background reviews
+ * do not stall on interactive terminal permission prompts.
+ */
+export function resolveCopilotReviewerPreset(
+  workspacePreset: PermissionPreset,
+  reviewerAllowAll: boolean,
+  workspaceName: string,
+): PermissionPreset {
+  if (reviewerAllowAll) return 'full-access'
+  if (workspacePreset === 'read-only') {
+    throw new Error(
+      `${workspaceName} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change the workspace permission preset, or remove Copilot CLI from Pull request reviewers.`,
+    )
+  }
+  return workspacePreset
+}
+
+/**
+ * Resolves launch settings and permission flags for a non-Copilot temporary PR reviewer session (`claude` or `codex`).
+ * When `reviewerAllowAll` is enabled (the default), preserves any configured `model` while supplying verified
+ * allow-all flags (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for
+ * Codex CLI) so hidden background reviews do not block on interactive approval prompts.
+ */
+export function resolveOtherCliReviewerArgs(
+  cli: Exclude<ReviewerCli, 'copilot'>,
+  savedConfig: PerCliConfig | undefined,
+  reviewerAllowAll: boolean,
+  help: string | null,
+  workspaceName: string,
+): { configForLaunch: PerCliConfig | undefined; allowAllArgs: string[] } {
+  if (!reviewerAllowAll) {
+    if (cli === 'codex' && savedConfig?.sandbox === 'read-only' && savedConfig?.approval !== 'allow-all') {
+      throw new Error(
+        `${workspaceName} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Pull request reviewers.`,
+      )
+    }
+    return { configForLaunch: savedConfig, allowAllArgs: [] }
+  }
+
+  const configForLaunch: PerCliConfig | undefined = savedConfig?.model ? { model: savedConfig.model } : undefined
+  if (cli === 'claude') {
+    if (help && helpListsFlag(help, '--dangerously-skip-permissions')) {
+      return { configForLaunch, allowAllArgs: ['--dangerously-skip-permissions'] }
+    }
+    if (help && helpListsFlag(help, '--permission-mode')) {
+      return { configForLaunch, allowAllArgs: ['--permission-mode', 'bypassPermissions'] }
+    }
+    throw new Error(
+      'Could not confirm that this Claude Code installation supports --dangerously-skip-permissions or --permission-mode bypassPermissions.',
+    )
+  }
+
+  if (help && helpListsFlag(help, '--dangerously-bypass-approvals-and-sandbox')) {
+    return { configForLaunch, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] }
+  }
+  if (help && helpListsFlag(help, '--ask-for-approval') && helpListsFlag(help, '--sandbox')) {
+    return { configForLaunch, allowAllArgs: ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access'] }
+  }
+  throw new Error(
+    'Could not confirm that this Codex CLI installation supports --dangerously-bypass-approvals-and-sandbox.',
+  )
 }
 
 export function buildReviewerBrief(options: {

@@ -59,6 +59,7 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
         // Plan is a startup mode the user can leave — it is not a read-only guarantee.
         { value: 'plan', label: 'Plan (start in plan mode)', args: ['--permission-mode', 'plan'] },
         { value: 'acceptEdits', label: 'Accept edits', args: ['--permission-mode', 'acceptEdits'] },
+        { value: 'allow-all', label: 'Allow all (--dangerously-skip-permissions)', args: ['--dangerously-skip-permissions'] },
       ],
     }],
   },
@@ -67,8 +68,7 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
     supportsModel: true,
     modelLabel: 'Model',
     modelPlaceholder: 'Codex default (e.g. gpt-5-codex)',
-    // Approval and sandbox are independent: "Never" only stops escalation prompts; only an explicit sandbox
-    // narrows filesystem access, and choosing one replaces Codex's native default_permissions.
+    // Approval and sandbox are independent unless approval is "allow-all", which bypasses both approvals and sandbox.
     selectors: [
       {
         key: 'approval',
@@ -77,6 +77,7 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
         levels: [
           { value: 'on-request', label: 'Ask on request', args: ['--ask-for-approval', 'on-request'] },
           { value: 'never', label: 'Never prompt', args: ['--ask-for-approval', 'never'] },
+          { value: 'allow-all', label: 'Allow all (--dangerously-bypass-approvals-and-sandbox)', args: ['--dangerously-bypass-approvals-and-sandbox'] },
         ],
       },
       {
@@ -86,6 +87,7 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
         levels: [
           { value: 'read-only', label: 'Read only', args: ['--sandbox', 'read-only'] },
           { value: 'workspace-write', label: 'Workspace write', args: ['--sandbox', 'workspace-write'] },
+          { value: 'danger-full-access', label: 'Full access (--sandbox danger-full-access)', args: ['--sandbox', 'danger-full-access'] },
         ],
       },
     ],
@@ -220,8 +222,10 @@ export function helpListsFlag(help: string, flag: string): boolean {
  */
 export function incompatibleOtherCliFields(cli: OtherCli, config: PerCliConfig | undefined, help: string | null): IncompatibleField[] {
   const fields: IncompatibleField[] = []
+  const skipCodexSandbox = cli === 'codex' && config?.approval === 'allow-all'
   for (const [key, value] of Object.entries(config ?? {})) {
     if (!value) continue
+    if (skipCodexSandbox && key === 'sandbox') continue
     const shown = fieldFlags(cli, key, value)
     if ('unknown' in shown) { fields.push({ key, label: shown.label, value, reason: 'not supported by this version of the desktop' }); continue }
     if (help === null) { fields.push({ key, label: shown.label, value, reason: `could not confirm that this ${cli} installation supports it` }); continue }
@@ -241,7 +245,9 @@ export function buildOtherCliLaunchArgs(cli: OtherCli, config: PerCliConfig | un
   if (!config) return []
   const descriptor = AGENT_CLI_SETTINGS[cli]
   const args: string[] = []
+  const skipCodexSandbox = cli === 'codex' && config.approval === 'allow-all'
   for (const selector of descriptor.selectors) {
+    if (skipCodexSandbox && selector.key === 'sandbox') continue
     const value = config[selector.key]
     if (value === undefined || value === '') continue
     const level = knownLevel(selector, value)

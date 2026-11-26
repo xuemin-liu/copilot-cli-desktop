@@ -22,6 +22,8 @@ import {
   prReviewAndFixRequest,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
+  resolveCopilotReviewerPreset,
+  resolveOtherCliReviewerArgs,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
 } from './pr-temp-reviewers.js'
@@ -120,6 +122,43 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
     assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`), 'documents single-line tagged format')
     assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
+})
+
+test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verified allow-all flags when enabled and respect workspace settings when disabled', () => {
+  assert.equal(resolveCopilotReviewerPreset('default', true, 'demo'), 'full-access')
+  assert.equal(resolveCopilotReviewerPreset('read-only', true, 'demo'), 'full-access')
+  assert.equal(resolveCopilotReviewerPreset('trusted-directory', false, 'demo'), 'trusted-directory')
+  assert.throws(() => resolveCopilotReviewerPreset('read-only', false, 'demo'), /Restricted \(read-only\)/)
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('claude', { approval: 'plan', model: 'claude-sonnet-5' }, true, '  --dangerously-skip-permissions\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'claude-sonnet-5' }, allowAllArgs: ['--dangerously-skip-permissions'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('claude', undefined, true, '  --permission-mode <mode>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--permission-mode', 'bypassPermissions'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('claude', undefined, true, null, 'demo'),
+    /Could not confirm that this Claude Code installation supports/,
+  )
+
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', { approval: 'on-request', sandbox: 'read-only', model: 'gpt-5-codex' }, true, '  --dangerously-bypass-approvals-and-sandbox\n  --model <m>', 'demo'),
+    { configForLaunch: { model: 'gpt-5-codex' }, allowAllArgs: ['--dangerously-bypass-approvals-and-sandbox'] },
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', undefined, true, '  --ask-for-approval <a>\n  --sandbox <s>', 'demo'),
+    { configForLaunch: undefined, allowAllArgs: ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access'] },
+  )
+  assert.throws(
+    () => resolveOtherCliReviewerArgs('codex', { sandbox: 'read-only' }, false, '  --sandbox <s>', 'demo'),
+    /Read only/,
+  )
+  assert.deepEqual(
+    resolveOtherCliReviewerArgs('codex', { approval: 'allow-all', sandbox: 'read-only' }, false, '  --dangerously-bypass-approvals-and-sandbox', 'demo'),
+    { configForLaunch: { approval: 'allow-all', sandbox: 'read-only' }, allowAllArgs: [] },
+  )
 })
 
 test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden reviewer seats across rounds, and finishes cleanly', () => {

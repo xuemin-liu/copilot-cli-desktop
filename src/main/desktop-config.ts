@@ -49,12 +49,14 @@ export interface DesktopConfig {
   turnCheckpoints: boolean
   /** Default CLIs launched as temporary PR reviewers when a workspace has no override of its own. */
   reviewerClis: ReviewerCli[]
+  /** Launch hidden temporary PR reviewer sessions with allow-all flags so background reviews do not block on prompts. */
+  reviewerAllowAll: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll'
 >
 
 function samePrefValue(a: unknown, b: unknown): boolean {
@@ -141,6 +143,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   openFilesOutsideWorkspace: false,
   turnCheckpoints: true,
   reviewerClis: [...DEFAULT_REVIEWER_CLIS],
+  reviewerAllowAll: true,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -404,6 +407,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
     turnCheckpoints: value.turnCheckpoints !== false,
     reviewerClis: normalizeReviewerClis(value.reviewerClis),
+    reviewerAllowAll: value.reviewerAllowAll !== false,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

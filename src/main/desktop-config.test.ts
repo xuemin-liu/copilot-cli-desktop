@@ -63,19 +63,25 @@ test('turn checkpoints are on by default and turn off only for an explicit false
   assert.equal(normalizeDesktopConfig(JSON.parse(JSON.stringify(normalizeDesktopConfig({ turnCheckpoints: false })))).turnCheckpoints, false, 'kept across a save and reload')
 })
 
-test('reviewerClis defaults to copilot and round-trips global and workspace overrides', async () => {
+test('reviewerClis and reviewerAllowAll default cleanly and round-trip global and workspace overrides', async () => {
   assert.deepEqual(DEFAULT_DESKTOP_CONFIG.reviewerClis, ['copilot'])
+  assert.equal(DEFAULT_DESKTOP_CONFIG.reviewerAllowAll, true)
   assert.deepEqual(normalizeDesktopConfig({}).reviewerClis, ['copilot'])
+  assert.equal(normalizeDesktopConfig({}).reviewerAllowAll, true)
+  for (const value of ['false', 0, null, {}]) assert.equal(normalizeDesktopConfig({ reviewerAllowAll: value }).reviewerAllowAll, true, String(value))
+  assert.equal(normalizeDesktopConfig({ reviewerAllowAll: false }).reviewerAllowAll, false)
   assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['codex', 'claude'] }).reviewerClis, ['claude', 'codex'])
   assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity'] }).reviewerClis, ['copilot'])
   await withTempFile(async filename => {
     const config = structuredClone(DEFAULT_DESKTOP_CONFIG)
     config.reviewerClis = ['copilot', 'claude']
+    config.reviewerAllowAll = false
     const profile = activateWorkspaceProfile(config, 'C:\\work\\reviewers')
     profile.reviewerClis = ['codex']
     await writeDesktopConfig(filename, config)
     const loaded = await readDesktopConfig(filename)
     assert.deepEqual(loaded.reviewerClis, ['copilot', 'claude'])
+    assert.equal(loaded.reviewerAllowAll, false)
     assert.deepEqual(loaded.profiles[0]?.reviewerClis, ['codex'])
   })
 })
@@ -448,6 +454,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     openFilesOutsideWorkspace: config.openFilesOutsideWorkspace,
     turnCheckpoints: config.turnCheckpoints,
     reviewerClis: [...config.reviewerClis],
+    reviewerAllowAll: config.reviewerAllowAll,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
   // Turning the tray off also moved close behavior back to asking.
