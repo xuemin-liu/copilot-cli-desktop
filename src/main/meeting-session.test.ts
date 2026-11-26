@@ -337,14 +337,10 @@ test('pr-reviewers and pr-wait pass actions, PR targets, wait timeouts, and JSON
       assert.equal(finished.code, 0, finished.stderr)
       assert.deepEqual(JSON.parse(finished.stdout.trim()), { done: false, command: 'pr-reviewers', action: 'finish', pr: null, head: null, base: null, text: null, wait: null })
 
-      const seatWait = await run('pr-wait', '-Wait', '20')
-      assert.equal(seatWait.code, 0, seatWait.stderr)
-      assert.deepEqual(JSON.parse(seatWait.stdout.trim()), { done: false, command: 'pr-wait', action: null, pr: null, head: null, base: null, text: null, wait: 20 })
-
       assert.notEqual((await run('pr-reviewers', '-Action', 'bogus')).code, 0)
       assert.notEqual((await run('pr-reviewers', '-Action', 'round', '-Head', 'c'.repeat(40))).code, 0, 'round requires -File')
-      assert.notEqual((await run('pr-wait', '-Wait', '999')).code, 0)
-      assert.equal(calls.length, 5)
+      assert.notEqual((await run('pr-reviewers', '-Action', 'wait', '-Wait', '999')).code, 0)
+      assert.equal(calls.length, 4)
   } finally {
     await server.close()
     await rm(directory, { recursive: true, force: true })

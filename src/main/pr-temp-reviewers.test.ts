@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import {
+  inspectReviewCommitAgentConfigs,
   makeReviewerArea,
   planReviewerArea,
   prepareAgnosticReviewWorktree,
@@ -14,22 +15,15 @@ import {
   reviewCheckoutState,
 } from './pr-review-launch.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { PR_REVIEWER_TOKEN_ENV } from './pr-reviewer-mcp.js'
 import {
-  buildClaudeMcpConfigJson,
-  buildClaudeReviewerLaunch,
-  buildCodexReviewerLaunch,
+  buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
-  prepareCodexReviewerHome,
   prReviewAndFixRequest,
-  readGroupStateForSeat,
-  readReviewerDiffPage,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
-  validateSeatReviewSubmission,
 } from './pr-temp-reviewers.js'
 
 const HEAD = 'a'.repeat(40)
@@ -102,79 +96,66 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
   assert.equal(prReviewAndFixRequest('review and fix 2 bugs'), null)
 })
 
-test('CLI launch builders verify flags, isolate CODEX_HOME outside user home, and keep bearer tokens out of argv', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-home-test-'))
-  try {
-    const fakeUserHome = join(dir, 'user-home')
-    const fakeRealCodex = join(fakeUserHome, '.codex')
-    const seatHome = join(dir, 'seat-area', 'home')
-    const checkoutPath = join(dir, 'seat-area', 'checkout')
-    mkdirSync(fakeRealCodex, { recursive: true })
-    mkdirSync(seatHome, { recursive: true })
-    mkdirSync(checkoutPath, { recursive: true })
-
-    writeFileSync(join(fakeRealCodex, 'auth.json'), '{"access_token":"tok"}')
-    writeFileSync(
-      join(fakeRealCodex, 'config.toml'),
-      '[mcp_servers.node_repl]\ncommand = "node"\n[mcp_servers.copilot-meeting]\nurl = "http://127.0.0.1:39217/mcp"\n',
-    )
-    writeFileSync(join(fakeRealCodex, 'hooks.json'), '{"hooks":[]}')
-
-    const { codexHome: isolatedCodexHome, authSync } = await prepareCodexReviewerHome({
-      areaHome: seatHome,
-      realCodexHome: fakeRealCodex,
-      checkoutPath,
+test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly on the remote PR host and never perform local-only review', () => {
+  for (const [cli, tag] of [['copilot', '[Copilot CLI]'], ['claude', '[Claude Code]'], ['codex', '[Codex CLI]']] as const) {
+    const brief = buildReviewerBrief({
+      cli,
+      repository: 'xuemin-liu/copilot-cli-desktop',
+      prLabel: 'PR #322',
+      prNumber: 322,
+      prUrl: 'https://github.com/xuemin-liu/copilot-cli-desktop/pull/322',
+      round: 1,
+      head: HEAD,
+      base: BASE,
+      marker: '🤖 ',
+      reviewPrSkillPath: '/app/resources/pr-workflows/skills/review-pr/SKILL.md',
+      prToolsDir: '/app/resources/pr-workflows',
+      seatStateDir: '/tmp/seat-state',
+      checkoutPath: '/tmp/seat-checkout',
     })
-    assert.ok(authSync, 'authSync returned when real auth.json exists')
-    assert.equal(isolatedCodexHome.startsWith(resolve(fakeUserHome)), false, 'CODEX_HOME must live outside user home')
-    assert.equal(existsSync(join(isolatedCodexHome, 'auth.json')), true, 'auth.json copied to isolated CODEX_HOME')
-    assert.equal(existsSync(join(isolatedCodexHome, 'hooks.json')), false, 'user hooks never copied')
-    const isolatedConfig = readFileSync(join(isolatedCodexHome, 'config.toml'), 'utf8')
-    assert.doesNotMatch(isolatedConfig, /node_repl|copilot-meeting/, 'user MCP servers excluded from isolated CODEX_HOME')
-    assert.match(isolatedConfig, /trust_level = "trusted"/)
-
-    const claudeHelp = '--session-id --restricted --disallowedTools --strict-mcp-config --mcp-config --allowedTools --model'
-    const claude = buildClaudeReviewerLaunch({
-      help: claudeHelp,
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      mcpConfigPath: '/tmp/claude-mcp.json',
-      prompt: 'Review PR',
-      model: 'sonnet',
-    })
-    assert.ok(claude.args.includes('--restricted'))
-    assert.ok(claude.args.includes('--strict-mcp-config'))
-    assert.equal(claude.args.some((arg) => arg.includes('secret-token')), false)
-    const json = JSON.parse(buildClaudeMcpConfigJson('http://127.0.0.1:9999/pr-reviewer-mcp', 'secret-token'))
-    assert.equal(json.mcpServers['copilot-pr-reviewer'].headers.Authorization, 'Bearer secret-token')
-
-    const codexHelp = '--no-daemon --sandbox --ask-for-approval --config --model'
-    const codex = buildCodexReviewerLaunch({
-      help: codexHelp,
-      mcpUrl: 'http://127.0.0.1:9999/pr-reviewer-mcp',
-      bearerToken: 'codex-secret-token',
-      codexHome: isolatedCodexHome,
-      prompt: 'Review PR',
-    })
-    assert.ok(codex.args.includes('--no-daemon'))
-    assert.ok(codex.args.includes('read-only'))
-    assert.equal(codex.args.some((arg) => arg.includes('codex-secret-token')), false, 'secret never in argv')
-    assert.equal(codex.envAdditions[PR_REVIEWER_TOKEN_ENV], 'codex-secret-token')
-    assert.equal(codex.envAdditions.CODEX_HOME, resolve(isolatedCodexHome))
-    assert.equal(codex.envAdditions.CODEX_HOME!.startsWith(resolve(fakeUserHome)), false)
-
-    assert.throws(() => buildClaudeReviewerLaunch({
-      help: '--session-id',
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      mcpConfigPath: '/tmp/x.json',
-      prompt: 'Review',
-    }), /required reviewer flags/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
+    assert.match(brief, /review-pr\/SKILL\.md/)
+    assert.match(brief, /Post all reviews, inline findings, thread replies, and approvals directly onto the PR on its remote host/)
+    assert.ok(brief.includes(tag), `brief includes reviewer tag ${tag}`)
+    assert.ok(brief.includes(`Approved at ${HEAD}\\n\\n${tag}`), 'documents pr-approve.mjs multi-line tagged format')
+    assert.ok(brief.includes(`Approved at ${HEAD} ${tag}`), 'documents single-line tagged format')
+    assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
 })
 
-test('TempReviewerRegistry coordinates forge-agnostic multi-round Gitea reviews, invalidates stale approvals, and finishes cleanly', () => {
+test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden reviewer seats across rounds, and finishes cleanly', () => {
   const registry = new TempReviewerRegistry()
+
+  // Local repos without remote origin or without a PR number/URL are refused:
+  assert.throws(() => registry.createGroup({
+    hostTabId: 'tab-1',
+    hostSessionId: 'sess-1',
+    profileId: 'prof-1',
+    projectPath: '/tmp/local',
+    repository: 'local',
+    prLabel: 'Branch main',
+    prNumber: 12,
+    prUrl: null,
+    head: HEAD,
+    base: BASE,
+    clis: ['copilot'],
+    origin: '',
+  }), /remote Git origin/)
+
+  assert.throws(() => registry.createGroup({
+    hostTabId: 'tab-1',
+    hostSessionId: 'sess-1',
+    profileId: 'prof-1',
+    projectPath: '/tmp/local',
+    repository: 'omaha:3001/daq/daq-service',
+    prLabel: 'Branch feat',
+    prNumber: null,
+    prUrl: null,
+    head: HEAD,
+    base: BASE,
+    clis: ['copilot'],
+    origin: 'http://omaha:3001/daq/daq-service.git',
+  }), /local branch-only reviews are not supported/)
+
   const { group, hostKey } = registry.createGroup({
     hostTabId: 'tab-1',
     hostSessionId: 'sess-1',
@@ -186,55 +167,15 @@ test('TempReviewerRegistry coordinates forge-agnostic multi-round Gitea reviews,
     prUrl: 'http://omaha:3001/daq/daq-service/pulls/12',
     head: HEAD,
     base: BASE,
-    context: 'PR #12: Offline DAQ buffer improvements',
     clis: ['copilot', 'claude'],
     origin: 'http://omaha:3001/daq/daq-service.git',
   })
-  group.stage = 'active'
-  for (const seat of group.requiredSeats.values()) seat.lifecycle = 'running'
   assert.equal(registry.authorizeHostKey(hostKey), group)
   assert.equal(registry.authorizeHostKey('f'.repeat(64)), null)
+  assert.equal(registry.activeSeatCount(), 2)
 
-  const copilotSeat = group.requiredSeats.get('copilot')!
-  const claudeSeat = group.requiredSeats.get('claude')!
-  assert.equal(registry.authorizeBearer(claudeSeat.bearerToken)?.seat, claudeSeat)
-
-  // Cannot approve before reading round 1 context:
-  assert.equal(validateSeatReviewSubmission(group, copilotSeat, true).ok, false)
-
-  // Both seats read round 1:
-  const read1 = JSON.parse(readGroupStateForSeat(group, copilotSeat)) as { round: number; nextPage: string | null; entries: Array<{ kind: string }> }
-  assert.equal(read1.round, 1)
-  assert.equal(read1.nextPage, null)
-  assert.equal(read1.entries[0]?.kind, 'context')
-  readGroupStateForSeat(group, claudeSeat)
-
-  // Copilot approves round 1, while Claude finds a blocking bug:
-  const copilotApprovedR1 = registry.recordSeatReview(group.id, 'copilot', {
-    body: `Approved at ${HEAD}\n\n[Copilot CLI] Tests pass.`,
-    approve: true,
-    comments: [],
-    checks: { ran: ['npm test'], missing: [] },
-  })
-  assert.equal(copilotApprovedR1.ok, true)
-  assert.equal(registry.view(group).confirmTarget, null, 'still waiting on Claude')
-
-  // Sibling approval or findings do NOT mutate materialStateSignature (preventing reviewer-to-reviewer ping-pong):
-  const sigBeforeSiblingReview = group.materialStateSignature
-  const claudeFindingR1 = registry.recordSeatReview(group.id, 'claude', {
-    body: '[Claude Code] Found ring-buffer overflow.',
-    approve: false,
-    comments: [{ path: 'src/buffer.ts', line: 44, body: 'Blocking: off-by-one when wrapping.' }],
-  })
-  assert.equal(claudeFindingR1.ok, true)
-  assert.equal(group.materialStateSignature, sigBeforeSiblingReview, 'sibling review does not alter host materialStateSignature')
-  assert.equal(registry.recordSeatReply(group.id, 'claude', 'conversation', 'Additional note.').ok, true)
-  assert.equal(group.materialStateSignature, sigBeforeSiblingReview, 'sibling reply does not alter host materialStateSignature')
-  const afterFindingView = registry.view(group)
-  // Both seats are now settled on round 1 ('approved' + 'changes-requested') so host wait returns immediately:
-  assert.deepEqual(afterFindingView.seats.map((s) => s.verdict), ['approved', 'changes-requested'])
-  assert.ok(registry.settledStateKey(group, afterFindingView), 'round 1 settled state key is computed')
-  assert.throws(() => registry.finishByHost(group.id, 'approved'), /Cannot finish as approved/)
+  // Cannot finish while seats are still starting:
+  assert.throws(() => registry.finishByHost(group.id, 'approved'), /still starting/)
 
   // Concurrent group in the same workspace profile is rejected while active:
   assert.throws(() => registry.createGroup({
@@ -245,106 +186,54 @@ test('TempReviewerRegistry coordinates forge-agnostic multi-round Gitea reviews,
     repository: 'omaha:3001/daq/daq-service',
     prLabel: 'PR #13',
     prNumber: 13,
-    prUrl: null,
+    prUrl: 'http://omaha:3001/daq/daq-service/pulls/13',
     head: HEAD,
     base: BASE,
     clis: ['copilot'],
     origin: 'http://omaha:3001/daq/daq-service.git',
   }), /already running temporary reviewers/)
 
-  // Host fixes the bug, pushes HEAD2, and advances to Round 2 (resetting settled key & updating materialStateSignature):
-  registry.advanceRound(group.id, HEAD2, BASE, `🤖 Fixed ring-buffer wrap in ${HEAD2.slice(0, 8)}.`)
-  assert.notEqual(group.materialStateSignature, sigBeforeSiblingReview)
+  group.stage = 'active'
+  const copilotSeat = group.requiredSeats.get('copilot')!
+  const claudeSeat = group.requiredSeats.get('claude')!
+  copilotSeat.lifecycle = 'running'
+  claudeSeat.lifecycle = 'running'
+
+  const status = JSON.parse(registry.statusPayload(group)) as {
+    done: boolean
+    expectedReviewerTags: string[]
+    group: { round: number; seats: Array<{ cli: string; verdict: string }> }
+  }
+  assert.equal(status.done, false)
+  assert.deepEqual(status.expectedReviewerTags, ['[Copilot CLI]', '[Claude Code]'])
+  assert.equal(registry.settledStateKey(group), null, 'healthy reviewing seats block wait up to timeout')
+
+  // Attention needed (e.g. tool approval prompt in hidden tab) surfaces immediately to wait:
+  claudeSeat.needsAttention = true
+  const attentionKey = registry.settledStateKey(group)
+  assert.ok(attentionKey)
+  claudeSeat.needsAttention = false
+
+  // Failed seat blocks approved finish until retried or dismissed:
+  registry.revokeSeat(claudeSeat, 'failed', 'Claude exited unexpectedly')
+  assert.throws(() => registry.finishByHost(group.id, 'approved'), /failed/)
+  const retried = registry.resetSeatGeneration(group.id, 'claude')
+  retried.lifecycle = 'running'
+
+  // Advance to Round 2 after author pushes HEAD2 on PR:
+  registry.advanceRound(group.id, HEAD2, BASE, `🤖 Fixed findings in ${HEAD2.slice(0, 8)}.`)
   assert.equal(group.round, 2)
   assert.equal(group.head, HEAD2)
 
-  // Stale submission from Round 1 checkout is rejected:
-  const staleSubmit = registry.recordSeatReview(group.id, 'copilot', {
-    body: `Approved at ${HEAD}`,
-    approve: true,
-    comments: [],
-    checks: { ran: ['npm test'], missing: [] },
-  })
-  assert.equal(staleSubmit.ok, false)
-
-  // Desktop refreshes both seats' detached worktrees to HEAD2:
-  for (const seat of group.requiredSeats.values()) {
-    seat.checkedOut = HEAD2
-    seat.checkedOutBase = BASE
-    seat.lastSeenRound = 2
-    seat.lastSeenHead = HEAD2
-    seat.lastSeenBase = BASE
-    readGroupStateForSeat(group, seat)
-  }
-
-  // Both seats approve Round 2 with zero missing checks -> finishByHost('approved') succeeds!
-  assert.equal(registry.recordSeatReview(group.id, 'copilot', {
-    body: `Approved at ${HEAD2}\n\n[Copilot CLI] Verified fix.`,
-    approve: true,
-    comments: [],
-    checks: { ran: ['npm test'], missing: [] },
-  }).ok, true)
-  assert.equal(registry.recordSeatReview(group.id, 'claude', {
-    body: `Approved at ${HEAD2}\n\n[Claude Code] Wrap logic is now sound.`,
-    approve: true,
-    comments: [],
-    checks: { ran: ['static-source-and-diff-review'], missing: [] },
-  }).ok, true)
-
-  const statusBeforeFinish = JSON.parse(registry.statusPayload(group)) as { allApproved: boolean; readyToConfirm: boolean }
-  assert.equal(statusBeforeFinish.allApproved, true)
-  assert.equal(statusBeforeFinish.readyToConfirm, true)
-
+  // Once author fix-pr verifies PR-host approvals, finishByHost('approved') closes all seats cleanly:
+  retried.lifecycle = 'stopped'
   const finished = registry.finishByHost(group.id, 'approved')
   assert.equal(finished.view.stage, 'ended')
   assert.equal(finished.view.outcome, 'approved')
   assert.equal(finished.seats.length, 2)
-  assert.equal(registry.authorizeBearer(claudeSeat.bearerToken), null, 'seat bearer tokens revoked on finish')
 })
 
-test('held-approval blocks host auto-finish while enabling user Approve anyway confirmation in ReviewerBar', () => {
-  const registry = new TempReviewerRegistry()
-  const { group } = registry.createGroup({
-    hostTabId: 'tab-held',
-    hostSessionId: 'sess-held',
-    profileId: 'prof-1',
-    projectPath: '/tmp/repo',
-    repository: 'omaha:3001/org/repo',
-    prLabel: 'PR #5',
-    prNumber: 5,
-    prUrl: 'http://omaha:3001/org/repo/pulls/5',
-    head: HEAD,
-    base: BASE,
-    clis: ['claude'],
-    origin: 'http://omaha:3001/org/repo.git',
-  })
-  group.stage = 'active'
-  const claudeSeat = group.requiredSeats.get('claude')!
-  claudeSeat.lifecycle = 'running'
-  readGroupStateForSeat(group, claudeSeat)
-
-  const res = registry.recordSeatReview(group.id, 'claude', {
-    body: `Approved at ${HEAD}\n\n[Claude Code] Clean diff.`,
-    approve: true,
-    comments: [],
-    checks: { ran: ['diff-review'], missing: ['integration suite'] },
-  })
-  assert.equal(res.ok, true)
-  if (res.ok) assert.equal(res.held, true)
-
-  const payload = JSON.parse(registry.statusPayload(group)) as { allApproved: boolean; readyToConfirm: boolean }
-  assert.equal(payload.allApproved, false, 'held-approval cannot auto-finish without user confirmation')
-  assert.equal(payload.readyToConfirm, true)
-  assert.throws(() => registry.finishByHost(group.id, 'approved'), /Approve anyway/)
-
-  const target = registry.view(group).confirmTarget!
-  assert.equal(target.approveAnyway, true)
-  const confirmed = registry.verifyAndConfirm(group.id, target)
-  assert.equal(confirmed.outcome, 'confirmed')
-  assert.equal(group.stage, 'ended')
-})
-
-test('dismissing the last required seat ends the group as stopped, never confirmed or approved', () => {
+test('dismissing the last required seat ends the group as stopped, never approved', () => {
   const registry = new TempReviewerRegistry()
   const { group } = registry.createGroup({
     hostTabId: 'tab-2',
@@ -354,11 +243,11 @@ test('dismissing the last required seat ends the group as stopped, never confirm
     repository: 'owner/repo',
     prLabel: 'PR #20',
     prNumber: 20,
-    prUrl: null,
+    prUrl: 'https://github.com/owner/repo/pull/20',
     head: HEAD,
     base: BASE,
     clis: ['claude'],
-    origin: '',
+    origin: 'https://github.com/owner/repo.git',
   })
   group.stage = 'active'
   const { groupEnded } = registry.dismissSeat(group.id, 'claude')
@@ -367,211 +256,129 @@ test('dismissing the last required seat ends the group as stopped, never confirm
   assert.equal(group.outcome, 'stopped')
 })
 
-test('prepareAgnosticReviewWorktree and refreshAgnosticReviewWorktree work on local / non-GitHub repositories without gh', async () => {
+test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectReviewCommitAgentConfigs enforce same-repo origin branches and detect repo-local agent configs', async () => {
   const gitExe = await resolveGitExecutable()
   assert.ok(gitExe, 'git executable required')
   const dir = mkdtempSync(join(tmpdir(), 'agnostic-worktree-'))
   try {
+    const upstream = join(dir, 'upstream.git')
     const repo = join(dir, 'gitea-clone')
+    const forkClone = join(dir, 'fork-clone')
     const hooks = join(dir, 'hooks')
+    mkdirSync(upstream, { recursive: true })
     mkdirSync(repo, { recursive: true })
     mkdirSync(hooks, { recursive: true })
     const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, 'gitconfig') }
     writeFileSync(join(dir, 'gitconfig'), '[user]\n\tname = Test\n\temail = test@example.com\n[core]\n\tautocrlf = false\n')
-    execFileSync(gitExe.path, ['init', '-q'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['init', '-q', '--bare'], { cwd: upstream, env: gitEnv })
+    execFileSync(gitExe.path, ['init', '-q', '-b', 'main'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['remote', 'add', 'origin', upstream], { cwd: repo, env: gitEnv })
     writeFileSync(join(repo, 'app.ts'), 'export const v = 1\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'base'], { cwd: repo, env: gitEnv })
     const baseSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'main'], { cwd: repo, env: gitEnv })
 
+    execFileSync(gitExe.path, ['checkout', '-q', '-b', 'feat/round-1'], { cwd: repo, env: gitEnv })
     writeFileSync(join(repo, 'app.ts'), 'export const v = 2\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-1'], { cwd: repo, env: gitEnv })
     const head1Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
 
     const runner = new GitRunner({ gitPath: gitExe.path, hooksDirectory: hooks, baseEnvironment: gitEnv })
+
+    // Unpushed local-only commits are rejected before launching reviewers:
+    const unpushedArea = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    await assert.rejects(
+      prepareAgnosticReviewWorktree(runner, repo, upstream, unpushedArea, head1Sha, baseSha, 12),
+      /not on any branch of origin/,
+    )
+
+    // External fork PR commits exposed only under refs/pull/<n>/head (not refs/heads/*) are rejected even if prNumber matches:
+    execFileSync(gitExe.path, ['clone', '-q', upstream, forkClone], { env: gitEnv })
+    writeFileSync(join(forkClone, '.mcp.json'), '{"mcpServers":{"evil":{"command":"sh"}}}\n')
+    execFileSync(gitExe.path, ['add', '.'], { cwd: forkClone, env: gitEnv })
+    execFileSync(gitExe.path, ['commit', '-q', '-m', 'fork-pr'], { cwd: forkClone, env: gitEnv })
+    const forkSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: forkClone, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', `${forkSha}:refs/pull/99/head`], { cwd: forkClone, env: gitEnv })
+    await assert.rejects(
+      prepareAgnosticReviewWorktree(runner, repo, upstream, unpushedArea, forkSha, baseSha, 99),
+      /not on any branch of origin/,
+    )
+
+    // Once pushed to a real repository branch on origin, prepareAgnosticReviewWorktree succeeds:
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
+    const cleanInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head1Sha, baseSha)
+    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [] })
+
     const area = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
-    await prepareAgnosticReviewWorktree(runner, repo, '', area, head1Sha, baseSha, 12)
+    await prepareAgnosticReviewWorktree(runner, repo, upstream, area, head1Sha, baseSha, 12)
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 2\n')
     assert.deepEqual(await reviewCheckoutState(runner, area), { head: head1Sha, clean: true })
 
-    // Author commits round 2 in main repo; refreshAgnosticReviewWorktree updates detached worktree without GitHub:
+    // Round 2 modifying .mcp.json, .claude/settings.json, .claude/hooks/run.sh, .codex/hooks.json, .github/hooks/pre.json, and .vscode/mcp.json is pushed to origin and detected:
     writeFileSync(join(repo, 'app.ts'), 'export const v = 3\n')
+    writeFileSync(join(repo, '.mcp.json'), '{"mcpServers":{}}\n')
+    mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true })
+    writeFileSync(join(repo, '.claude', 'settings.json'), '{}\n')
+    writeFileSync(join(repo, '.claude', 'hooks', 'run.sh'), '#!/bin/sh\n')
+    mkdirSync(join(repo, '.codex'), { recursive: true })
+    writeFileSync(join(repo, '.codex', 'hooks.json'), '{}\n')
+    mkdirSync(join(repo, '.github', 'hooks'), { recursive: true })
+    writeFileSync(join(repo, '.github', 'hooks', 'pre.json'), '{}\n')
+    mkdirSync(join(repo, '.vscode'), { recursive: true })
+    writeFileSync(join(repo, '.vscode', 'mcp.json'), '{}\n')
     execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
     execFileSync(gitExe.path, ['commit', '-q', '-m', 'round-2'], { cwd: repo, env: gitEnv })
     const head2Sha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
 
-    const refreshed = await refreshAgnosticReviewWorktree(runner, area, '', head2Sha, baseSha, 12)
+    const configInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head2Sha, baseSha)
+    const expectedConfigs = [
+      '.claude/hooks/run.sh',
+      '.claude/settings.json',
+      '.codex/hooks.json',
+      '.github/hooks/pre.json',
+      '.mcp.json',
+      '.vscode/mcp.json',
+    ]
+    assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
+    assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)
+
+    const refreshed = await refreshAgnosticReviewWorktree(runner, area, upstream, head2Sha, baseSha, 12)
     assert.equal(refreshed, head2Sha)
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 3\n')
+
+    const reservations = new ReviewReservations(join(dir, 'reservations.json'))
+    let stoppedSeat = false
+    const registry = new TempReviewerRegistry()
+    const { group } = registry.createGroup({
+      hostTabId: 'tab-1',
+      hostSessionId: 'sess-1',
+      profileId: 'prof-1',
+      projectPath: repo,
+      repository: 'omaha:3001/daq/daq-service',
+      prLabel: 'PR #12',
+      prNumber: 12,
+      prUrl: 'http://omaha:3001/daq/daq-service/pulls/12',
+      head: head2Sha,
+      base: baseSha,
+      clis: ['copilot'],
+      origin: upstream,
+    })
+    group.requiredSeats.get('copilot')!.area = area
+    await shutdownActiveReviewerSeats(registry.list(), reservations, async () => { stoppedSeat = true })
+    assert.equal(stoppedSeat, true)
+    assert.equal(existsSync(area.helper), false)
 
     const removed = await removeReviewerArea(area, runner)
     assert.equal(removed, 'removed')
     assert.equal(existsSync(area.root), false)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
 
-test('readReviewerDiffPage streams patches larger than 4 MiB past the buffer cap and marks end-of-diff accurately', async () => {
-  const gitExe = await resolveGitExecutable()
-  assert.ok(gitExe, 'git executable required')
-  const dir = mkdtempSync(join(tmpdir(), 'large-pr-diff-'))
-  try {
-    const repo = join(dir, 'repo')
-    const hooks = join(dir, 'hooks')
-    mkdirSync(repo, { recursive: true })
-    mkdirSync(hooks, { recursive: true })
-    const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, 'gitconfig') }
-    writeFileSync(join(dir, 'gitconfig'), '[user]\n\tname = Test\n\temail = test@example.com\n[core]\n\tautocrlf = false\n')
-    execFileSync(gitExe.path, ['init', '-q'], { cwd: repo, env: gitEnv })
-    writeFileSync(join(repo, 'seed.txt'), 'base\n')
-    execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
-    execFileSync(gitExe.path, ['commit', '-q', '-m', 'base'], { cwd: repo, env: gitEnv })
-    const baseSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
-
-    const line = `${'x'.repeat(99)}\n`
-    writeFileSync(join(repo, 'large-a.txt'), line.repeat(24_000))
-    writeFileSync(join(repo, 'large-b.txt'), `${line.repeat(24_000)}TAIL_MARKER_END\n`)
-    execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
-    execFileSync(gitExe.path, ['commit', '-q', '-m', 'head'], { cwd: repo, env: gitEnv })
-    const headSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
-    const gitdir = execFileSync(gitExe.path, ['rev-parse', '--absolute-git-dir'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
-
-    const runner = new GitRunner({ gitPath: gitExe.path, hooksDirectory: hooks, baseEnvironment: gitEnv })
-    const area = { root: dir, gitdir, checkout: repo }
-
-    const first = await readReviewerDiffPage(runner, area, baseSha, headSha, { offset: 0, pageChars: 20_000 })
-    assert.equal(first.ok, true)
-    const firstJson = JSON.parse(first.text) as { offset: number; nextOffset: number | null; complete: boolean; diff: string }
-    assert.equal(firstJson.complete, false)
-    assert.equal(firstJson.nextOffset, 20_000)
-    assert.equal(firstJson.diff.length, 20_000)
-
-    const tailStart = 4_790_000
-    let cursor: number | null = tailStart
-    let sawTailMarker = false
-    let finalComplete = false
-    while (cursor !== null) {
-      const page = await readReviewerDiffPage(runner, area, baseSha, headSha, { offset: cursor, pageChars: 50_000 })
-      assert.equal(page.ok, true, page.text)
-      const parsed = JSON.parse(page.text) as { nextOffset: number | null; complete: boolean; diff: string }
-      if (parsed.diff.includes('TAIL_MARKER_END')) sawTailMarker = true
-      finalComplete = parsed.complete
-      cursor = parsed.nextOffset
-    }
-    assert.equal(sawTailMarker, true, 'must read TAIL_MARKER_END well past 4 MiB')
-    assert.equal(finalComplete, true, 'final page reports complete: true')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('cleanupReviewerSeatCredentials and restart recovery sync rotated Codex OAuth tokens atomically', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-quit-recovery-'))
-  try {
-    const reservationsFile = join(dir, 'pr-review-reservations.json')
-    const fakeRealCodex = join(dir, 'disposable-codex-home')
-    mkdirSync(fakeRealCodex, { recursive: true })
-    const initialAuth = JSON.stringify({ tokens: { refresh_token: 'rt_v1', access_token: 'at_v1' } })
-    writeFileSync(join(fakeRealCodex, 'auth.json'), initialAuth)
-
-    const registry = new TempReviewerRegistry()
-    const { group } = registry.createGroup({
-      hostTabId: 'tab-quit',
-      hostSessionId: 'sess-quit',
-      profileId: 'prof-1',
-      projectPath: join(dir, 'project'),
-      repository: 'omaha:3001/org/repo',
-      prLabel: 'PR #77',
-      prNumber: 77,
-      prUrl: 'http://omaha:3001/org/repo/pulls/77',
-      head: HEAD,
-      base: BASE,
-      clis: ['codex'],
-      origin: 'http://omaha:3001/org/repo.git',
-    })
-    group.stage = 'active'
-    const seat = group.requiredSeats.get('codex')!
-    seat.lifecycle = 'running'
-
-    const areaQuit = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
-    const launchIdQuit = resolve(areaQuit.root).split(/[\\/]/).at(-1)!
-    seat.launchId = launchIdQuit
-    seat.area = areaQuit
-
-    const reservations = new ReviewReservations(reservationsFile)
-    await reservations.reserve({
-      launchId: launchIdQuit,
-      repository: 'omaha:3001/org/repo',
-      number: 77,
-      reviewer: 'temp:codex',
-      project: join(dir, 'project'),
-      root: areaQuit.root,
-      checkout: areaQuit.checkout,
-      ref: areaQuit.ref,
-    })
-
-    const { codexHome: quitCodexHome, authSync: quitAuthSync } = await prepareCodexReviewerHome({
-      areaHome: areaQuit.home,
-      realCodexHome: fakeRealCodex,
-      checkoutPath: areaQuit.checkout,
-    })
-    seat.codexAuthSync = quitAuthSync
-    if (quitAuthSync) await reservations.setCodexAuthSync(launchIdQuit, quitAuthSync)
-
-    const rotatedDuringRun = JSON.stringify({ tokens: { refresh_token: 'rt_v2_quit', access_token: 'at_v2_quit' } })
-    writeFileSync(join(quitCodexHome, 'auth.json'), rotatedDuringRun)
-    let stoppedSeat = false
-    await shutdownActiveReviewerSeats(registry.list(), reservations, async () => { stoppedSeat = true })
-
-    assert.equal(stoppedSeat, true)
-    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedDuringRun)
-    assert.equal(existsSync(join(quitCodexHome, 'auth.json')), false)
-    assert.equal(reservations.list()[0]?.codexAuthSync, undefined)
-    await reservations.release(launchIdQuit)
-
-    const areaIoFail = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
-    const launchIdIo = resolve(areaIoFail.root).split(/[\\/]/).at(-1)!
-    mkdirSync(areaIoFail.checkout, { recursive: true })
-    await reservations.reserve({
-      launchId: launchIdIo,
-      repository: 'omaha:3001/org/repo',
-      number: 79,
-      reviewer: 'temp:codex-io',
-      project: join(dir, 'project'),
-      root: areaIoFail.root,
-      checkout: areaIoFail.checkout,
-      ref: areaIoFail.ref,
-    })
-    const { codexHome: ioCodexHome, authSync: ioAuthSync } = await prepareCodexReviewerHome({
-      areaHome: areaIoFail.home,
-      realCodexHome: fakeRealCodex,
-      checkoutPath: areaIoFail.checkout,
-    })
-    assert.ok(ioAuthSync)
-    await reservations.setCodexAuthSync(launchIdIo, ioAuthSync)
-
-    const rotatedRetryToken = JSON.stringify({ tokens: { refresh_token: 'rt_v4_retry', access_token: 'at_v4_retry' } })
-    writeFileSync(join(ioCodexHome, 'auth.json'), rotatedRetryToken)
-
-    const recordAttempt1 = reservations.list().find((r) => r.launchId === launchIdIo)!
-    const firstAttempt = await recoverSweptReviewerCredentials(recordAttempt1, reservations, {
-      writeRealAuth: async () => {
-        const err = new Error('Simulated file lock') as NodeJS.ErrnoException
-        err.code = 'EBUSY'
-        throw err
-      },
-    })
-    assert.equal(firstAttempt, 'retry-sync')
-    assert.equal(existsSync(join(ioCodexHome, 'auth.json')), true)
-
-    const reopenedReservations = new ReviewReservations(reservationsFile)
-    const recordAttempt2 = reopenedReservations.list().find((r) => r.launchId === launchIdIo)!
-    const secondAttempt = await recoverSweptReviewerCredentials(recordAttempt2, reopenedReservations)
-    assert.equal(secondAttempt, 'clean')
-    assert.equal(readFileSync(join(fakeRealCodex, 'auth.json'), 'utf8'), rotatedRetryToken)
-    assert.equal(existsSync(join(ioCodexHome, 'auth.json')), false)
+    const sweptArea = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
+    writeFileSync(join(sweptArea.helper, 'reviewer-brief.md'), 'brief')
+    assert.equal(await recoverSweptReviewerCredentials({ launchId: 'l1', root: sweptArea.root }, reservations), 'clean')
+    assert.equal(existsSync(sweptArea.helper), false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

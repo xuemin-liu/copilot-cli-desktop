@@ -142,8 +142,8 @@ export interface CopilotDesktopBridge {
   pauseFollowup(id:string):Promise<void>
   tempReviewerAction(
     groupId: string,
-    action: 'stop' | 'confirm' | 'retry' | 'dismiss' | 'dismiss-ended',
-    payload?: ReviewerCli | import('../main/types.js').TempReviewerConfirmTarget,
+    action: 'stop' | 'retry' | 'dismiss' | 'dismiss-ended',
+    payload?: ReviewerCli,
   ): Promise<DesktopState>
   configureAutomation(projectId:string,repository:string,template:'assigned-issue'|'default-ci',actors:string[],id?:string):Promise<void>
   automationAction(id:string,action:'off'|'preview'|'automatic'|'start'|'delete'):Promise<void>

@@ -141,11 +141,6 @@ export interface TempReviewerTabInfo {
 export type TempReviewerSeatVerdict =
   | 'starting'
   | 'reviewing'
-  | 'settling'
-  | 'uncertain'
-  | 'changes-requested'
-  | 'held-approval'
-  | 'approved'
   | 'failed'
   | 'stopped'
 
@@ -154,22 +149,9 @@ export interface TempReviewerSeatView {
   tabId: string | null
   verdict: TempReviewerSeatVerdict
   checkedOut: string | null
-  missingChecks: string[]
-  ranChecks: string[]
   needsAttention: boolean
   error: string | null
   keptCheckoutPath: string | null
-}
-
-export interface TempReviewerConfirmTarget {
-  groupId: string
-  round: number
-  head: string
-  base: string
-  rosterKey: string
-  stateSignature: string
-  approveAnyway: boolean
-  missingChecks: Array<{ cli: ReviewerCli; missing: string[] }>
 }
 
 export interface TempReviewerGroupView {
@@ -184,9 +166,8 @@ export interface TempReviewerGroupView {
   head: string
   base: string
   stage: 'starting' | 'active' | 'ended'
-  outcome: 'approved' | 'confirmed' | 'merged' | 'closed' | 'stopped' | null
+  outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   seats: TempReviewerSeatView[]
-  confirmTarget: TempReviewerConfirmTarget | null
   notice: string | null
 }
 

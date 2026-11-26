@@ -6,7 +6,7 @@ user-invocable: true
 
 # Fix pull request feedback
 
-This workflow applies to **any Git repository and PR/MR host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or any other forge). Never refuse a pull request because the repository is not hosted on `github.com`. This skill defines the author fix workflow; **this CLI session decides how to access the PR** based on the repository.
+This workflow applies to **any remote Git repository and PR/MR host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, or any other forge). Never refuse a pull request because the repository is not hosted on `github.com`, and never perform a local-only review loop — always read reviews from and post `🤖 ` replies directly onto the pull request on its remote host. This skill defines the author fix workflow; **this CLI session decides how to access the PR** based on the repository.
 
 ## 1. Identify the repository and PR access method
 
