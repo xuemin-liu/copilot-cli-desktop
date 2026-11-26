@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 import {
   clearForgeProbeCacheForTests,
   fetchForgePullEvidence,
+  ghConfigMayKnowHost,
   hashSeatReceiptToken,
   isItemExplicitApproval,
   resolveTrustedForgeEndpoint,
@@ -354,7 +355,62 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       { env },
     )
 
-    // 5. Post approval for Claude Code via pr-approve.mjs using full PR URL as first arg (and verify deduplication on repeat):
+    // 4b. Edit made BETWEEN --snapshot and --mark MUST NOT be silently swallowed by --mark!
+    const snapBeforeRace = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
+      { env },
+    )
+    assert.equal(snapBeforeRace.code, 0, snapBeforeRace.stderr)
+    reviews[0] = {
+      ...reviews[0],
+      body: 'Blocking: [Claude Code] edited between snapshot and mark',
+      updated_at: '2026-11-26T00:02:30Z',
+    }
+    await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
+      { env },
+    )
+    const afterRacePoll = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin],
+      { env },
+    )
+    assert.equal(afterRacePoll.code, 0, afterRacePoll.stderr)
+    assert.notEqual(afterRacePoll.stdout.trim(), 'NO_CHANGE', 'edit made between snapshot and mark must still wake next poll')
+    const afterRaceJson = JSON.parse(afterRacePoll.stdout)
+    assert.equal(afterRaceJson.edited, true)
+    assert.match(afterRaceJson.newReviews[0].body, /edited between snapshot and mark/)
+    // Now mark the delivered edited version and verify subsequent poll returns NO_CHANGE:
+    await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--mark', '--through', '11,21,0', '--head', HEAD_1, '--base', BASE_1],
+      { env },
+    )
+    const postRaceClean = await runNodeScript(
+      PR_POLL,
+      ['12', stateFile, '--pr-url', prUrl, '--origin', gitOrigin],
+      { env },
+    )
+    assert.equal(postRaceClean.stdout.trim(), 'NO_CHANGE')
+
+    // 5. Post approval for Claude Code via pr-approve.mjs using full PR URL as first arg (and verify refusal of finding-labeled notes + deduplication on repeat):
+    for (const badNoteBody of [
+      '[Claude Code] The three **Blocking** findings from the earlier round are verified fixed; typecheck and tests pass.\n',
+      '[Claude Code] Open findings:\n- Blocking: none\n- Non-blocking: none\n',
+    ]) {
+      const badNotePath = join(dir, 'bad-approve-note.md')
+      writeFileSync(badNotePath, badNoteBody)
+      const refusedApprove = await runNodeScript(
+        PR_APPROVE,
+        [prUrl, '12', HEAD_1, BASE_1, badNotePath, '--origin', gitOrigin],
+        { env },
+      )
+      assert.notEqual(refusedApprove.code, 0, 'pr-approve.mjs refuses validation notes containing finding severity labels')
+      assert.match(refusedApprove.stderr, /Reword the note without finding labels/i)
+      assert.equal(reviews.length, 2, 'refused note posts nothing to the PR host')
+    }
     const noteClaude = join(dir, 'claude-approve.md')
     writeFileSync(noteClaude, '[Claude Code] Verified build and unit tests pass.\n')
     const approve1 = await runNodeScript(
@@ -516,6 +572,30 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       { env },
     )
     assert.equal(JSON.parse(reapprovedBase2.stdout).approvalForHead, true, 'new approval bound to Reviewed base: BASE_2 restores approvalForHead')
+
+    // 7. Fresh state file (never observed a base move!) MUST reject a formal APPROVED review whose body names an older `Reviewed base: BASE_1` when live base is BASE_2!
+    reviews.length = 0
+    issueComments.length = 0
+    reviews.push({
+      id: ++nextCommentId,
+      state: 'APPROVED',
+      user: { id: 7, login: 'alice' },
+      body: `Approved at ${HEAD_1}\n\n[Claude Code] approved earlier base\n\nReviewed base: ${BASE_1}`,
+      commit_id: HEAD_1,
+      comments_count: 0,
+      submitted_at: '2026-11-26T00:08:00Z',
+      updated_at: '2026-11-26T00:08:00Z',
+    })
+    const freshStateFile = join(dir, 'fresh-state.json')
+    const freshMismatchSnap = await runNodeScript(
+      PR_POLL,
+      ['12', freshStateFile, '--pr-url', prUrl, '--origin', gitOrigin, '--snapshot'],
+      { env },
+    )
+    assert.equal(freshMismatchSnap.code, 0, freshMismatchSnap.stderr)
+    const freshMismatchJson = JSON.parse(freshMismatchSnap.stdout)
+    assert.equal(freshMismatchJson.approvalForHead, false, 'fresh poll rejects formal APPROVED review bound to older Reviewed base')
+    assert.equal(freshMismatchJson.approvedReview, false, 'approvedReview also rejects formal APPROVED review bound to older Reviewed base')
   } finally {
     await closeServer(giteaServer)
     rmSync(dir, { recursive: true, force: true })
@@ -1186,4 +1266,100 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
     claimedEvidenceKeys: new Set(),
   })
   assert.deepEqual(singleSeatApprovedWithChatter, { verdict: 'approved', claimedKeys: ['issue:71'] })
+
+  // Grouped review with tagged parent summary and untagged labeled inline finding settles automatically with NO receipt!
+  const groupedNoReceipt = verifySeatOutcomeFromSnapshot({
+    snapshot: {
+      ...snapshot,
+      items: [
+        {
+          kind: 'review',
+          id: 80,
+          state: 'COMMENTED',
+          user: 'alice',
+          userId: 7,
+          body: '[Codex CLI] Review summary for this round.',
+          commitId: HEAD_1,
+          createdAtMs: roundStart + 1_000,
+        },
+        {
+          kind: 'inline',
+          id: 81,
+          parentReviewId: 80,
+          user: 'alice',
+          userId: 7,
+          body: '**Blocking**: missing null guard on response payload',
+          commitId: HEAD_1,
+          createdAtMs: roundStart + 1_000,
+        },
+      ],
+    },
+    cli: 'codex',
+    totalRequiredSeats: 2,
+    head: HEAD_1,
+    base: BASE_2,
+    baseMovedInGroup: false,
+    roundStartedAtMs: roundStart,
+    marker: '🤖 ',
+    claimedEvidenceKeys: new Set(),
+    receipt: null,
+  })
+  assert.deepEqual(groupedNoReceipt, { verdict: 'findings', claimedKeys: ['inline:81'] }, 'inherits reviewer tag attribution from eligible parentReviewId without requiring a receipt')
+
+  // GitHub Enterprise detection supports host-pinned /api/v3/meta probing AND token-only GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN config (without GH_HOST or hosts.yml)!
+  const gheServer = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/api/v3/meta') {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-github-enterprise-version': '3.14.0',
+      })
+      res.end(JSON.stringify({ verifiable_password_authentication: true, installed_version: '3.14.0' }))
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ message: 'Not Found' }))
+  })
+  const ghePort = await listenServer(gheServer)
+  const savedEnv = {
+    GH_HOST: process.env.GH_HOST,
+    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+    GH_ENTERPRISE_TOKEN: process.env.GH_ENTERPRISE_TOKEN,
+    GITHUB_ENTERPRISE_TOKEN: process.env.GITHUB_ENTERPRISE_TOKEN,
+    APPDATA: process.env.APPDATA,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  }
+  const emptyGhCfg = mkdtempSync(join(tmpdir(), 'empty-gh-cfg-'))
+  try {
+    delete process.env.GH_HOST
+    delete process.env.GH_ENTERPRISE_TOKEN
+    delete process.env.GITHUB_ENTERPRISE_TOKEN
+    process.env.GH_CONFIG_DIR = emptyGhCfg
+    process.env.APPDATA = emptyGhCfg
+    process.env.XDG_CONFIG_HOME = emptyGhCfg
+    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), false)
+
+    process.env.GH_ENTERPRISE_TOKEN = 'ghp_enterprise_only'
+    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), true, 'recognizes GH_ENTERPRISE_TOKEN without GH_HOST or hosts.yml')
+    delete process.env.GH_ENTERPRISE_TOKEN
+    process.env.GITHUB_ENTERPRISE_TOKEN = 'ghp_enterprise_alt'
+    assert.equal(ghConfigMayKnowHost('ghe.corp.example'), true, 'recognizes GITHUB_ENTERPRISE_TOKEN without GH_HOST or hosts.yml')
+
+    const gheOrigin = `http://127.0.0.1:${ghePort}`
+    const gheProbeEp = resolveTrustedForgeEndpoint({
+      origin: `${gheOrigin}/org/repo.git`,
+      prNumber: 42,
+      prUrl: `${gheOrigin}/org/repo/pull/42`,
+    })
+    assert.equal(gheProbeEp?.forge, 'probe')
+    const verifiedGhe = await resolveVerifiedForgeKind({ endpoint: gheProbeEp!, projectCwd: tmpdir(), runner: null })
+    assert.equal(verifiedGhe?.forge, 'github', 'host-pinned /api/v3/meta probe identifies GitHub Enterprise')
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    await closeServer(gheServer)
+    rmSync(emptyGhCfg, { recursive: true, force: true })
+  }
 })

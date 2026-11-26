@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import {
   forgeFetchJson,
   forgePaginateArray,
+  hasAffirmativeFindingLabel,
   readForgeCredentials,
   resolveForgeEndpoint,
   SHA_RE,
@@ -29,6 +30,11 @@ async function main() {
   const base = rawBase.toLowerCase()
   const note = readFileSync(noteFile, 'utf8').replace(/^\uFEFF/, '').trim()
   if (!note || note.length > 16000) throw new Error('Supply a concise validation note and any limits')
+  if (hasAffirmativeFindingLabel(note)) {
+    throw new Error(
+      'Validation note contains a finding severity label (e.g. "**Blocking**", "Blocking:", "Non-blocking:", or "Nit:") that causes the approval classifier to reject it as open findings. Reword the note without finding labels before approving.',
+    )
+  }
 
   const isUrlTarget = /^https?:\/\//i.test(target)
   const explicitPrUrl = option('--pr-url')

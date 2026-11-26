@@ -381,7 +381,56 @@ async function probeVersionEndpoint(
   return { status: 'absent' }
 }
 
-function ghConfigMayKnowHost(hostname: string): boolean {
+async function probeGitHubEnterpriseEndpoint(
+  httpOrigin: string,
+  timeoutMs = 6_000,
+): Promise<{ status: 'matched' } | { status: 'absent' } | { status: 'error'; reason: string }> {
+  const token = (process.env.GH_ENTERPRISE_TOKEN || process.env.GITHUB_ENTERPRISE_TOKEN || '').trim()
+  const headers: Record<string, string> = {
+    accept: 'application/vnd.github+json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  }
+  let res: Response
+  try {
+    const url = new URL('/api/v3/meta', `${httpOrigin}/`)
+    res = await fetch(url, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (err) {
+    return { status: 'error', reason: err instanceof Error ? err.message : String(err) }
+  }
+  if (res.headers.has('x-github-enterprise-version') || res.headers.has('x-github-request-id')) {
+    return { status: 'matched' }
+  }
+  if (res.status >= 300 && res.status < 400) {
+    return { status: 'error', reason: `HTTP ${res.status} redirect on /api/v3/meta` }
+  }
+  if (res.status === 404 || res.status === 405 || res.status === 410 || res.status === 501) {
+    return { status: 'absent' }
+  }
+  if (!res.ok) {
+    return { status: 'error', reason: `HTTP ${res.status} on /api/v3/meta` }
+  }
+  const text = await res.text().catch(() => '')
+  try {
+    const parsed = text.trim() ? JSON.parse(text) : null
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && ('verifiable_password_authentication' in parsed || 'installed_version' in parsed)
+    ) {
+      return { status: 'matched' }
+    }
+  } catch {
+    // Non-JSON 200 (e.g. HTML catch-all) indicates this API route is not GitHub Enterprise.
+  }
+  return { status: 'absent' }
+}
+
+export function ghConfigMayKnowHost(hostname: string): boolean {
   const lower = hostname.toLowerCase()
   if (
     !lower
@@ -394,6 +443,7 @@ function ghConfigMayKnowHost(hostname: string): boolean {
     return false
   }
   if (process.env.GH_HOST?.trim().toLowerCase() === lower) return true
+  if (process.env.GH_ENTERPRISE_TOKEN?.trim() || process.env.GITHUB_ENTERPRISE_TOKEN?.trim()) return true
   const candidates = [
     process.env.GH_CONFIG_DIR ? join(process.env.GH_CONFIG_DIR, 'hosts.yml') : null,
     process.env.APPDATA ? join(process.env.APPDATA, 'GitHub CLI', 'hosts.yml') : null,
@@ -499,6 +549,14 @@ export async function resolveVerifiedForgeKind(options: {
     probeErrors.push(`Gitea probe failed (${giteaProbe.reason})`)
   }
 
+  const gheProbe = await probeGitHubEnterpriseEndpoint(endpoint.httpOrigin, 6_000)
+  if (gheProbe.status === 'matched') {
+    probedOriginKinds.set(endpoint.httpOrigin, 'github')
+    return { ...endpoint, forge: 'github' }
+  }
+  if (gheProbe.status === 'error') {
+    probeErrors.push(`GitHub Enterprise probe failed (${gheProbe.reason})`)
+  }
   if (await checkGhEnterpriseAuth(endpoint.hostname, endpoint.protocol)) {
     probedOriginKinds.set(endpoint.httpOrigin, 'github')
     return { ...endpoint, forge: 'github' }
@@ -850,6 +908,25 @@ export function verifySeatOutcomeFromSnapshot(options: {
     return false
   }
 
+  // Inherit reviewer tag attribution from an eligible parent review (e.g. GitHub/Gitea grouped review with tagged summary and untagged inline comments).
+  const taggedParentReviewIds = new Set<number>()
+  for (const item of snapshot.items) {
+    if (
+      item.kind === 'review'
+      && isExpectedAccount(item)
+      && item.body.includes(tag)
+      && (item.commitId === null || item.commitId === head.toLowerCase())
+      && (item.createdAtMs === null || item.createdAtMs + 5_000 >= roundStartedAtMs)
+    ) {
+      taggedParentReviewIds.add(item.id)
+    }
+  }
+
+  const hasSeatTag = (item: ForgeEvidenceItem): boolean => (
+    item.body.includes(tag)
+    || (item.parentReviewId !== undefined && taggedParentReviewIds.has(item.parentReviewId))
+  )
+
   const keyOf = (item: ForgeEvidenceItem): string => `${item.kind}:${item.id}`
   const eligible = snapshot.items.filter((item) => {
     const key = keyOf(item)
@@ -859,7 +936,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
     if (item.commitId !== null && item.commitId !== head.toLowerCase()) return false
     if (item.createdAtMs !== null && item.createdAtMs + 5_000 < roundStartedAtMs) return false
     if (matchesReceipt(item)) return true
-    if (totalRequiredSeats > 1 && !item.body.includes(tag)) return false
+    if (totalRequiredSeats > 1 && !hasSeatTag(item)) return false
     return true
   })
 
@@ -867,14 +944,14 @@ export function verifySeatOutcomeFromSnapshot(options: {
 
   const approvalItem = eligible.find((item) => {
     if (!isItemExplicitApproval(item, head, base, baseMovedInGroup)) return false
-    if (totalRequiredSeats > 1 && !item.body.includes(tag)) return false
+    if (totalRequiredSeats > 1 && !hasSeatTag(item)) return false
     return true
   })
 
   const findingItems = eligible.filter((item) => {
     if (item === approvalItem || isItemExplicitApproval(item, head, base, baseMovedInGroup)) return false
     if (receipt?.kind === 'findings' && matchesReceipt(item)) return true
-    const hasSeatAttribution = totalRequiredSeats === 1 || item.body.includes(tag)
+    const hasSeatAttribution = totalRequiredSeats === 1 || hasSeatTag(item)
     if (!hasSeatAttribution) return false
     if (item.kind === 'review' && item.state === 'CHANGES_REQUESTED') return true
     return hasAffirmativeFindingLabel(item.body)

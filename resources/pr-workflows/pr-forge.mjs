@@ -717,11 +717,18 @@ export function evaluateRevisionApprovals({
   const approvingItems = []
   for (const r of reviews) {
     if ((r.body ?? '').startsWith(marker)) continue
+    const unquotedBody = String(r.body ?? '')
+      .split(/\r?\n/)
+      .filter((line) => !line.trimStart().startsWith('>'))
+      .join('\n')
+    const reviewedBase = REVIEWED_BASE_RE.exec(unquotedBody)?.[1]?.toLowerCase() ?? null
+    const baseMismatch = reviewedBase !== null && Boolean(baseSha) && reviewedBase !== baseSha.toLowerCase()
     const textApproves = isTrustedApprover(r) && isExplicitTextApprovalForRevision(r, headSha, baseSha, baseChangedSinceWatermark)
     const formalApproves = r.state === 'APPROVED'
       && String(r.commitId ?? '').toLowerCase() === headSha.toLowerCase()
-      && !hasAffirmativeFindingLabel(r.body ?? '')
-      && (!baseChangedSinceWatermark || (REVIEWED_BASE_RE.exec(r.body ?? '')?.[1]?.toLowerCase() === baseSha.toLowerCase()))
+      && !hasAffirmativeFindingLabel(unquotedBody)
+      && !baseMismatch
+      && (!baseChangedSinceWatermark || (reviewedBase !== null && reviewedBase === baseSha.toLowerCase()))
     if (textApproves || formalApproves) {
       approvingItems.push({ kind: 'review', id: r.id, body: r.body ?? '', formal: formalApproves, user: r.user })
     }

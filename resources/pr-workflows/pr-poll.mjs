@@ -77,14 +77,37 @@ async function evaluateOnce({ prArg, stateFile }) {
     baseSha: meta.baseRefOid,
   }
 
-  const buildVersionMap = (items, maxId, prevMap = {}) => {
+  const writeStateAtomically = (doc) => {
+    const temporary = `${stateFile}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(temporary, JSON.stringify(doc), { flag: 'wx', mode: 0o600 })
+      renameSync(temporary, stateFile)
+    } finally {
+      rmSync(temporary, { force: true })
+    }
+  }
+
+  const buildVersionMap = (items, maxId, prevMap = {}, deliveredMap = null) => {
     const nextMap = { ...prevMap }
     for (const item of items) {
       if (maxId === null || item.id <= maxId) {
-        nextMap[String(item.id)] = item.versionKey
+        const key = String(item.id)
+        if (deliveredMap && Object.hasOwn(deliveredMap, key)) {
+          nextMap[key] = deliveredMap[key]
+        } else if (!Object.hasOwn(nextMap, key)) {
+          nextMap[key] = item.versionKey
+        }
       }
     }
     return nextMap
+  }
+
+  const buildLiveVersionMap = (items) => {
+    const map = {}
+    for (const item of items) {
+      map[String(item.id)] = item.versionKey
+    }
+    return map
   }
 
   if (flag('--init') || flag('--mark')) {
@@ -123,18 +146,22 @@ async function evaluateOnce({ prArg, stateFile }) {
     next.headSha = nextHeadSha
     next.baseSha = nextBaseSha
     const prevVersions = typeof state.versions === 'object' && state.versions !== null ? state.versions : {}
-    next.versions = {
-      reviews: buildVersionMap(reviews, flag('--mark') ? next.maxReviewId : null, prevVersions.reviews),
-      inline: buildVersionMap(inline, flag('--mark') ? next.maxInlineId : null, prevVersions.inline),
-      issue: buildVersionMap(issue, flag('--mark') ? next.maxIssueId : null, prevVersions.issue),
-    }
-    const temporary = `${stateFile}.${randomUUID()}.tmp`
-    try {
-      writeFileSync(temporary, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
-      renameSync(temporary, stateFile)
-    } finally {
-      rmSync(temporary, { force: true })
-    }
+    const deliveredVersions = flag('--mark') && typeof state.lastDeliveredVersions === 'object' && state.lastDeliveredVersions !== null
+      ? state.lastDeliveredVersions
+      : null
+    next.versions = flag('--init')
+      ? {
+          reviews: buildLiveVersionMap(reviews),
+          inline: buildLiveVersionMap(inline),
+          issue: buildLiveVersionMap(issue),
+        }
+      : {
+          reviews: buildVersionMap(reviews, next.maxReviewId, prevVersions.reviews, deliveredVersions?.reviews ?? null),
+          inline: buildVersionMap(inline, next.maxInlineId, prevVersions.inline, deliveredVersions?.inline ?? null),
+          issue: buildVersionMap(issue, next.maxIssueId, prevVersions.issue, deliveredVersions?.issue ?? null),
+        }
+    delete next.lastDeliveredVersions
+    writeStateAtomically(next)
     return JSON.stringify({
       recorded: {
         maxReviewId: next.maxReviewId,
@@ -207,10 +234,25 @@ async function evaluateOnce({ prArg, stateFile }) {
       })
     : { approvalForHead: false, approvedTags: [], missingTags: requiredTags, approvingItems: [] }
 
+  // Record the exact version hashes delivered to the caller so a later --mark records the handled snapshot,
+  // never silently swallowing edits made between snapshot/poll and --mark!
+  try {
+    writeStateAtomically({
+      ...state,
+      lastDeliveredVersions: {
+        reviews: buildLiveVersionMap(reviews),
+        inline: buildLiveVersionMap(inline),
+        issue: buildLiveVersionMap(issue),
+      },
+    })
+  } catch {
+    // Ignore if stateFile's directory is read-only during a standalone --snapshot.
+  }
+
   const approvingHintItem = (item) =>
     item.state === 'APPROVED' || /^Approved at [0-9a-f]{40,64}\b/im.test(item.body ?? '')
   const approvalHint = authorMode && (fullApproval.approvalForHead || [...newReviews, ...newInline, ...newIssue].some(approvingHintItem))
-  const approvedReview = authorMode && reviews.some((item) => item.state === 'APPROVED' && item.commitId === meta.headRefOid && !baseMovedForCurrentHead)
+  const approvedReview = authorMode && fullApproval.approvingItems.some((item) => item.kind === 'review' && item.formal)
 
   const shape = ({ versionKey: _vk, userId: _uid, ...item }) =>
     (item.body ?? '').length > CLIP
