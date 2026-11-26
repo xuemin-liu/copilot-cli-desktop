@@ -141,6 +141,10 @@ export interface TempReviewerTabInfo {
 export type TempReviewerSeatVerdict =
   | 'starting'
   | 'reviewing'
+  | 'approved'
+  | 'findings'
+  | 'incomplete'
+  | 'timed-out'
   | 'failed'
   | 'stopped'
 

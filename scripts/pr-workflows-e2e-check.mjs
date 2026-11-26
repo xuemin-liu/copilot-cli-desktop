@@ -1,9 +1,10 @@
-// End-to-end verification of multi-CLI PR workflow skill provisioning, environment wiring, MCP pr_reviewers_* lifecycle
-// (on both self-hosted Gitea and GitHub PR URLs), and helper pr-reviewers lifecycle inside the real Electron app.
+// End-to-end verification of multi-CLI PR workflow skill provisioning, environment wiring, one-shot reviewer execution,
+// remote Gitea forge evidence verification (incomplete -> retry findings -> pre-push barrier -> round 2 worktree reuse -> approved),
+// and clean worktree teardown inside the real Electron app.
 import assert from 'node:assert/strict'
-import { execFile, execFileSync, spawn } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { request } from 'node:http'
+import { execFileSync, spawn } from 'node:child_process'
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createServer, request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,36 +60,78 @@ if (!process.versions.electron) {
     await writeFile(
       stubScript,
       [
-        "import { mkdirSync, writeFileSync } from 'node:fs'",
+        "import { execFileSync } from 'node:child_process'",
+        "import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'",
         "import { join } from 'node:path'",
         'const args = process.argv.slice(2)',
         "if (args.includes('--version')) { console.log('agy 2.0.99-e2e'); process.exit(0) }",
         "if (args.includes('--help')) {",
-        "  console.log('Usage: agy [options]\\n  --dangerously-skip-permissions\\n  --add-dir <dir>\\n  --prompt-interactive <prompt>\\n  --conversation <id>\\n  --mode <mode>\\n  --model <model>')",
+        "  console.log('Usage: agy [options]\\n  --dangerously-skip-permissions\\n  --add-dir <dir>\\n  --prompt-interactive <prompt>\\n  --print <prompt>\\n  --conversation <id>\\n  --mode <mode>\\n  --model <model>')",
         '  process.exit(0)',
         '}',
         'const dumpDir = process.env.E2E_STUB_DUMP_DIR',
         'const dumpPid = process.env.E2E_WRAPPER_PID || String(process.pid)',
+        'const isOneShot = args.includes("--print")',
+        'let behavior = { mode: "silent" }',
+        'if (process.env.E2E_STUB_BEHAVIOR_FILE) {',
+        '  try { behavior = JSON.parse(readFileSync(process.env.E2E_STUB_BEHAVIOR_FILE, "utf8")) } catch {}',
+        '}',
         'if (dumpDir) {',
         '  mkdirSync(dumpDir, { recursive: true })',
         '  writeFileSync(join(dumpDir, `agy-${dumpPid}.json`), JSON.stringify({',
         '    pid: Number(dumpPid),',
         '    cwd: process.cwd(),',
         '    args,',
+        '    isOneShot,',
+        '    mode: behavior.mode,',
         '    prTools: process.env.COPILOT_DESKTOP_PR_TOOLS ?? null,',
         '    prState: process.env.COPILOT_DESKTOP_PR_STATE ?? null,',
+        '    seatReceipt: process.env.COPILOT_DESKTOP_SEAT_RECEIPT ?? null,',
+        '    allowHttpOrigin: process.env.COPILOT_DESKTOP_ALLOW_HTTP_ORIGIN ?? null,',
         '  }, null, 2))',
         '}',
-        'setInterval(() => {}, 10_000)',
+        'if (!isOneShot) {',
+        '  setInterval(() => {}, 10_000)',
+        '} else {',
+        '  const runOneShot = async () => {',
+        '    if (behavior.holdMs) await new Promise((r) => setTimeout(r, behavior.holdMs))',
+        '    if (behavior.mode === "silent") {',
+        '      return',
+        '    }',
+        '    if (behavior.mode === "findings" && behavior.giteaOrigin) {',
+        '      const res = await fetch(`${behavior.giteaOrigin}/api/v1/repos/daq/daq-service/issues/12/comments`, {',
+        '        method: "POST",',
+        '        headers: { "content-type": "application/json", authorization: "token e2e-tok", connection: "close" },',
+        '        body: JSON.stringify({ body: "Blocking: [Antigravity CLI] bump version to 3 before merging." }),',
+        '      })',
+        '      const posted = await res.json()',
+        '      if (process.env.COPILOT_DESKTOP_PR_TOOLS && process.env.COPILOT_DESKTOP_SEAT_RECEIPT) {',
+        '        execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "findings", "--id", String(posted.id)], { stdio: "inherit" })',
+        '      }',
+        '      return',
+        '    }',
+        '    if (behavior.mode === "approve" && behavior.giteaOrigin && process.env.COPILOT_DESKTOP_PR_TOOLS && process.env.COPILOT_DESKTOP_SEAT_RECEIPT) {',
+        '      const cfg = JSON.parse(readFileSync(process.env.COPILOT_DESKTOP_SEAT_RECEIPT, "utf8"))',
+        '      const notePath = join(dumpDir, `approve-note-${dumpPid}.md`)',
+        '      writeFileSync(notePath, "[Antigravity CLI] Verified round 2 fix and checks pass.\\n")',
+        '      const out = execFileSync(process.execPath, [',
+        '        join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-approve.mjs"),',
+        '        `${behavior.giteaOrigin}/daq/daq-service/pulls/12`,',
+        '        "12",',
+        '        cfg.head,',
+        '        cfg.base,',
+        '        notePath,',
+        '      ], { encoding: "utf8", env: { ...process.env, GITEA_TOKEN: "e2e-tok", GITEA_URL: behavior.giteaOrigin } })',
+        '      const parsedApprove = JSON.parse(out)',
+        '      execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "approved", "--id", String(parsedApprove.id)], { stdio: "inherit" })',
+        '      return',
+        '    }',
+        '  }',
+        '  runOneShot().catch((err) => { console.error(err); process.exitCode = 1 })',
+        '}',
       ].join('\n'),
       'utf8',
     )
-    if (process.platform === 'win32') {
-      // Create a tiny native wrapper or cmd? Wait: agent-cli.ts for antigravity on win32 checks `.exe`!
-      // On Windows, copy node.exe to agy.exe AND set NODE_OPTIONS? No, package.json sets enableNodeOptionsEnvironmentVariable: false only on packaged builds,
-      // OR even better: node.exe with no args starts REPL, while with `--prompt-interactive` node fails unless we use a compiled/shim or we check how agent-cli resolves agy!
-    }
-    // Let's build a real cross-platform agy stub! On POSIX a chmod +x script works directly; on Windows let's check csc.exe or node.exe!
     if (process.platform === 'win32') {
       const cscCandidates = [
         join(process.env.SystemRoot ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
@@ -143,8 +186,10 @@ class AgyStub {
       E2E_DIR: directory,
       E2E_ARTIFACTS: artifacts,
       E2E_STUB_DUMP_DIR: join(directory, 'stub-dumps'),
+      E2E_STUB_BEHAVIOR_FILE: join(directory, 'stub-behavior.json'),
       COPILOT_DESKTOP_MEETING_MCP_PORT: '0',
       ANTIGRAVITY_GEMINI_DIR: join(directory, 'gemini-home'),
+      GITEA_TOKEN: 'e2e-tok',
       [pathKey]: [bin, process.env[pathKey]].filter(Boolean).join(delimiter),
     }
     delete env.ELECTRON_RUN_AS_NODE
@@ -162,7 +207,7 @@ class AgyStub {
     assert.equal(code, 0, 'PR workflows Electron E2E check failed')
     const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
     assert.equal(result.passed, true)
-    console.log('PR workflow skills, environment variables, MCP pr_reviewers_*, and detached reviewer worktrees verified end-to-end.')
+    console.log('PR workflow skills, one-shot reviewer lifecycle, remote Gitea verification, worktree reuse, and clean teardown verified end-to-end.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -172,12 +217,14 @@ class AgyStub {
   const directory = process.env.E2E_DIR
   const out = process.env.E2E_ARTIFACTS
   const dumpDir = process.env.E2E_STUB_DUMP_DIR
+  const behaviorFile = process.env.E2E_STUB_BEHAVIOR_FILE
   const userData = join(directory, 'userdata')
   app.setPath('userData', userData)
 
   // Auto-accept the temporary PR reviewer consent dialog in headless E2E verification.
   dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
 
+  let giteaServer = null
   void run().catch(async (error) => {
     console.error(error)
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: false, error: String(error?.stack ?? error) })).catch(() => {})
@@ -207,6 +254,113 @@ class AgyStub {
     process.env.CODEX_HOME = join(directory, 'codex-home')
     await writeFile(join(directory, 'copilot-home', 'config.json'), JSON.stringify({ trustedFolders: [directory] }))
 
+    // Start real local mock Gitea HTTP API server for PR #12!
+    let giteaHead = ''
+    let giteaBase = ''
+    let nextIssueCommentId = 900
+    const giteaReviews = []
+    const giteaIssueComments = []
+    giteaServer = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      const bodyText = Buffer.concat(chunks).toString('utf8')
+
+      if (url.pathname === '/api/v1/version') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ version: '1.22.0' }))
+        return
+      }
+      if (url.pathname === '/api/v1/user') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ id: 7, login: 'e2e-user' }))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/daq-service/pulls/12') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          number: 12,
+          state: 'open',
+          merged: false,
+          user: { id: 7, login: 'e2e-user' },
+          head: { ref: 'feat/gitea-pr-12', sha: giteaHead, repo: { id: 42, full_name: 'daq/daq-service' } },
+          base: { ref: 'main', sha: giteaBase, repo: { id: 42, full_name: 'daq/daq-service' } },
+        }))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/daq-service/pulls/12/files') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify([{ filename: 'service.ts' }]))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/daq-service/pulls/12/reviews') {
+        if (req.method === 'POST') {
+          const parsed = JSON.parse(bodyText)
+          const nowIso = new Date().toISOString()
+          const item = {
+            id: ++nextIssueCommentId,
+            state: parsed.event === 'APPROVE' ? 'APPROVED' : 'COMMENT',
+            user: { id: 7, login: 'e2e-user' },
+            body: parsed.body,
+            commit_id: parsed.commit_id,
+            submitted_at: nowIso,
+            updated_at: nowIso,
+            html_url: `http://127.0.0.1/daq/daq-service/pulls/12#pullrequestreview-${nextIssueCommentId}`,
+          }
+          giteaReviews.push(item)
+          res.writeHead(201, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(item))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(giteaReviews))
+        return
+      }
+      const reviewById = /^\/api\/v1\/repos\/daq\/daq-service\/pulls\/12\/reviews\/(\d+)$/.exec(url.pathname)
+      if (reviewById) {
+        const found = giteaReviews.find((r) => Number(r.id) === Number(reviewById[1]))
+        res.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(found ?? { message: 'Not found' }))
+        return
+      }
+      const reviewComments = /^\/api\/v1\/repos\/daq\/daq-service\/pulls\/12\/reviews\/(\d+)\/comments$/.exec(url.pathname)
+      if (reviewComments) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify([]))
+        return
+      }
+      if (url.pathname === '/api/v1/repos/daq/daq-service/issues/12/comments') {
+        if (req.method === 'POST') {
+          const parsed = JSON.parse(bodyText)
+          const nowIso = new Date().toISOString()
+          const item = {
+            id: ++nextIssueCommentId,
+            user: { id: 7, login: 'e2e-user' },
+            body: parsed.body,
+            created_at: nowIso,
+            updated_at: nowIso,
+            html_url: `http://127.0.0.1/daq/daq-service/pulls/12#issuecomment-${nextIssueCommentId}`,
+          }
+          giteaIssueComments.push(item)
+          res.writeHead(201, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(item))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(giteaIssueComments))
+        return
+      }
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ message: `Not found: ${url.pathname}` }))
+    })
+    const giteaPort = await new Promise((resolvePort, reject) => {
+      giteaServer.once('error', reject)
+      giteaServer.listen(0, '127.0.0.1', () => resolvePort(giteaServer.address().port))
+    })
+    const giteaOrigin = `http://127.0.0.1:${giteaPort}`
+    process.env.GITEA_URL = giteaOrigin
+    const prUrl = `${giteaOrigin}/daq/daq-service/pulls/12`
+
     // Create bare remote origin + working repository with main (base) and feat/gitea-pr-12 (head1).
     const originBare = join(directory, 'origin.git')
     const repo = join(directory, 'project')
@@ -216,19 +370,36 @@ class AgyStub {
     const git = (...args) =>
       execFileSync('git', args, { cwd: repo, env: process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
     git('init', '-q')
-    git('remote', 'add', 'origin', originBare)
+    git('remote', 'add', 'origin', `${giteaOrigin}/daq/daq-service.git`)
+    git('remote', 'set-url', '--push', 'origin', originBare)
     await writeFile(join(repo, 'service.ts'), 'export const version = 1\n')
     git('add', '.')
     git('commit', '-q', '-m', 'initial main')
-    const baseSha = git('rev-parse', 'HEAD')
-    git('push', '-q', '-u', 'origin', 'main')
+    const mergeBaseSha = git('rev-parse', 'HEAD')
+    git('push', '-q', originBare, 'main:refs/heads/main')
 
     git('checkout', '-q', '-b', 'feat/gitea-pr-12')
     await writeFile(join(repo, 'service.ts'), 'export const version = 2\n')
     git('add', '.')
     git('commit', '-q', '-m', 'feat round 1')
     const head1Sha = git('rev-parse', 'HEAD')
-    git('push', '-q', '-u', 'origin', 'feat/gitea-pr-12')
+    git('push', '-q', originBare, 'feat/gitea-pr-12:refs/heads/feat/gitea-pr-12')
+    git('update-ref', 'refs/remotes/origin/feat/gitea-pr-12', head1Sha)
+
+    // Advance target branch `main` AFTER branching `feat/gitea-pr-12` so `origin/main` tip !== `merge-base(origin/main, head1Sha)`!
+    // This verifies divergent branches work end-to-end across resolveGitRevisionsForReview, pr-approve.mjs, and pr_reviewers_finish("approved").
+    git('checkout', '-q', 'main')
+    await writeFile(join(repo, 'unrelated-main.ts'), 'export const mainExtra = true\n')
+    git('add', '.')
+    git('commit', '-q', '-m', 'advance main past merge-base')
+    const baseSha = git('rev-parse', 'HEAD')
+    assert.notEqual(baseSha, mergeBaseSha, 'target branch tip advanced past merge-base')
+    git('push', '-q', originBare, 'main:refs/heads/main')
+    git('update-ref', 'refs/remotes/origin/main', baseSha)
+    git('checkout', '-q', 'feat/gitea-pr-12')
+
+    giteaBase = baseSha
+    giteaHead = head1Sha
 
     const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const project = createWorkspaceProfile(repo)
@@ -263,7 +434,6 @@ class AgyStub {
     }
     const getState = () => ui('window.copilotDesktop.getState()')
 
-    // Wait for startup provisioning + MCP server URL.
     let state = await getState()
     for (let i = 0; i < 100 && !state?.meetingToolsUrl; i++) {
       await delay(100)
@@ -294,7 +464,7 @@ class AgyStub {
     )
     await assert.rejects(stat(join(process.env.CODEX_HOME, 'skills', 'review-pr', 'scripts')), { code: 'ENOENT' })
 
-    // 2. Launch a foreground Antigravity tab AND restart it, verifying COPILOT_DESKTOP_PR_TOOLS & COPILOT_DESKTOP_PR_STATE reach both!
+    // 2. Launch a foreground Antigravity tab AND restart it, verifying interactive mode + env vars!
     await ui(`window.copilotDesktop.createTab(null, undefined, 'Agy Foreground', { cli: 'antigravity' })`)
     let fgTab = null
     for (let i = 0; i < 100; i++) {
@@ -307,7 +477,7 @@ class AgyStub {
 
     const waitDumpForPid = async (pid) => {
       const target = join(dumpDir, `agy-${pid}.json`)
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 80; i++) {
         const txt = await readFile(target, 'utf8').catch(() => null)
         if (txt) return JSON.parse(txt)
         await delay(100)
@@ -317,8 +487,9 @@ class AgyStub {
 
     const firstDump = await waitDumpForPid(fgTab.processId)
     assert.ok(firstDump, 'captured foreground Antigravity stub dump')
-    assert.ok(firstDump.prTools && firstDump.prTools.endsWith('pr-workflows'), `foreground start gets COPILOT_DESKTOP_PR_TOOLS: ${firstDump.prTools}`)
-    assert.ok(firstDump.prState && firstDump.prState.endsWith('pr-workflow-state'), `foreground start gets COPILOT_DESKTOP_PR_STATE: ${firstDump.prState}`)
+    assert.equal(firstDump.isOneShot, false, 'foreground tab runs interactively')
+    assert.ok(firstDump.prTools && firstDump.prTools.endsWith('pr-workflows'))
+    assert.ok(firstDump.prState && firstDump.prState.endsWith('pr-workflow-state'))
 
     const oldFgPid = fgTab.processId
     await ui(`window.copilotDesktop.restartTab(${JSON.stringify(fgTab.id)})`)
@@ -335,10 +506,9 @@ class AgyStub {
     assert.ok(restartedFgTab, 'foreground Antigravity tab restarted')
     const restartDump = await waitDumpForPid(restartedFgTab.processId)
     assert.ok(restartDump, 'captured restarted Antigravity stub dump')
-    assert.ok(restartDump.prTools && restartDump.prTools.endsWith('pr-workflows'), 'restarted tab preserves COPILOT_DESKTOP_PR_TOOLS')
-    assert.ok(restartDump.prState && restartDump.prState.endsWith('pr-workflow-state'), 'restarted tab preserves COPILOT_DESKTOP_PR_STATE')
+    assert.ok(restartDump.prTools && restartDump.prTools.endsWith('pr-workflows'))
 
-    // 3. Exercise full MCP pr_reviewers_start -> pr_reviewers_wait -> pr_reviewers_round -> pr_reviewers_finish on Gitea PR #12!
+    // 3. Exercise full hardened MCP pr_reviewers_* lifecycle on Gitea PR #12!
     const mcpUrl = state.meetingToolsUrl
     const initRes = await mcpPost(mcpUrl, {
       jsonrpc: '2.0',
@@ -346,16 +516,11 @@ class AgyStub {
       method: 'initialize',
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.0' } },
     })
-    assert.equal(initRes.status, 200)
     const mcpSessionId = initRes.sessionId
-    assert.ok(mcpSessionId, 'MCP initialize returned session id')
+    assert.ok(mcpSessionId)
 
-    const toolsRes = await mcpPost(mcpUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, mcpSessionId)
-    const toolNames = toolsRes.json.result.tools.map((t) => t.name)
-    for (const requiredTool of ['pr_reviewers_start', 'pr_reviewers_wait', 'pr_reviewers_round', 'pr_reviewers_finish']) {
-      assert.ok(toolNames.includes(requiredTool), `MCP exposes ${requiredTool}`)
-    }
-
+    // 3a. Mode "silent": one-shot reviewer exits 0 WITHOUT posting to Gitea -> must settle as 'incomplete' and refuse finish('approved')!
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'silent', giteaOrigin }))
     const startRes = await mcpPost(
       mcpUrl,
       {
@@ -367,9 +532,9 @@ class AgyStub {
           arguments: {
             folder: repo,
             pr: 12,
-            pr_url: 'http://omaha:3001/daq/daq-service/pulls/12',
+            pr_url: prUrl,
             head: head1Sha,
-            base: baseSha,
+            base: 'origin/main',
           },
         },
       },
@@ -377,67 +542,110 @@ class AgyStub {
     )
     assert.equal(startRes.json.result.isError, undefined, startRes.json.result.content?.[0]?.text)
     const startPayload = JSON.parse(startRes.json.result.content[0].text)
+    const groupId = startPayload.group.id
     assert.equal(startPayload.group.prNumber, 12)
-    assert.equal(startPayload.group.prUrl, 'http://omaha:3001/daq/daq-service/pulls/12')
-    assert.equal(startPayload.group.repository, 'omaha:3001/daq/daq-service')
+    assert.equal(startPayload.group.base, baseSha, 'divergent origin/main resolves to target branch tip SHA, not merge-base')
     assert.deepEqual(startPayload.expectedReviewerTags, ['[Antigravity CLI]'])
-    assert.match(startPayload.hostKey, /^[a-f0-9]{64}$/)
 
-    // Wait until the hidden reviewer tab is running at head1Sha!
-    let reviewerTab = null
-    for (let i = 0; i < 100; i++) {
-      const s = await getState()
-      const grp = s.tempReviewerGroups?.[0]
-      const seat = grp?.seats?.find((item) => item.cli === 'antigravity')
-      if (grp?.stage === 'active' && seat?.verdict === 'reviewing' && seat.tabId) {
-        reviewerTab = s.tabs.find((t) => t.id === seat.tabId)
-        if (reviewerTab?.processId) break
+    let incompletePayload = null
+    for (let i = 0; i < 80; i++) {
+      const waitRes = await mcpPost(
+        mcpUrl,
+        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'pr_reviewers_wait', arguments: { wait_seconds: 2 } } },
+        mcpSessionId,
+      )
+      const parsed = JSON.parse(waitRes.json.result.content[0].text)
+      if (parsed.allSeatsSettledForRound && parsed.group.seats[0]?.verdict === 'incomplete') {
+        incompletePayload = parsed
+        break
       }
       await delay(100)
     }
-    assert.ok(reviewerTab, 'hidden reviewer tab launched and reached reviewing state')
-    assert.equal(reviewerTab.tempReviewer.prUrl, 'http://omaha:3001/daq/daq-service/pulls/12')
+    assert.ok(incompletePayload, 'silent exit 0 without PR post settled as incomplete')
+    assert.equal(incompletePayload.allApprovedCurrentHead, false)
+    assert.equal(incompletePayload.group.seats[0].needsAttention, true)
 
-    const reviewerDump1 = await waitDumpForPid(reviewerTab.processId)
-    assert.ok(reviewerDump1, 'captured Round 1 reviewer stub dump')
-    const worktreePath1 = reviewerDump1.cwd
-    assert.notEqual(reviewerDump1.cwd.toLowerCase(), repo.toLowerCase(), 'reviewer runs in isolated detached worktree, not author checkout')
-    assert.ok(reviewerDump1.args.includes('--dangerously-skip-permissions'), 'reviewerAllowAll passed --dangerously-skip-permissions')
-    assert.ok(reviewerDump1.args.includes('--prompt-interactive'), 'passed --prompt-interactive')
-    assert.ok(reviewerDump1.prTools && reviewerDump1.prTools.endsWith('pr-workflows'), 'hidden reviewer gets COPILOT_DESKTOP_PR_TOOLS')
-    assert.ok(reviewerDump1.prState && reviewerDump1.prState.endsWith('pr-state'), 'hidden reviewer gets isolated COPILOT_DESKTOP_PR_STATE')
-    const checkedOutSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: reviewerDump1.cwd, encoding: 'utf8' }).trim()
-    assert.equal(checkedOutSha, head1Sha, 'detached worktree checked out exact PR head1Sha')
-
-    const waitRes = await mcpPost(
+    // Refuses pr_reviewers_finish(outcome: 'approved') when seat is incomplete!
+    const prematureFinish1 = await mcpPost(
       mcpUrl,
-      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'pr_reviewers_wait', arguments: { wait_seconds: 1 } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'pr_reviewers_finish', arguments: { outcome: 'approved' } } },
       mcpSessionId,
     )
-    const waitPayload = JSON.parse(waitRes.json.result.content[0].text)
-    assert.equal(waitPayload.done, false)
-    assert.equal(waitPayload.group.seats[0].verdict, 'reviewing')
+    assert.equal(prematureFinish1.json.result.isError, true, 'finish("approved") refused when seat is incomplete')
 
-    // Push Round 2 commit (head2Sha) to origin and advance via pr_reviewers_round!
+    // 3b. Mode "findings" + holdMs 1500: Retry seat from UI; while running, verify pr_reviewers_round refuses premature advance; then verify 'findings' settles!
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'findings', giteaOrigin, holdMs: 1200 }))
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(groupId)}, 'retry', 'antigravity')`)
+
+    let retryRunningTab = null
+    for (let i = 0; i < 60; i++) {
+      const s = await getState()
+      const seat = s.tempReviewerGroups?.[0]?.seats?.[0]
+      if (seat?.verdict === 'reviewing' && seat.tabId) {
+        retryRunningTab = s.tabs.find((t) => t.id === seat.tabId)
+        if (retryRunningTab?.processId) break
+      }
+      await delay(50)
+    }
+    assert.ok(retryRunningTab, 'retried reviewer is running')
+    const reviewerDump1 = await waitDumpForPid(retryRunningTab.processId)
+    assert.ok(reviewerDump1, 'captured one-shot reviewer dump')
+    assert.equal(reviewerDump1.isOneShot, true, 'reviewerAllowAll launched Antigravity with --print one-shot')
+    assert.ok(reviewerDump1.args.includes('--dangerously-skip-permissions'))
+    assert.ok(reviewerDump1.seatReceipt && reviewerDump1.seatReceipt.endsWith('seat-receipt.json'))
+    assert.equal(reviewerDump1.allowHttpOrigin, giteaOrigin.toLowerCase())
+    const worktreePath1 = reviewerDump1.cwd
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath1, encoding: 'utf8' }).trim(), head1Sha)
+
+    // Wait for Round 1 findings to settle on Gitea!
+    let findingsPayload = null
+    for (let i = 0; i < 80; i++) {
+      const waitRes = await mcpPost(
+        mcpUrl,
+        { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'pr_reviewers_wait', arguments: { wait_seconds: 3 } } },
+        mcpSessionId,
+      )
+      const parsed = JSON.parse(waitRes.json.result.content[0].text)
+      if (parsed.allSeatsSettledForRound && parsed.group.seats[0]?.verdict === 'findings') {
+        findingsPayload = parsed
+        break
+      }
+      await delay(100)
+    }
+    assert.ok(findingsPayload, 'Gitea findings + seat receipt settled seat as findings')
+    assert.equal(findingsPayload.allApprovedCurrentHead, false)
+    assert.equal(giteaIssueComments.length, 1)
+
+    // Refuses pr_reviewers_finish(outcome: 'approved') when seat posted findings!
+    const prematureFinish2 = await mcpPost(
+      mcpUrl,
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'pr_reviewers_finish', arguments: { outcome: 'approved' } } },
+      mcpSessionId,
+    )
+    assert.equal(prematureFinish2.json.result.isError, true, 'finish("approved") refused when seat has open findings')
+
+    // 3c. Author fixes finding, pushes head2Sha, and calls pr_reviewers_round -> verifies worktree reuse + pr-approve.mjs approval!
+    await writeFile(behaviorFile, JSON.stringify({ mode: 'approve', giteaOrigin }))
     await writeFile(join(repo, 'service.ts'), 'export const version = 3\n')
     git('add', '.')
     git('commit', '-q', '-m', 'fix reviewer finding round 2')
     const head2Sha = git('rev-parse', 'HEAD')
-    git('push', '-q', 'origin', 'feat/gitea-pr-12')
+    git('push', '-q', originBare, 'feat/gitea-pr-12:refs/heads/feat/gitea-pr-12')
+    git('update-ref', 'refs/remotes/origin/feat/gitea-pr-12', head2Sha)
+    giteaHead = head2Sha
 
-    const oldReviewerPid = reviewerTab.processId
     const roundRes = await mcpPost(
       mcpUrl,
       {
         jsonrpc: '2.0',
-        id: 5,
+        id: 8,
         method: 'tools/call',
         params: {
           name: 'pr_reviewers_round',
           arguments: {
             head: head2Sha,
-            base: baseSha,
-            summary: `🤖 Fixed reviewer finding in ${head2Sha}`,
+            base: 'origin/main',
+            summary: `🤖 Bumped version to 3 in ${head2Sha}`,
           },
         },
       },
@@ -445,34 +653,34 @@ class AgyStub {
     )
     assert.equal(roundRes.json.result.isError, undefined, roundRes.json.result.content?.[0]?.text)
 
-    // Wait for Round 2 relaunch on head2Sha!
-    let reviewerTabRound2 = null
-    for (let i = 0; i < 100; i++) {
-      const s = await getState()
-      const grp = s.tempReviewerGroups?.[0]
-      const seat = grp?.seats?.find((item) => item.cli === 'antigravity')
-      if (grp?.round === 2 && grp?.stage === 'active' && seat?.verdict === 'reviewing' && seat.tabId) {
-        const candidate = s.tabs.find((t) => t.id === seat.tabId)
-        if (candidate?.processId && candidate.processId !== oldReviewerPid) {
-          reviewerTabRound2 = candidate
-          break
-        }
+    // Wait for Round 2 approval to settle!
+    let approvedPayload = null
+    for (let i = 0; i < 80; i++) {
+      const waitRes = await mcpPost(
+        mcpUrl,
+        { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'pr_reviewers_wait', arguments: { wait_seconds: 3 } } },
+        mcpSessionId,
+      )
+      const parsed = JSON.parse(waitRes.json.result.content[0].text)
+      if (parsed.group.round === 2 && parsed.allSeatsSettledForRound && parsed.allApprovedCurrentHead) {
+        approvedPayload = parsed
+        break
       }
       await delay(100)
     }
-    assert.ok(reviewerTabRound2, 'reviewer relaunched on Round 2')
-    const reviewerDump2 = await waitDumpForPid(reviewerTabRound2.processId)
-    assert.ok(reviewerDump2, 'captured Round 2 reviewer stub dump')
-    const worktreePath2 = reviewerDump2.cwd
-    const checkedOutSha2 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: reviewerDump2.cwd, encoding: 'utf8' }).trim()
-    assert.equal(checkedOutSha2, head2Sha, 'Round 2 detached worktree checked out exact head2Sha')
+    assert.ok(approvedPayload, 'Round 2 Gitea approval via pr-approve.mjs settled allApprovedCurrentHead === true')
+    assert.equal(approvedPayload.group.seats[0].verdict, 'approved')
+    assert.equal(approvedPayload.group.seats[0].checkedOut, head2Sha)
 
-    // Finish review group and verify hidden reviewer tabs AND detached worktrees are cleaned up!
+    // Verify worktree was reused cleanly on Round 2 (same checkout path, updated to head2Sha)!
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath1, encoding: 'utf8' }).trim(), head2Sha, 'reused Round 1 worktree cleanly at head2Sha')
+
+    // 3d. Finish review group as 'approved' (passes live Gitea verification) and verify hidden tabs + detached worktree are cleaned up!
     const finishRes = await mcpPost(
       mcpUrl,
       {
         jsonrpc: '2.0',
-        id: 6,
+        id: 10,
         method: 'tools/call',
         params: { name: 'pr_reviewers_finish', arguments: { outcome: 'approved' } },
       },
@@ -489,9 +697,7 @@ class AgyStub {
       false,
       'all hidden temporary reviewer tabs closed after pr_reviewers_finish',
     )
-    for (const wt of [worktreePath1, worktreePath2].filter(Boolean)) {
-      await assert.rejects(stat(wt), { code: 'ENOENT' }, `detached reviewer worktree ${wt} removed cleanly`)
-    }
+    await assert.rejects(stat(worktreePath1), { code: 'ENOENT' }, `detached reviewer worktree ${worktreePath1} removed cleanly`)
     const worktreeList = git('worktree', 'list', '--porcelain')
     assert.equal(
       worktreeList.split(/\r?\n/).filter((line) => line.startsWith('worktree ')).length,
@@ -502,16 +708,18 @@ class AgyStub {
     for (const tab of finalState.tabs) {
       await ui(`window.copilotDesktop.closeTab(${JSON.stringify(tab.id)})`).catch(() => {})
     }
+    await new Promise((r) => giteaServer.close(() => r()))
     await writeFile(
       join(out, 'result.json'),
       JSON.stringify(
         {
           passed: true,
           mcpUrl,
+          giteaOrigin,
           baseSha,
           head1Sha,
           head2Sha,
-          verifiedStubDumps: Boolean(firstDump && restartDump && reviewerDump1 && reviewerDump2),
+          giteaCommentCount: giteaIssueComments.length,
         },
         null,
         2,

@@ -145,13 +145,14 @@ export const GUEST_MCP_TOOLS = [
   },
   {
     name: 'pr_reviewers_round',
-    description: 'After fixing reviewer findings on the PR, running local checks, pushing a new commit to the PR branch, and replying with "🤖 " on the PR threads, advance temporary PR reviewers to the next round at the new head SHA (waking or relaunching any idle/exited reviewer sessions).',
+    description: 'After waiting for allSeatsSettledForRound, fixing reviewer findings on the PR, running local checks, pushing a new commit to the PR branch, and replying with "🤖 " on the PR threads, advance temporary PR reviewers to the next round at the new head SHA.',
     inputSchema: {
       type: 'object',
       properties: {
         head: { type: 'string', description: 'New pushed commit SHA (or ref) for reviewers to check out and assess.' },
         base: { type: 'string', description: 'Optional updated base commit SHA or target branch ref.' },
         summary: { type: 'string', description: 'Author round summary (prefix with "🤖 ") describing what was fixed or why points were declined.' },
+        force: { type: 'boolean', description: 'Optional override to supersede active unfinished reviewer seats (records skippedSeatsForHead, which blocks finish("approved") until retried or dismissed).' },
         host_key: { type: 'string', description: 'Optional 64-hex hostKey returned by pr_reviewers_start.' },
       },
       required: ['head', 'summary'],
@@ -444,10 +445,12 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
     const hostKey = typeof args.host_key === 'string' && args.host_key.trim() ? args.host_key.trim() : session.prHostKey
     if (typeof args.host_key === 'string' && /^[a-f0-9]{64}$/.test(args.host_key.trim())) session.prHostKey = args.host_key.trim()
     const base = typeof args.base === 'string' && args.base.trim() ? args.base.trim() : undefined
+    const force = args.force === true
     const answer = await deps.prReviewersRound(hostKey, session.desktopTag, {
       head: args.head.trim(),
       ...(base !== undefined ? { base } : {}),
       summary: args.summary,
+      ...(force ? { force: true } : {}),
     })
     return toolText(answer.message, !answer.ok)
   }

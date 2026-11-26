@@ -15,6 +15,10 @@ export interface ReviewerBarProps {
 const VERDICT_LABEL: Record<TempReviewerSeatVerdict, string> = {
   starting: 'starting…',
   reviewing: 'reviewing on PR…',
+  approved: 'approved',
+  findings: 'posted findings',
+  incomplete: 'incomplete (no PR post)',
+  'timed-out': 'timed out',
   failed: 'failed',
   stopped: 'stopped',
 }

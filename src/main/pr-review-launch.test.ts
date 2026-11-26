@@ -4,7 +4,7 @@ import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileS
 import { basename, join, resolve } from 'node:path'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
 
 /** "GitHub" (upstream, with refs/pull/<n>/head) and the person's project, a clone of it on its own branch. */
 function repos(f: GitFixture, number = 7): { upstream: string; project: string; base: string; head: string } {
@@ -278,5 +278,98 @@ test('a checkout replaced by a link to another worktree is never removed, nor is
     assert.equal(await removeReviewerArea(area, f.runner), 'kept')
     assert.ok(existsSync(join(other, 'a.txt')), 'the other worktree is untouched')
     assert.match(f.plain(project, 'worktree', 'list'), /other-worktree/)
+  } finally { f.cleanup() }
+})
+
+test('removeReviewerAreaDetailed removes worktrees with gitignored build/dependency folders, retries transient handle locks without --force, and distinguishes dirty vs git-failed', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    writeFileSync(join(upstream, '.gitignore'), 'node_modules/\ndist/\n')
+    f.plain(upstream, 'add', '.gitignore')
+    f.plain(upstream, 'commit', '-qm', 'add gitignore')
+    const headWithIgnore = f.plain(upstream, 'rev-parse', 'HEAD').trim()
+    f.plain(upstream, 'update-ref', 'refs/pull/7/head', headWithIgnore)
+
+    // 1. Gitignored directories inside the detached worktree are removed cleanly without --force:
+    const cleanWithIgnored = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, cleanWithIgnored, { head: headWithIgnore, base }, 7)
+    mkdirSync(join(cleanWithIgnored.checkout, 'node_modules', 'pkg'), { recursive: true })
+    writeFileSync(join(cleanWithIgnored.checkout, 'node_modules', 'pkg', 'index.js'), 'module.exports = 1\n')
+    mkdirSync(join(cleanWithIgnored.checkout, 'dist'), { recursive: true })
+    writeFileSync(join(cleanWithIgnored.checkout, 'dist', 'bundle.js'), 'console.log(1)\n')
+    const resIgnored = await removeReviewerAreaDetailed(cleanWithIgnored, f.runner, { retryDelaysMs: [10] })
+    assert.deepEqual(resIgnored, { outcome: 'removed' })
+    assert.equal(existsSync(cleanWithIgnored.root), false)
+
+    // 2. Transient Windows handle lock retries worktree remove (never passing --force) and succeeds once released:
+    const transientArea = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, transientArea, { head: headWithIgnore, base }, 7)
+    let removeAttempts = 0
+    const seenRemoveArgs: string[][] = []
+    const flakyRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        if (req.args[0] === 'worktree' && req.args[1] === 'remove') {
+          seenRemoveArgs.push([...req.args])
+          removeAttempts += 1
+          if (removeAttempts < 3) {
+            return {
+              exitCode: 128,
+              stdout: Buffer.alloc(0),
+              stderr: 'fatal: failed to remove worktree: Permission denied (EBUSY)',
+              timedOut: false,
+              cancelled: false,
+            }
+          }
+        }
+        return f.runner.run(req)
+      },
+    } as unknown as typeof f.runner
+    const resTransient = await removeReviewerAreaDetailed(transientArea, flakyRunner, { retryDelaysMs: [5, 5, 5] })
+    assert.deepEqual(resTransient, { outcome: 'removed' })
+    assert.equal(removeAttempts, 3)
+    for (const args of seenRemoveArgs) {
+      assert.equal(args.includes('--force'), false, 'never passes --force to git worktree remove')
+      assert.equal(args.includes('-f'), false, 'never passes -f to git worktree remove')
+    }
+
+    // 3. Dirty worktree returns reason: 'dirty' immediately without retrying worktree remove:
+    const dirtyArea = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, dirtyArea, { head: headWithIgnore, base }, 7)
+    writeFileSync(join(dirtyArea.checkout, 'untracked.txt'), 'keep me\n')
+    let dirtyRemoveCalls = 0
+    const countingRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        if (req.args[0] === 'worktree' && req.args[1] === 'remove') dirtyRemoveCalls += 1
+        return f.runner.run(req)
+      },
+    } as unknown as typeof f.runner
+    const resDirty = await removeReviewerAreaDetailed(dirtyArea, countingRunner, { retryDelaysMs: [5, 5] })
+    assert.deepEqual(resDirty, { outcome: 'kept', reason: 'dirty' })
+    assert.equal(dirtyRemoveCalls, 0, 'skips worktree remove when git status reports dirty files')
+    rmSync(join(dirtyArea.checkout, 'untracked.txt'))
+
+    // 4. Clean worktree whose removal persistently fails reports reason: 'git-failed' (not 'dirty'):
+    const alwaysFailRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        if (req.args[0] === 'worktree' && req.args[1] === 'remove') {
+          return {
+            exitCode: 128,
+            stdout: Buffer.alloc(0),
+            stderr: 'fatal: locked by external process',
+            timedOut: false,
+            cancelled: false,
+          }
+        }
+        return f.runner.run(req)
+      },
+    } as unknown as typeof f.runner
+    const resFailed = await removeReviewerAreaDetailed(dirtyArea, alwaysFailRunner, { retryDelaysMs: [5, 5] })
+    assert.equal(resFailed.outcome, 'kept')
+    if (resFailed.outcome === 'kept') {
+      assert.equal(resFailed.reason, 'git-failed')
+      assert.match(resFailed.detail ?? '', /locked by external process/)
+    }
+    assert.equal(await removeReviewerArea(dirtyArea, f.runner), 'removed')
   } finally { f.cleanup() }
 })
