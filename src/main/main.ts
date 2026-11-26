@@ -143,7 +143,8 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
-import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCliChoice } from './session-cli.js'
+import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
+import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import {
   buildOtherCliReviewerCliArgs,
   buildReviewerBrief,
@@ -1929,6 +1930,11 @@ async function buildSessionSpawnPlan(
     { ...inheritedEnvironment, ...configuredEnvironment },
     resolution.pathAdditions,
   )
+  if (!connectSessionId && shouldProvisionCliSkills('copilot', environment as NodeJS.ProcessEnv)) {
+    await provisionPrWorkflowSkillsForCli('copilot', bundledPrWorkflows().tools, environment as NodeJS.ProcessEnv).catch(async (error) => {
+      await writeAppLog(`Could not provision PR workflow skills for Copilot CLI: ${String(error)}`).catch(() => {})
+    })
+  }
   return {
     file: resolution.command,
     cliVersion: resolution.version,
@@ -2288,8 +2294,24 @@ function activateWorkspace(folder: string, options: { general?: boolean } = {}):
   })
 }
 
+function isScriptedDevLaunch(): boolean {
+  return !app.isPackaged && !existsSync(join(app.getAppPath(), 'resources', 'pr-workflows'))
+}
+
+function shouldProvisionCliSkills(cli: SessionCli, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1') return false
+  if (isScriptedDevLaunch()) return cliHasExplicitEnvOverride(cli, env)
+  return true
+}
+
 function bundledPrWorkflows(): { tools: string; state: string } {
-  const tools = app.isPackaged ? join(process.resourcesPath, 'pr-workflows') : join(app.getAppPath(), 'resources', 'pr-workflows')
+  const devRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+  const appPathCandidate = join(app.getAppPath(), 'resources', 'pr-workflows')
+  const tools = app.isPackaged
+    ? join(process.resourcesPath, 'pr-workflows')
+    : existsSync(appPathCandidate)
+      ? appPathCandidate
+      : join(devRoot, 'resources', 'pr-workflows')
   return { tools, state: join(app.getPath('userData'), 'pr-workflow-state') }
 }
 
@@ -2501,21 +2523,27 @@ function claimOtherCliSession(id: string): boolean {
   return true
 }
 
-let antigravityMcpSetup: Promise<void> | undefined
-
 /**
  * Found again for each launch, never from the minute-long cache: a CLI updated in place a moment ago would otherwise
  * start as the new version while the tab records, and reads launch flags for, the old one. The fresh look is kept.
  */
 async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResolution> {
   const resolution = await otherCliResolution(cli, true)
-  if (cli === 'antigravity' && resolution.version !== null) {
-    const url = guestMcp.url()
-    if (url !== null) {
-      await (antigravityMcpSetup ??= configureAntigravityMeetingMcp(url).catch(async (error) => {
-        antigravityMcpSetup = undefined
-        await writeAppLog(`Could not configure Antigravity's meeting tools: ${String(error)}`).catch(() => {})
-      }))
+  if (resolution.version !== null) {
+    const prWorkflows = bundledPrWorkflows()
+    await mkdir(prWorkflows.state, { recursive: true, mode: 0o700 }).catch(() => {})
+    if (shouldProvisionCliSkills(cli, process.env)) {
+      await provisionPrWorkflowSkillsForCli(cli, prWorkflows.tools, process.env).catch(async (error) => {
+        await writeAppLog(`Could not provision PR workflow skills for ${sessionCliLabel(cli)}: ${String(error)}`).catch(() => {})
+      })
+    }
+    if (cli === 'antigravity') {
+      const url = guestMcp.url()
+      if (url !== null) {
+        await configureAntigravityMeetingMcp(url).catch(async (error) => {
+          await writeAppLog(`Could not configure Antigravity's meeting tools: ${String(error)}`).catch(() => {})
+        })
+      }
     }
   }
   return resolution
@@ -2620,7 +2648,12 @@ function setOtherCliBlocked(tabId: string, fields: IncompatibleField[] | null): 
  */
 function createOtherCliSession(cli: OtherCli, resolution: AgentCliResolution, cwd: string, sessionId: string | null, stored: boolean,
   configArgs: string[], dimensions?: { cols: number; rows: number }): PtySession {
-  const env = withCopilotPathAdditions(process.env, resolution.pathAdditions)
+  const prWorkflows = bundledPrWorkflows()
+  const env: NodeJS.ProcessEnv = {
+    ...withCopilotPathAdditions(process.env, resolution.pathAdditions),
+    COPILOT_DESKTOP_PR_TOOLS: prWorkflows.tools,
+    COPILOT_DESKTOP_PR_STATE: prWorkflows.state,
+  }
   const resuming = sessionId !== null && stored
   const knownId = cli === 'claude' || resuming ? sessionId : null
   return new PtySession({
@@ -4350,7 +4383,7 @@ async function startTempReviewersMcp(options: {
   base?: string
   context?: string
 }): Promise<{ ok: boolean; message: string; hostKey?: string }> {
-  if (!guestsReady) return { ok: false, message: 'Copilot CLI Desktop is still starting; retry in a moment.' }
+  if (!app.isReady() || shuttingDown()) return { ok: false, message: 'Copilot CLI Desktop is still starting or shutting down; retry in a moment.' }
   const resolved = await resolveMcpWorkspaceAndTab(options.desktopTag, options.folder)
   if (!resolved.ok) return resolved
   return startTempReviewersFlow({
@@ -8375,6 +8408,13 @@ if (!app.requestSingleInstanceLock()) {
     await startGuestMcp()
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'
+    if (!packageSmokeTest) {
+      await provisionExistingCliPrWorkflowSkills(bundledPrWorkflows().tools, process.env, undefined, {
+        onlyExplicitEnvOverrides: isScriptedDevLaunch(),
+      }).catch((error) => {
+        void writeAppLog(`Could not provision PR workflow skills at startup: ${String(error)}`).catch(() => {})
+      })
+    }
     mainWindow = createWindow(!startHidden, packageSmokeTest
       ? {
         didFinishLoad: () => {
@@ -8411,6 +8451,9 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)
+    if (!guestsReady) {
+      await restoreMeetings().catch((error) => writeAppLog(`Could not restore meetings: ${String(error)}`))
+    }
     workflowNotifications.prime(attentionItems());workflowAttentionReady=true
     scheduleAutomaticUpdateCheck()
   }).catch((error) => {

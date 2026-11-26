@@ -87,6 +87,18 @@ test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixReq
     prReviewAndFixRequest('review and fix http://omaha:3001/daq/daq-service/pulls/12'),
     { number: 12, repository: 'omaha:3001/daq/daq-service', prUrl: 'http://omaha:3001/daq/daq-service/pulls/12' },
   )
+  assert.deepEqual(
+    prReviewAndFixRequest('/review-and-fix-pr 18 focus on edge cases'),
+    { number: 18, repository: null },
+  )
+  assert.deepEqual(
+    prReviewAndFixRequest('/review-and-fix-pr http://omaha:3001/daq/daq-service/pulls/12 and check tests'),
+    { number: 12, repository: 'omaha:3001/daq/daq-service', prUrl: 'http://omaha:3001/daq/daq-service/pulls/12' },
+  )
+  assert.deepEqual(
+    prReviewAndFixRequest('review and fix PR 42 and make sure tests pass'),
+    { number: 42, repository: null },
+  )
 
   // Plain single-role commands and malformed/ambiguous targets must be rejected
   assert.equal(prReviewAndFixRequest('review PR 42'), null)
@@ -208,6 +220,16 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
       help: '  --prompt-interactive\n  --add-dir',
     }),
     ['--dangerously-skip-permissions', '--add-dir', '/tmp/helper', '--prompt-interactive', 'Review PR'],
+  )
+  assert.deepEqual(
+    buildOtherCliReviewerCliArgs('antigravity', {
+      configArgs: ['--dangerously-skip-permissions'],
+      addDirArgs: [],
+      generation: '11111111-1111-4111-8111-111111111111',
+      prompt: '-leading-dash',
+      help: '  --prompt-interactive',
+    }),
+    ['--dangerously-skip-permissions', '--prompt-interactive', ' -leading-dash'],
   )
 })
 

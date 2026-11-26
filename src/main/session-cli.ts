@@ -6,6 +6,7 @@ export type SessionCli = 'copilot' | OtherCli
 export type OtherCli = typeof OTHER_CLIS[number]
 
 export const OTHER_CLIS = ['claude', 'codex', 'antigravity'] as const
+export const SESSION_CLIS = ['copilot', ...OTHER_CLIS] as const
 
 /**
  * CLIs supported as hidden temporary PR reviewers (`review-pr` running directly against the remote PR in an isolated
