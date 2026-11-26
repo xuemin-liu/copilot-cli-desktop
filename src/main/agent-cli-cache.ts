@@ -10,14 +10,14 @@ export const OTHER_CLI_CACHE_MS = 60_000
  * replaces it, so a CLI updated in place is started, recorded and asked for its flags as the version that runs.
  */
 export function createOtherCliCache(
-  resolve: (cli: OtherCli) => Promise<AgentCliResolution>,
+  resolve: (cli: OtherCli, fresh: boolean) => Promise<AgentCliResolution>,
   now: () => number = Date.now,
 ): (cli: OtherCli, fresh?: boolean) => Promise<AgentCliResolution> {
   const known = new Map<OtherCli, { at: number; resolution: Promise<AgentCliResolution> }>()
   return (cli, fresh = false) => {
     const kept = known.get(cli)
     if (!fresh && kept && now() - kept.at < OTHER_CLI_CACHE_MS) return kept.resolution
-    const resolution = resolve(cli)
+    const resolution = resolve(cli, fresh)
     known.set(cli, { at: now(), resolution })
     void resolution.then((found) => found.version === null, () => true).then((missed) => {
       if (missed && known.get(cli)?.resolution === resolution) known.delete(cli)

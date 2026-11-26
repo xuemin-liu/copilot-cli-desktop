@@ -4,10 +4,12 @@ import { homedir } from 'node:os'
 import { basename, delimiter, join, win32 } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
+import { OTHER_CLI_CACHE_MS } from './agent-cli-cache.js'
 import { samePath } from './host-path.js'
 import { findPosixExecutable } from './posix-executables.js'
 import {
   defaultExecFile, resolveWindowsCommand, tryVersion, unwrapNpmShim, withCopilotPathAdditions,
+  windowsSystemDirectory, windowsSystemExecutable,
   type ExecFileFn, type NpmCliPackage, type ReadTextFileFn,
 } from './resolve-copilot.js'
 import { sessionCliLabel, type OtherCli } from './session-cli.js'
@@ -42,6 +44,10 @@ export interface AgentCliResolveDeps {
   pathExists?: (path: string) => boolean
   readTextFile?: ReadTextFileFn
   findExecutable?: (name: string, env: NodeJS.ProcessEnv) => Promise<string | null>
+  /** Skip the short-lived memo of the Windows Store package lookup (used on fresh launch checks). */
+  fresh?: boolean
+  /** Clock for the Windows Store package lookup memo. */
+  now?: () => number
 }
 
 function describe(error: unknown): string {
@@ -55,6 +61,42 @@ export function agentCliInstallHint(cli: OtherCli): string {
   return `Install it with \`npm install -g ${npmPackage}\`, make sure a terminal finds \`${bin}\`, then try again.`
 }
 
+const WINDOWS_APP_LOOKUP_TIMEOUT_MS = 8_000
+const windowsCodexAppCache = new WeakMap<ExecFileFn, { at: number; systemDir: string; promise: Promise<string[]> }>()
+
+/**
+ * The OpenAI Codex Windows Store app bundles `codex.exe` inside its package without putting it on PATH.
+ * Query its install location via System32 PowerShell from a trusted CWD so the workspace is never searched.
+ * Keep the lookup (including an empty result) for `OTHER_CLI_CACHE_MS` across routine checks so a machine
+ * without Codex does not spawn PowerShell on every window focus; fresh launch lookups bypass and replace it.
+ */
+function findWindowsCodexAppExecutables(
+  env: NodeJS.ProcessEnv,
+  execFileFn: ExecFileFn,
+  fresh: boolean,
+  now: () => number,
+): Promise<string[]> {
+  const systemDir = windowsSystemDirectory(env)
+  const systemDirKey = systemDir.toLowerCase()
+  const kept = windowsCodexAppCache.get(execFileFn)
+  if (!fresh && kept && kept.systemDir === systemDirKey && now() - kept.at < OTHER_CLI_CACHE_MS) {
+    return kept.promise
+  }
+  const promise = execFileFn(
+    windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe', env),
+    ['-NoProfile', '-NonInteractive', '-Command', '(Get-AppxPackage OpenAI.Codex).InstallLocation'],
+    { env, cwd: systemDir, timeout: WINDOWS_APP_LOOKUP_TIMEOUT_MS, windowsHide: true },
+  )
+    .then(({ stdout }) => stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => win32.isAbsolute(line))
+      .map((location) => win32.join(location, 'app', 'resources', 'codex.exe')))
+    .catch(() => [])
+  windowsCodexAppCache.set(execFileFn, { at: now(), systemDir: systemDirKey, promise })
+  return promise
+}
+
 /** Find the CLI without ever invoking a command shell: an executable on PATH, or a verified npm shim's target. */
 export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps = {}): Promise<AgentCliResolution> {
   const env = deps.env ?? process.env
@@ -63,6 +105,8 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
   const readTextFile = deps.readTextFile ?? ((path: string) => readFile(path, 'utf8'))
   const findExecutable = deps.findExecutable ?? findPosixExecutable
   const execFileFn = deps.execFile ?? defaultExecFile
+  const fresh = deps.fresh ?? false
+  const now = deps.now ?? Date.now
   const { bin, npmPackage } = CLI_INSTALLATIONS[cli]
   const cliPackage: NpmCliPackage | null = npmPackage ? { name: npmPackage, bin } : null
   const attempts: string[] = []
@@ -85,16 +129,25 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
       ...(cliPackage && env.APPDATA ? [win32.join(env.APPDATA, 'npm', `${bin}.cmd`)] : []),
     ]
     const seen = new Set<string>()
-    for (const path of candidates) {
+    const tryCandidate = async (path: string, fromWhere: boolean): Promise<AgentCliResolution | null> => {
       const key = path.toLowerCase()
-      if (seen.has(key) || (!located.paths.includes(path) && !pathExists(path))) continue
+      if (seen.has(key) || (!fromWhere && !pathExists(path))) return null
       seen.add(key)
       const launch = key.endsWith('.exe')
         ? { command: path, prefixArgs: [], resolvedPath: path, pathAdditions: [] }
         : cliPackage && await unwrapNpmShim(path, cliPackage, env, execFileFn, pathExists, readTextFile)
-      if (!launch) { attempts.push(`${path}: package-manager shim target could not be verified`); continue }
-      const found = await probe(launch)
+      if (!launch) { attempts.push(`${path}: package-manager shim target could not be verified`); return null }
+      return probe(launch)
+    }
+    for (const path of candidates) {
+      const found = await tryCandidate(path, located.paths.includes(path))
       if (found) return found
+    }
+    if (cli === 'codex') {
+      for (const path of await findWindowsCodexAppExecutables(env, execFileFn, fresh, now)) {
+        const found = await tryCandidate(path, false)
+        if (found) return found
+      }
     }
   } else {
     const searchEnv = cli === 'antigravity'

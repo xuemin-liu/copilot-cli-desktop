@@ -60,3 +60,18 @@ test('each CLI is kept on its own', async () => {
   await lookup('codex')
   assert.equal(state.looks, 2)
 })
+
+test('createOtherCliCache forwards fresh to the resolver', async () => {
+  const seen: Array<{ cli: OtherCli; fresh: boolean }> = []
+  const lookup = createOtherCliCache(async (cli, fresh) => {
+    seen.push({ cli, fresh })
+    return found(null)
+  })
+  await lookup('codex')
+  await new Promise((settle) => setImmediate(settle))
+  await lookup('codex', true)
+  assert.deepEqual(seen, [
+    { cli: 'codex', fresh: false },
+    { cli: 'codex', fresh: true },
+  ])
+})
