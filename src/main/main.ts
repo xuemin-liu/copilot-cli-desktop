@@ -158,6 +158,8 @@ import {
 import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
+  CLAUDE_REVIEWER_SETTINGS_FILE,
+  reviewerHelperDirAccess,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -4217,9 +4219,10 @@ async function launchTempReviewerSeat(
     const help = await otherCliHelp(resolution)
     const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
-    const addDirArgs = help && helpListsFlag(help, '--add-dir')
-      ? ['--add-dir', area.helper]
-      : []
+    const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath)
+    if (helperAccess.settings !== null) await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
+    const addDirArgs = helperAccess.args
     const env: NodeJS.ProcessEnv = {
       ...withCopilotPathAdditions(process.env, resolution.pathAdditions),
       COPILOT_DESKTOP_PR_TOOLS: prWorkflows.tools,

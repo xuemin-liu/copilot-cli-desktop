@@ -26,6 +26,7 @@ import {
   repositoryLabelFromOrigin,
   resolveCopilotReviewerPreset,
   resolveOtherCliReviewerArgs,
+  reviewerHelperDirAccess,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
 } from './pr-temp-reviewers.js'
@@ -196,6 +197,21 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     () => resolveOtherCliReviewerArgs('antigravity', undefined, true, null, 'demo'),
     /Could not confirm that this Antigravity CLI installation supports/,
   )
+
+  // Claude Code gets its helper folder from a settings file: --add-dir stops an interactive session at a trust prompt.
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --add-dir <directories...>\n  --settings <file-or-json>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--settings', '/tmp/helper/claude-settings.json'], settings: '{"permissions":{"additionalDirectories":["/tmp/helper"]}}' },
+  )
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --add-dir <directories...>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--add-dir', '/tmp/helper'], settings: null },
+  )
+  assert.deepEqual(
+    reviewerHelperDirAccess('codex', '  --add-dir <dir>\n  --settings <file>', '/tmp/helper', '/tmp/helper/claude-settings.json'),
+    { args: ['--add-dir', '/tmp/helper'], settings: null },
+  )
+  assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {
