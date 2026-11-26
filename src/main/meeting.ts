@@ -204,13 +204,30 @@ interface Meeting {
   /** Sessions whose model failed on what they owe now. Not saved: after a restart they simply get it again. */
   failedTurns: Map<string, FailedTurn>
   cost: MeetingUsage
+  /**
+   * The first round is held back (`hold`): reviewers the desktop is starting join one by one, and the round opens for
+   * all of them together once `release` is called. Not saved: after a restart nothing is being started any more.
+   */
+  gathering: boolean
+  /**
+   * Who a vote was put to, while it is open: a vote is agreed by exactly these. One who joins meanwhile waits for the
+   * next round, and one who leaves is kept in `gone`, so the vote cannot pass with fewer voices than it was put to.
+   * Not saved: a vote restored after a restart counts whoever is back, as before.
+   */
+  voters: Set<string> | null
+  gone: MeetingReplyView[]
 }
 
 interface FailedTurn { round: number; kind: MeetingDeliveryKind; tries: number; error: string; since: number }
 
 export interface StartMeeting { topic: string; post: string; changes: string | null }
 
-export interface JoinOptions { role?: string | null; usage?: MeetingUsage | null }
+export interface JoinOptions {
+  role?: string | null
+  usage?: MeetingUsage | null
+  /** It takes no part in a round that is under way: its first message is the next round. For a seat that replaces another. */
+  nextRound?: boolean
+}
 
 /** A session as `restore` needs it: the tab now holding a saved Copilot session. A null folder keeps the saved one. */
 export type RestoredParty = MeetingParty & { tabId: string }
@@ -329,6 +346,9 @@ export class MeetingHub {
       transcript: `# Meeting ${id}\n\nHost: session ${partyLabel(host)}\nTopic: ${cleanTopic(request.topic) || 'not given'}\n`,
       outstanding: new Map(),
       cost: { ...NO_USAGE },
+      gathering: false,
+      voters: null,
+      gone: [],
     }
     this.meetings.set(id, meeting)
     this.writePost(meeting, 'Opening post', request.changes)
@@ -352,7 +372,11 @@ export class MeetingHub {
     this.appendTranscript(meeting, `Session ${partyLabel(joined)} joined`, `In round ${meeting.round}.`)
     this.send(meeting, participant.tabId, 'add-dir', meeting.folder)
     if (meeting.stage === 'waiting') {
-      this.openRound(meeting)
+      // While reviewers are being gathered the round waits for `release`, so a fast one cannot finish it alone.
+      if (!meeting.gathering) this.openRound(meeting)
+    } else if (meeting.stage === 'reviewing' && (meeting.voters !== null || options.nextRound === true)) {
+      // A vote is answered by those it was put to, and a seat that replaces another starts with the next round: it is in
+      // the meeting, and gets nothing until the host posts again.
     } else {
       // Mid-round it answers this round; otherwise (host thinking, paused) its reply joins the next digest as a late one.
       // During a discussion it has no review for the others to answer: its review joins the next digest as a late one.
@@ -361,6 +385,32 @@ export class MeetingHub {
     }
     this.changed(meeting)
     return this.view(meeting)
+  }
+
+  /**
+   * Hold the first round back while the desktop starts reviewers for this meeting: each joins as it comes up, and none
+   * is sent the post until `release`. Only a meeting nobody has been sent a round in can be held.
+   */
+  hold(id: string): boolean {
+    const meeting = this.meetings.get(id)
+    if (!meeting || meeting.stage !== 'waiting' || meeting.participants.size > 0) return false
+    meeting.gathering = true
+    this.changed(meeting)
+    return true
+  }
+
+  /** The reviewers being started are all in, failed or let go: the held round opens for whoever has joined. */
+  release(id: string): void {
+    const meeting = this.meetings.get(id)
+    if (!meeting || !meeting.gathering) return
+    meeting.gathering = false
+    if (meeting.stage === 'waiting' && meeting.participants.size > 0) this.openRound(meeting)
+    this.changed(meeting)
+  }
+
+  /** Whether the first round is being held back for reviewers that are still starting. */
+  isGathering(id: string): boolean {
+    return this.meetings.get(id)?.gathering === true
   }
 
   /** The host's next round, or its proposal to close (a vote). */
@@ -704,6 +754,9 @@ export class MeetingHub {
       transcript: transcript || `# Meeting ${state.id}\n`,
       outstanding: new Map(),
       cost: state.cost,
+      gathering: false,
+      voters: null,
+      gone: [],
     }
     bySession.set(state.host.sessionId!, host.tabId)
     this.meetings.set(meeting.id, meeting)
@@ -805,6 +858,10 @@ export class MeetingHub {
 
   private removeParticipant(meeting: Meeting, participant: Participant, heading: string): void {
     const tabId = participant.tabId
+    // One a vote was put to and who leaves before it ends stays counted, without a vote: the others cannot agree for it.
+    if (meeting.stage === 'reviewing' && meeting.voters?.has(tabId)) {
+      meeting.gone.push({ title: participant.title, folder: participant.folder, role: participant.role ?? null, text: null, vote: null })
+    }
     meeting.participants.delete(tabId)
     meeting.replies.delete(tabId)
     this.cancel(meeting, tabId)
@@ -852,6 +909,8 @@ export class MeetingHub {
     meeting.replies.clear()
     meeting.discussing = false
     meeting.reviewed = null
+    meeting.voters = null
+    meeting.gone = []
     meeting.stage = 'waiting'
   }
 
@@ -861,6 +920,8 @@ export class MeetingHub {
     meeting.reviewed = null
     meeting.replies.clear()
     meeting.awaiting = new Set(meeting.participants.keys())
+    meeting.voters = meeting.vote ? new Set(meeting.participants.keys()) : null
+    meeting.gone = []
     meeting.cancelTimer?.()
     meeting.cancelTimer = this.timers.set(() => this.timeOut(meeting), this.settings().roundTimeoutMinutes * 60_000)
     for (const tabId of meeting.participants.keys()) this.deliverRound(meeting, tabId, false)
@@ -908,7 +969,13 @@ export class MeetingHub {
       const reply = meeting.replies.get(participant.tabId)
       return { title: participant.title, folder: participant.folder, role: participant.role ?? null, text: reply?.text ?? null, vote: reply?.vote ?? null }
     }
-    const collected = [...meeting.participants.values()].map(view)
+    // A vote counts those it was put to: not one who joined since, and also one who left since (who did not vote).
+    const voters = meeting.voters
+    const collected = voters === null
+      ? [...meeting.participants.values()].map(view)
+      : [...[...meeting.participants.values()].filter((participant) => voters.has(participant.tabId)).map(view), ...meeting.gone]
+    meeting.voters = null
+    meeting.gone = []
     meeting.awaiting.clear()
     const paths = roundPaths(meeting.folder, meeting.round)
     if (meeting.discussing) {
@@ -983,6 +1050,9 @@ export class MeetingHub {
     meeting.outcome = outcome
     meeting.closedAt = this.timers.now()
     meeting.awaiting.clear()
+    meeting.gathering = false
+    meeting.voters = null
+    meeting.gone = []
     meeting.held = null
     // The agreed notice to the host was queued just before; everything else not yet typed is dropped.
     for (const tabId of meeting.participants.keys()) this.cancel(meeting, tabId)

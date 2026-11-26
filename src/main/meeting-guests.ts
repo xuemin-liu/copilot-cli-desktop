@@ -45,6 +45,9 @@ const CLOSED = 'The meeting is closed.'
  */
 export const GUEST_STAY_IN_TURN = 'do not end your turn until the meeting is closed, unless the person tells you to'
 
+/** What a seat of a hidden reviewer session answers after the desktop restarted without that session. */
+export const MANAGED_SEAT_RESTARTED = 'The desktop restarted, and the hidden session of this seat ended with it.'
+
 export interface GuestSeat {
   id: string
   /** A host seat has none ('') until its agent starts the meeting. */
@@ -77,6 +80,11 @@ export interface GuestSeat {
   codexThread: string | null
   /** The desktop tab this agent runs in, by the tag in the address the desktop launched it with: the tab shows the seat. */
   desktopTag: string | null
+  /**
+   * The desktop made this seat for a hidden reviewer session it started itself. Such a session does not come back
+   * after a restart, so neither does its seat (see `restore`).
+   */
+  managed?: boolean
 }
 
 export type GuestChannel = 'helper' | 'mcp'
@@ -150,7 +158,7 @@ export class GuestMailbox {
   ) {}
 
   /** A reviewer seat for a meeting, or (`kind: 'host'`, no meeting id) a seat whose agent may start one. */
-  invite(meetingId: string, name: string, role: string | null, options: { kind?: GuestKind; folder?: string | null; granted?: boolean } = {}): { seat: GuestSeat; token: string } {
+  invite(meetingId: string, name: string, role: string | null, options: { kind?: GuestKind; folder?: string | null; granted?: boolean; managed?: boolean } = {}): { seat: GuestSeat; token: string } {
     const token = randomBytes(32).toString('hex')
     let id: string
     do id = `guest:${randomBytes(8).toString('hex')}`; while (this.seats.has(id))
@@ -159,6 +167,7 @@ export class GuestMailbox {
       id, meetingId: kind === 'host' ? '' : meetingId, kind, folder: kind === 'host' ? options.folder ?? null : null, granted: options.granted ?? true, farewell: null,
       name: cleanGuestName(name) || 'Outside agent', role: kind === 'host' ? null : role ? cleanRole(role) || null : null,
       tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null, codexThread: null, desktopTag: null,
+      ...(options.managed === true && kind === 'reviewer' ? { managed: true } : {}),
     }
     this.seats.set(id, seat)
     this.changed()
@@ -457,6 +466,10 @@ export class GuestMailbox {
       if (typeof value.meetingId !== 'string' || !(/^[0-9A-Z]{4}$/.test(value.meetingId) || (kind === 'host' && value.meetingId === ''))) continue
       if (typeof value.tokenHash !== 'string' || !/^[0-9a-f]{64}$/.test(value.tokenHash)) continue
       const time = (entry: unknown): number | null => typeof entry === 'number' && Number.isFinite(entry) ? entry : null
+      // The hidden session behind a seat the desktop made is gone with the run that started it: its seat is over, so the
+      // meeting comes back without it and its host can have reviewers started again.
+      const managed = value.managed === true && kind === 'reviewer'
+      const saved = typeof value.closed === 'string' ? value.closed.slice(0, 200) : null
       this.seats.set(value.id, {
         id: value.id,
         meetingId: value.meetingId,
@@ -471,12 +484,13 @@ export class GuestMailbox {
         createdAt: time(value.createdAt) ?? this.timers.now(),
         joined: value.joined === true,
         lastSeenAt: time(value.lastSeenAt),
-        closed: typeof value.closed === 'string' ? value.closed.slice(0, 200) : null,
-        closedAt: time(value.closedAt),
+        closed: saved ?? (managed ? MANAGED_SEAT_RESTARTED : null),
+        closedAt: time(value.closedAt) ?? (managed && saved === null ? this.timers.now() : null),
         via: value.via === 'helper' || value.via === 'mcp' ? value.via : null,
         codexThread: typeof value.codexThread === 'string' && /^[0-9a-f-]{36}$/i.test(value.codexThread) ? value.codexThread : null,
         // Tags are made fresh each run; the agent's next tool call in its relaunched tab names the new one.
         desktopTag: null,
+        ...(managed ? { managed: true } : {}),
       })
     }
   }
@@ -499,6 +513,11 @@ export interface GuestDeps {
   isOpen(meetingId: string): boolean
   /** Joins the seat to its meeting; an error message when it cannot. */
   join(seat: GuestSeat): string | null
+  /**
+   * The host asked for hidden reviewer sessions with its start: the desktop starts one per configured reviewer CLI.
+   * Answers what the host is told. It holds the first round before it waits for anything.
+   */
+  startReviewers?(seat: GuestSeat, desktopTag: string | null, hasChanges: boolean): Promise<string>
   leave(seat: GuestSeat): void
   turnCompleted(seat: GuestSeat, delivery: MeetingDelivery, reply: string): void
   /** A meeting file by its fixed name, or null when there is none. */

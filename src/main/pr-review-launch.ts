@@ -446,6 +446,20 @@ export async function prepareAgnosticReviewWorktree(
 }
 
 /**
+ * A detached worktree of the project at one commit, for a reviewer of a meeting: nothing is fetched, since the commit
+ * is the project's own HEAD. Like every reviewer checkout it shares the project's Git directory, so it keeps a
+ * reviewer out of the person's working files by convention only.
+ */
+export async function prepareMeetingReviewWorktree(runner: GitRunner, project: string, area: ReviewerArea, commit: string): Promise<void> {
+  if (!SHA.test(commit)) throw new Error('Invalid commit')
+  area.project = resolve(project)
+  await git(runner, area.project, ['update-ref', area.ref, commit], 'write')
+  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, commit])
+  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read')
+  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read')
+}
+
+/**
  * Forge-agnostic detached checkout refresh when a temporary reviewer group advances to a new round or revision.
  * Refuses to overwrite a dirty reviewer worktree so local changes are preserved for inspection.
  */

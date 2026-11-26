@@ -136,6 +136,8 @@ export interface TempReviewerTabInfo {
   prLabel: string
   prNumber: number | null
   prUrl: string | null
+  /** Set for a reviewer of a review meeting, which has no pull request: the meeting it was started for. */
+  meetingId?: string
 }
 
 export type TempReviewerSeatVerdict =
@@ -173,6 +175,8 @@ export interface TempReviewerGroupView {
   outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   seats: TempReviewerSeatView[]
   notice: string | null
+  /** Set for the hidden reviewers of a review meeting: the bar words itself for a meeting, not a pull request. */
+  meetingId?: string
 }
 
 /** A session Copilot stored, as the History list shows it. Everything but the last two fields is data the CLI wrote. */
