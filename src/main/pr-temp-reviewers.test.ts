@@ -18,6 +18,10 @@ import { ReviewReservations } from './pr-review-reservations.js'
 import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
+  otherCliReviewerOneShot,
+  claudeBypassesPermissions,
+  claudeTrustFolderForCheckout,
+  interactiveSeatsToReconcile,
   buildReviewerBrief,
   cleanupReviewerSeatCredentials,
   parseAnyPullRequestInput,
@@ -233,6 +237,51 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     { args: ['--add-dir', '/tmp/helper'], settings: null },
   )
   assert.deepEqual(reviewerHelperDirAccess('antigravity', null, '/tmp/helper', '/tmp/x.json'), { args: [], settings: null })
+
+  // Claude Code's one-shot mode prints nothing until it ends, so it stays interactive; the others run one-shot with allow-all.
+  assert.equal(otherCliReviewerOneShot('claude', true, true), false)
+  // In a project Claude Code does not trust, interactive would stop at its trust question: it stays one-shot.
+  assert.equal(otherCliReviewerOneShot('claude', true, false), true)
+  assert.equal(otherCliReviewerOneShot('claude', true), true)
+  assert.equal(otherCliReviewerOneShot('claude', false, true), false)
+  assert.equal(otherCliReviewerOneShot('codex', true, true), true)
+  // Bypass mode is recognised by either spelling, wherever the arguments came from.
+  assert.equal(claudeBypassesPermissions(['--model', 'x', '--dangerously-skip-permissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode', 'bypassPermissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode=bypassPermissions']), true)
+  assert.equal(claudeBypassesPermissions(['--permission-mode', 'acceptEdits']), false)
+  assert.equal(claudeBypassesPermissions(['--model', 'bypassPermissions']), false)
+  assert.equal(claudeBypassesPermissions([]), false)
+  // Trust is asked about the main repository folder only: a linked worktree's own folder is never the answer.
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'main', '.git')), join('work', 'main'))
+  assert.equal(claudeTrustFolderForCheckout(`${join('work', 'main', '.git')}/`), join('work', 'main'))
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'bare.git')), null, 'a bare repository has no main folder')
+  assert.equal(claudeTrustFolderForCheckout(join('work', 'main', '.git', 'worktrees', 'feature-wt')), null)
+  assert.equal(claudeTrustFolderForCheckout(''), null)
+  assert.equal(claudeTrustFolderForCheckout(null), null)
+  assert.equal(otherCliReviewerOneShot('codex', true), true)
+  assert.equal(otherCliReviewerOneShot('antigravity', true), true)
+  assert.equal(otherCliReviewerOneShot('codex', false), false)
+
+  // With --dangerously-skip-permissions, the interactive session's bypass notice is answered in the same settings file.
+  assert.deepEqual(
+    reviewerHelperDirAccess('claude', '  --settings <file-or-json>', '/tmp/helper', '/tmp/helper/claude-settings.json', true),
+    { args: ['--settings', '/tmp/helper/claude-settings.json'], settings: '{"permissions":{"additionalDirectories":["/tmp/helper"]},"skipDangerousModePermissionPrompt":true}' },
+  )
+  assert.equal(reviewerHelperDirAccess('claude', '  --settings <file-or-json>', '/tmp/helper', '/tmp/x.json', false).settings, '{"permissions":{"additionalDirectories":["/tmp/helper"]}}')
+  assert.deepEqual(reviewerHelperDirAccess('codex', '  --add-dir <dir>', '/tmp/helper', '/tmp/x.json', true), { args: ['--add-dir', '/tmp/helper'], settings: null })
+
+  // Only running seats of an interactive non-Copilot CLI, in a group under way, are asked about at the PR host.
+  const seatOf = (cli: string, lifecycle: string): unknown => ({ cli, lifecycle })
+  const groupOf = (stage: string, seats: unknown[]): unknown => ({ stage, requiredSeats: new Map(seats.map((s) => [(s as { cli: string }).cli, s])) })
+  const groups = [
+    groupOf('active', [seatOf('claude', 'running'), seatOf('codex', 'running'), seatOf('antigravity', 'running'), seatOf('copilot', 'running')]),
+    groupOf('active', [seatOf('claude', 'approved')]),
+    groupOf('starting', [seatOf('claude', 'running')]),
+    groupOf('ended', [seatOf('claude', 'running')]),
+  ] as Parameters<typeof interactiveSeatsToReconcile>[0]
+  assert.deepEqual(interactiveSeatsToReconcile(groups, true).map(({ seat }) => seat.cli), ['claude'])
+  assert.deepEqual(interactiveSeatsToReconcile(groups, false).map(({ seat }) => seat.cli), ['claude', 'codex', 'antigravity'])
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {

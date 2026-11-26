@@ -12,6 +12,7 @@ import {
   antigravityDataRoot,
   antigravitySessionStored,
   buildAgentCliArgs,
+  claudeProjectTrusted,
   claudeSessionStored,
   codexAcceptsMcpOverride,
   resolveAgentCli,
@@ -539,4 +540,44 @@ test('AntigravitySessionDiscovery skips a conversation another tab claimed and s
     assert.equal(await discovery.find(), null)
     assert.equal(polls, 3)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('claudeProjectTrusted reads trust for a project folder from Claude Code\'s own record, under the exact key Claude Code uses', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-trust-'))
+  try {
+    const env = { CLAUDE_CONFIG_DIR: dir }
+    // Claude Code's key for a folder: forward slashes, letter case as spelled.
+    const key = (folder: string): string => folder.split('\\').join('/')
+    const record = (projects: Record<string, unknown>): Promise<void> => writeFile(join(dir, '.claude.json'), JSON.stringify({ projects }))
+    const project = join(dir, 'Work', 'project')
+    // No record yet: not trusted.
+    assert.equal(await claudeProjectTrusted([project], env), false)
+    await record({
+      [key(project)]: { hasTrustDialogAccepted: true },
+      [key(join(dir, 'declined'))]: { hasTrustDialogAccepted: false },
+      [key(join(dir, 'odd'))]: { hasTrustDialogAccepted: 'true' },
+    })
+    assert.equal(await claudeProjectTrusted([project], env), true)
+    assert.equal(await claudeProjectTrusted([key(project)], env), true)
+    assert.equal(await claudeProjectTrusted([`${project}/`], env), true, 'a trailing separator is the same folder')
+    assert.equal(await claudeProjectTrusted([join(dir, 'worktree'), null, project], env), true)
+    assert.equal(await claudeProjectTrusted([join(dir, 'declined')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'odd')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'Work')], env), false, 'a parent folder is not the project')
+    assert.equal(await claudeProjectTrusted([null, undefined, ''], env), false)
+    // A record under a spelling Claude Code does not look up is not trust: another letter case (a drive letter, on
+    // Windows), or backslashes.
+    await record({ [key(project).toLowerCase()]: { hasTrustDialogAccepted: true }, [key(project).toUpperCase()]: { hasTrustDialogAccepted: true } })
+    assert.equal(await claudeProjectTrusted([project], env), false)
+    await record({ [key(project).split('/').join('\\')]: { hasTrustDialogAccepted: true } })
+    assert.equal(await claudeProjectTrusted([project], env), false)
+    // A linked worktree with its own trust record, and none for its main repository: asked about the main folder
+    // alone (as the reviewer launch does), it is not trusted.
+    await record({ [key(join(dir, 'feature-wt'))]: { hasTrustDialogAccepted: true } })
+    assert.equal(await claudeProjectTrusted([join(dir, 'main')], env), false)
+    assert.equal(await claudeProjectTrusted([join(dir, 'feature-wt')], env), true)
+    // An unreadable record counts as not trusted.
+    await writeFile(join(dir, '.claude.json'), '{ not json')
+    assert.equal(await claudeProjectTrusted([project], env), false)
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })

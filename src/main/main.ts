@@ -140,7 +140,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeProjectTrusted, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
@@ -159,6 +159,10 @@ import {
 import {
   buildCopilotOneShotReviewerArgs,
   buildOtherCliReviewerCliArgs,
+  otherCliReviewerOneShot,
+  claudeBypassesPermissions,
+  claudeTrustFolderForCheckout,
+  interactiveSeatsToReconcile,
   buildReviewerBrief,
   CLAUDE_REVIEWER_SETTINGS_FILE,
   cleanupReviewerSeatCredentials,
@@ -3933,8 +3937,32 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
   })
 }
 
+let interactiveSeatReconciler: NodeJS.Timeout | null = null
+let reconcilingInteractiveSeats = false
+/**
+ * An interactive reviewer seat does not exit when its review is posted and reports no idle state, so once a minute the
+ * PR host is asked whether the review of each such running seat is there. Nothing found changes nothing: the seat keeps
+ * running until its receipt, a later check or the round timer.
+ */
+function ensureInteractiveSeatReconciler(): void {
+  if (interactiveSeatReconciler) return
+  interactiveSeatReconciler = setInterval(() => {
+    if (reconcilingInteractiveSeats || shuttingDown()) return
+    reconcilingInteractiveSeats = true
+    void (async () => {
+      try {
+        for (const { group, seat } of interactiveSeatsToReconcile(tempReviewers.list(), desktopConfig.reviewerAllowAll)) {
+          await reconcileTempReviewerSeatEvidence(group, seat, 'idle', { expectedRound: group.round, expectedGeneration: seat.generation }).catch(() => {})
+        }
+      } finally { reconcilingInteractiveSeats = false }
+    })()
+  }, 60_000)
+  interactiveSeatReconciler.unref?.()
+}
+
 function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSeat): void {
   clearTempSeatTimer(seat)
+  ensureInteractiveSeatReconciler()
   const expectedGen = seat.generation
   const expectedRound = group.round
   const timeoutMs = configuredTempReviewerTimeoutMs()
@@ -4194,7 +4222,11 @@ async function launchTempReviewerSeat(
     const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, savedConfig, allowAll, help, profile.name)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs]
     const claudeSettingsPath = join(area.helper, CLAUDE_REVIEWER_SETTINGS_FILE)
-    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath)
+    // Claude Code runs interactively (its work shows in the tab) only where it will not stop at its workspace trust
+    // question: the reviewer checkout is a worktree, which takes its trust from the project's main repository folder,
+    // also when the project itself is a linked worktree with a trust record of its own.
+    const claudeTrustsProject = cli === 'claude' && allowAll && await claudeProjectTrusted([claudeTrustFolderForCheckout(area.commonDir)])
+    const helperAccess = reviewerHelperDirAccess(cli, help, area.helper, claudeSettingsPath, cli === 'claude' && claudeBypassesPermissions(configArgs))
     if (helperAccess.settings !== null) {
       await writeFile(claudeSettingsPath, helperAccess.settings, { encoding: 'utf8', mode: 0o600 })
     }
@@ -4221,7 +4253,7 @@ async function launchTempReviewerSeat(
       generation: seat.generation,
       prompt,
       help,
-      oneShot: allowAll,
+      oneShot: otherCliReviewerOneShot(cli, allowAll, claudeTrustsProject),
       resumeSessionId: verifiedResumeId,
     })
     if (isSeatCancelled()) throw new Error('Temporary review stopped while launching')

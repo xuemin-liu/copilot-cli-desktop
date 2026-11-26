@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { parseSafeHttpUrl } from './external-targets.js'
 import { helpListsFlag, type PerCliConfig } from './agent-cli-settings.js'
@@ -341,20 +341,86 @@ export const CLAUDE_REVIEWER_SETTINGS_FILE = 'claude-settings.json'
  * new for each seat, so a hidden session would wait there forever. The same folder named in a settings file
  * (`permissions.additionalDirectories`) is granted without the prompt. `settings` is that file's content to write at
  * `settingsPath` before launch, or null when no file is needed.
+ *
+ * `bypassPermissions` says the launch carries `--dangerously-skip-permissions`. An interactive Claude Code session then
+ * shows its "Bypass Permissions mode" notice, with "No, exit" as the default, unless acceptance is recorded in a
+ * settings file; the person already agreed to that flag in the desktop's own consent for hidden reviewers, so the same
+ * file records it and the hidden session does not wait there on a computer where Claude Code has not been used so.
  */
 export function reviewerHelperDirAccess(
   cli: Exclude<ReviewerCli, 'copilot'>,
   help: string | null,
   helper: string,
   settingsPath: string,
+  bypassPermissions = false,
 ): { args: string[]; settings: string | null } {
   if (cli === 'claude' && help && helpListsFlag(help, '--settings')) {
     return {
       args: ['--settings', settingsPath],
-      settings: JSON.stringify({ permissions: { additionalDirectories: [helper] } }),
+      settings: JSON.stringify({
+        permissions: { additionalDirectories: [helper] },
+        ...(bypassPermissions ? { skipDangerousModePermissionPrompt: true } : {}),
+      }),
     }
   }
   return { args: help && helpListsFlag(help, '--add-dir') ? ['--add-dir', helper] : [], settings: null }
+}
+
+/**
+ * Whether a non-Copilot reviewer runs in its CLI's one-shot mode. Claude Code's (`-p`) prints nothing until its final
+ * answer, so its hidden reviewer tab would stay blank for the whole review. It runs interactively instead, where its
+ * work shows in the tab, but only when Claude Code already trusts the project (`claudeProjectTrusted`): otherwise the
+ * interactive session would stop at its workspace trust question, which one-shot mode skips, and a hidden seat cannot
+ * answer. An interactive seat does not exit when its review is posted and reports no idle state, so it settles by its
+ * receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at the latest by the
+ * round timer.
+ */
+export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
+  return reviewerAllowAll && (cli !== 'claude' || !claudeTrustsProject)
+}
+
+/**
+ * The one folder whose trust record Claude Code reads for a session in a reviewer checkout: the main repository
+ * folder, the parent of the project's `.git` common folder. The checkout is a worktree, and Claude Code looks up a
+ * worktree's trust under its main repository; a record under the project's own folder counts only when the project
+ * is that main checkout. Null when the common folder is not a `.git` folder (a bare repository, say), where trust
+ * cannot be established and the seat stays one-shot.
+ */
+export function claudeTrustFolderForCheckout(commonDir: string | null | undefined): string | null {
+  const folder = (commonDir ?? '').trim().replace(/[\\/]+$/, '')
+  if (!folder || basename(folder) !== '.git') return null
+  const parent = dirname(folder)
+  return parent && parent !== folder ? parent : null
+}
+
+/** Whether these Claude Code arguments start it in bypass-permissions mode, by either spelling of the flag. */
+export function claudeBypassesPermissions(args: readonly string[]): boolean {
+  return args.some((arg, index) => (
+    arg === '--dangerously-skip-permissions'
+    || arg === '--permission-mode=bypassPermissions'
+    || (arg === '--permission-mode' && args[index + 1] === 'bypassPermissions')
+  ))
+}
+
+/**
+ * The running seats whose review may only be found by asking the PR host: those of a non-Copilot CLI that can run
+ * interactively, in a group that is under way. A one-shot seat is checked when it exits, and a Copilot seat when it
+ * goes idle. Claude Code counts whenever allow-all is on, although it runs one-shot in a project it does not trust:
+ * asking early about a seat that will also be checked at its exit costs a request and changes nothing.
+ */
+export function interactiveSeatsToReconcile(
+  groups: readonly TempReviewerGroup[],
+  reviewerAllowAll: boolean,
+): { group: TempReviewerGroup; seat: TempReviewerSeat }[] {
+  const found: { group: TempReviewerGroup; seat: TempReviewerSeat }[] = []
+  for (const group of groups) {
+    if (group.stage !== 'active') continue
+    for (const seat of group.requiredSeats.values()) {
+      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, reviewerAllowAll, true)) continue
+      found.push({ group, seat })
+    }
+  }
+  return found
 }
 
 /**
