@@ -19,18 +19,26 @@ const require = createRequire(import.meta.url)
 if (!process.versions.electron) {
   // The Node parent owns the temporary folder: the Electron child keeps the control's .asar locked until it exits, so
   // only here, after it has exited, can everything be removed, also after a failure or a timeout.
-  const base = mkdtempSync(join(tmpdir(), 'reviewer-removal-'))
+  // Electron is found first: its package can throw when its binary is missing, and nothing is made before that.
   const electron = require('electron')
-  const child = spawn(electron, [fileURLToPath(import.meta.url)], { stdio: 'inherit', env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', REVIEWER_REMOVAL_BASE: base } })
+  const base = mkdtempSync(join(tmpdir(), 'reviewer-removal-'))
   let timedOut = false
+  let timer = null
   const finish = (code) => {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
     try { rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) } catch (error) { console.error(`reviewer-folder-removal-check: could not remove ${base}: ${String(error)}`); code = code || 1 }
     process.exit(timedOut ? 1 : code)
   }
-  const timer = setTimeout(() => { timedOut = true; console.error('reviewer-folder-removal-check: timed out'); child.kill() }, 120_000)
-  child.on('error', (error) => { console.error(error); finish(1) })
-  child.on('exit', (code) => finish(code ?? 1))
+  try {
+    const child = spawn(electron, [fileURLToPath(import.meta.url)], { stdio: 'inherit', env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', REVIEWER_REMOVAL_BASE: base } })
+    timer = setTimeout(() => { timedOut = true; console.error('reviewer-folder-removal-check: timed out'); child.kill() }, 120_000)
+    child.on('error', (error) => { console.error(error); finish(1) })
+    child.on('exit', (code) => finish(code ?? 1))
+  } catch (error) {
+    // A spawn that throws at once (a bad path, say) still leaves nothing behind.
+    console.error(error)
+    finish(1)
+  }
 } else {
   const { app } = require('electron')
   const original = require('original-fs')
