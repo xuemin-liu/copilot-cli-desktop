@@ -2,9 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, keptReviewWorktreeRemains, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
 
 /** "GitHub" (upstream, with refs/pull/<n>/head) and the person's project, a clone of it on its own branch. */
 function repos(f: GitFixture, number = 7): { upstream: string; project: string; base: string; head: string } {
@@ -183,28 +184,99 @@ test('a credential in the project\'s own Git config refuses the review, named by
   } finally { f.cleanup() }
 })
 
-test('a kept folder that is no longer a worktree is not the person\'s: it can be cleared', async (t) => {
+test('a folder a clean removal left behind goes on a later try, also with its .git file; an unrecorded one is not touched', async (t) => {
   const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base, head } = repos(f)
+    // What a removal that failed part-way can leave on Windows: the project no longer registers the worktree, but its
+    // folder is still there, with the worktree's .git file (a handle held on it) and other files.
+    const leftover = async (): Promise<Awaited<ReturnType<typeof createReviewerArea>>> => {
+      const area = await createReviewerArea(join(f.root, 'reviewers'))
+      await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
+      const marker = readFileSync(join(area.checkout, '.git'), 'utf8')
+      rmSync(join(area.checkout, '.git'))
+      f.plain(project, 'worktree', 'prune')
+      writeFileSync(join(area.checkout, '.git'), marker)
+      return area
+    }
+    // Without a record that Git detached it while clean, an unregistered folder with a .git file is left alone.
+    const unknown = await leftover()
+    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner), { outcome: 'kept', reason: 'unregistered' })
+    assert.ok(existsSync(join(unknown.checkout, 'a.txt')))
+    // With that record, the same state is cleared: folder and ref.
+    assert.deepEqual(await removeReviewerAreaDetailed(unknown, f.runner, { detached: true }), { outcome: 'removed' })
+    assert.equal(existsSync(unknown.root), false)
+    assert.throws(() => f.plain(project, 'rev-parse', '--verify', unknown.ref), 'its ref goes with it')
+    // The record does not weaken the path guard: a checkout that is not this review's own folder is never removed.
+    const linked = await leftover()
+    const elsewhere = join(f.root, 'elsewhere'); mkdirSync(elsewhere); writeFileSync(join(elsewhere, 'mine.txt'), 'the person\'s')
+    rmSync(linked.checkout, { recursive: true, force: true })
+    let linkMade = true
+    try { symlinkSync(elsewhere, linked.checkout, 'junction') } catch { linkMade = false }
+    if (linkMade) {
+      assert.deepEqual(await removeReviewerAreaDetailed(linked, f.runner, { detached: true }), { outcome: 'kept', reason: 'unregistered' })
+      assert.ok(existsSync(join(elsewhere, 'mine.txt')))
+    }
+    // A worktree still registered goes through the usual check even with the record: changes keep it.
+    const dirty = await createReviewerArea(join(f.root, 'reviewers'))
+    await cloneForReview(f.runner, project, upstream, dirty, { head, base }, 7)
+    writeFileSync(join(dirty.checkout, 'reviewer-notes.txt'), 'kept for the person')
+    assert.deepEqual(await removeReviewerAreaDetailed(dirty, f.runner, { detached: true }), { outcome: 'kept', reason: 'dirty' })
+    assert.ok(existsSync(join(dirty.checkout, 'reviewer-notes.txt')))
+  } finally { f.cleanup() }
+})
+
+test('a clean worktree whose folder cannot be deleted is reported as detached, and goes once the folder is free', { skip: process.platform !== 'win32' }, async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  let holder: ChildProcess | null = null
   try {
     const { upstream, project, base, head } = repos(f)
     const area = await createReviewerArea(join(f.root, 'reviewers'))
     await cloneForReview(f.runner, project, upstream, area, { head, base }, 7)
-    assert.equal(keptReviewWorktreeRemains(area.checkout), true)
-    // A worktree with changes stays the person's, however often removal is tried.
-    writeFileSync(join(area.checkout, 'reviewer-notes.txt'), 'kept for the person')
-    assert.equal(await removeReviewerArea(area, f.runner), 'kept')
-    assert.equal(keptReviewWorktreeRemains(area.checkout), true)
-    rmSync(join(area.checkout, 'reviewer-notes.txt'))
-    // What a removal that failed part-way leaves: Git no longer registers the worktree, its .git is gone, files remain.
-    mkdirSync(join(area.checkout, 'node_modules'), { recursive: true })
-    writeFileSync(join(area.checkout, 'node_modules', 'left.txt'), 'held open during removal')
-    rmSync(join(area.checkout, '.git'))
-    f.plain(project, 'worktree', 'prune')
-    assert.equal(existsSync(area.checkout), true)
-    assert.equal(keptReviewWorktreeRemains(area.checkout), false)
-    assert.equal(await removeReviewerArea(area, f.runner), 'removed')
+    // A process whose working folder is the checkout (a reviewer's leftover child) keeps Windows from deleting it.
+    holder = spawn(process.execPath, ['-e', 'process.stdout.write("up");setInterval(()=>{},1000)'], { cwd: area.checkout, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((done, fail) => { holder!.stdout!.once('data', () => done()); holder!.once('error', fail) })
+    const held = await removeReviewerAreaDetailed(area, f.runner, { retryDelaysMs: [5, 5] })
+    assert.equal(held.outcome, 'kept')
+    assert.equal(held.outcome === 'kept' && held.reason, 'detached', 'Git took the clean worktree out; only the folder stayed')
+    assert.ok(existsSync(area.checkout))
+    assert.doesNotMatch(f.plain(project, 'worktree', 'list', '--porcelain'), new RegExp(basename(area.root)))
+    const exited = new Promise<void>((done) => holder!.once('exit', () => done()))
+    holder.kill(); await exited; holder = null
+    assert.deepEqual(await removeReviewerAreaDetailed(area, f.runner, { detached: true }), { outcome: 'removed' })
     assert.equal(existsSync(area.root), false)
-    assert.throws(() => f.plain(project, 'rev-parse', '--verify', area.ref), 'its ref goes with it')
+  } finally { holder?.kill(); f.cleanup() }
+})
+
+test('a kept reservation records a detached removal, keeps it across a restart, and never loses it', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const path = join(f.root, 'reservations.json')
+    const store = new ReviewReservations(path)
+    const mk = (n: number): { launchId: string; root: string } => { const a = planReviewerArea(join(f.root, 'reviewers')); return { launchId: basename(a.root), root: a.root } }
+    const a = mk(1), b = mk(2)
+    for (const [r, number] of [[a, 1], [b, 2]] as const) {
+      await store.reserve({ launchId: r.launchId, repository: 'o/r', number, reviewer: 'x', project: f.root, root: r.root, checkout: join(r.root, 'checkout'), ref: `refs/desktop-review/${r.launchId}` })
+    }
+    // Kept for the person (changes, or an outcome nobody recorded): not detached.
+    await store.keep(a.launchId)
+    assert.equal(store.holder('o/r', 1, 'x')?.kept, true)
+    assert.equal(store.holder('o/r', 1, 'x')?.detached, undefined)
+    // A later clean removal that only left the folder upgrades it; a plain keep after that does not take it back.
+    await store.keep(a.launchId, true)
+    assert.equal(store.holder('o/r', 1, 'x')?.detached, true)
+    await store.keep(a.launchId)
+    assert.equal(store.holder('o/r', 1, 'x')?.detached, true)
+    await store.keep(b.launchId, true)
+    const reread = new ReviewReservations(path)
+    assert.equal(reread.holder('o/r', 1, 'x')?.detached, true)
+    assert.equal(reread.holder('o/r', 2, 'x')?.detached, true)
+    // A record whose flag is not a boolean is not trusted at all.
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>[]
+    raw[0]!.detached = 'yes'
+    writeFileSync(path, JSON.stringify(raw))
+    const tampered = new ReviewReservations(path)
+    assert.equal(tampered.list().length, 1)
   } finally { f.cleanup() }
 })
 

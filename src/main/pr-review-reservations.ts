@@ -25,6 +25,12 @@ export interface ReviewReservation {
   taskId: string | null
   createdAt: number
   kept: boolean
+  /**
+   * Git took the worktree out of the project while it had no changes, and only deleting its folder failed (a file
+   * still held open, on Windows). What is left is the desktop's to clear, not the person's. Set only from such a
+   * removal: a kept record without it is the person's for as long as its folder exists.
+   */
+  detached?: boolean
   /** Trusted restart-recovery record for syncing a rotated Codex OAuth refresh token before deleting the seat home. */
   codexAuthSync?: PersistedCodexAuthSync | null
 }
@@ -72,9 +78,10 @@ export class ReviewReservations {
     }
     await this.save()
   }
-  async keep(launchId: string): Promise<void> {
-    const r = this.records.get(launchId); if (!r || r.kept) return
-    this.records.set(launchId, { ...r, kept: true }); await this.save()
+  /** Keeps the record with its folder. `detached` says a clean removal took the worktree out and only the folder stayed. */
+  async keep(launchId: string, detached = false): Promise<void> {
+    const r = this.records.get(launchId); if (!r || (r.kept && (r.detached === true || !detached))) return
+    this.records.set(launchId, { ...r, kept: true, ...(detached ? { detached: true } : {}) }); await this.save()
   }
   async release(launchId: string): Promise<void> {
     if (!this.records.delete(launchId)) return
@@ -106,5 +113,6 @@ function valid(value: unknown): value is ReviewReservation {
     && typeof v.reviewer === 'string' && typeof v.project === 'string' && typeof v.root === 'string' && basename(v.root) === v.launchId
     && typeof v.checkout === 'string' && typeof v.ref === 'string' && v.ref === `refs/desktop-review/${v.launchId}`
     && (v.taskId === null || typeof v.taskId === 'string') && Number.isFinite(v.createdAt) && typeof v.kept === 'boolean'
+    && (v.detached === undefined || typeof v.detached === 'boolean')
     && (v.codexAuthSync === undefined || v.codexAuthSync === null || validCodexAuthSync(v.codexAuthSync, v.root))
 }

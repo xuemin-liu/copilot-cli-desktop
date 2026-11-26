@@ -1,6 +1,6 @@
 import { REVIEW_HELPER_COMMAND } from './meeting-messages.js'
 import { randomUUID } from 'node:crypto'
-import { existsSync, realpathSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { GitRunner } from './git-runner.js'
@@ -55,7 +55,7 @@ async function realPath(path: string): Promise<string> {
 
 export type ReviewerAreaRemovalResult =
   | { outcome: 'removed' }
-  | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner'; detail?: string }
+  | { outcome: 'kept'; reason: 'dirty' | 'git-failed' | 'unregistered' | 'no-runner' | 'detached'; detail?: string }
 
 const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
 
@@ -66,12 +66,18 @@ const DEFAULT_WORKTREE_REMOVE_RETRY_DELAYS_MS = [150, 300, 600, 1_000] as const
  *   non-ignored files return `{ outcome: 'kept', reason: 'dirty' }` immediately.
  * - Retries `git worktree remove -- <checkout>` (never `--force`) across short delays when clean so transient Windows
  *   child process handle locks release cleanly instead of leaving stale worktrees behind.
+ * - When Git took the clean worktree out of the project and only deleting the folder failed, reports
+ *   `{ outcome: 'kept', reason: 'detached' }`: nothing of the person's is in what is left. A caller that recorded this
+ *   passes `detached: true` on a later try, which lets the folder go although the project no longer registers it, also
+ *   when a failed removal left the worktree's `.git` file behind.
  */
 export async function removeReviewerAreaDetailed(
   area: Pick<ReviewerArea, 'root' | 'checkout' | 'project' | 'ref'>,
   runner?: GitRunner | null,
-  options?: { retryDelaysMs?: readonly number[] },
+  options?: { retryDelaysMs?: readonly number[]; detached?: boolean },
 ): Promise<ReviewerAreaRemovalResult> {
+  // Whether Git is known to have taken this worktree out while it was clean: recorded by an earlier try, or done below.
+  let detached = options?.detached === true
   if (area.project) {
     if (!runner) return { outcome: 'kept', reason: 'no-runner' }
     let listed: string
@@ -92,7 +98,7 @@ export async function removeReviewerAreaDetailed(
     let registered = false
     for (const line of listed.split('\0')) if (line.startsWith('worktree ') && samePath(await realPath(line.slice(9)), checkout)) registered = true
     // Not registered, yet a worktree's .git file is there: something does not add up, so nothing is deleted.
-    if (!registered && await stat(join(area.checkout, '.git')).then(() => true, () => false)) {
+    if (!registered && !detached && await stat(join(area.checkout, '.git')).then(() => true, () => false)) {
       return { outcome: 'kept', reason: 'unregistered' }
     }
     if (registered) {
@@ -146,25 +152,17 @@ export async function removeReviewerAreaDetailed(
       if (!removedWorktree) {
         return { outcome: 'kept', reason: 'git-failed', ...(lastDetail ? { detail: lastDetail } : {}) }
       }
+      // Git removes a worktree only while it has no changes (never --force here), so what may be left is not the person's.
+      detached = true
     }
     if (REVIEW_REF.test(area.ref)) await git(runner, area.project, ['update-ref', '-d', area.ref]).catch(() => '')
   }
   try {
     await rm(area.root, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 })
   } catch (error) {
-    return { outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }
+    return { outcome: 'kept', reason: detached ? 'detached' : 'git-failed', detail: error instanceof Error ? error.message : String(error) }
   }
   return { outcome: 'removed' }
-}
-
-/**
- * Whether a kept review still has a worktree for the person to look at: its checkout holds a worktree's `.git`. A
- * checkout without one is what a removal that failed part-way left behind (on Windows, a file still held open stops
- * `git worktree remove` after it has unregistered the worktree). Git can show no changes in it and cannot remove it, so
- * it is the desktop's to clear rather than a reason to refuse the next review.
- */
-export function keptReviewWorktreeRemains(checkout: string): boolean {
-  return existsSync(join(checkout, '.git'))
 }
 
 /**
