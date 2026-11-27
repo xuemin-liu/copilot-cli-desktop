@@ -218,7 +218,11 @@ if (!process.versions.electron) {
         onMigrationProgress: unsubscribe,
         migrationStatus: async () => ({ recoveryIssues: [], recoveryJournals: [], backups: [], warnings: [], lastImport: null, busy: false, progress: null }),
         usageReport: async () => { throw new Error('Usage is unavailable in this fixture') },
-        updateWorkspaceProfile: async (_id, _name, _permission, _resume, launch) => { saved = launch; return state },
+        updateWorkspaceProfile: async (_id, name, _permission, _resume, launch) => {
+          if (!name.trim()) throw new Error('Profile name is required')
+          saved = launch
+          return state
+        },
         lastSavedLaunch: () => saved,
       })
     `, 'utf8')
@@ -245,6 +249,17 @@ if (!process.versions.electron) {
     const customLaunch = await fixtureUi('window.copilotDesktopSettings.lastSavedLaunch()')
     assert.equal(customLaunch.model, 'auto-deployment')
     assert.equal(customLaunch.reasoningEffort, 'high', 'typing through Auto must preserve effort for the completed custom model')
+    const nameInput = `${copilotGrid} input[maxlength="100"]`
+    await setInput(customInput, 'auto', fixtureUi)
+    await setInput(nameInput, '', fixtureUi)
+    await clickButton('Save profile', fixtureUi)
+    assert.match(await fixtureUi('document.body.innerText'), /Profile name is required/)
+    await setInput(nameInput, 'project', fixtureUi)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    await clickButton('Save profile', fixtureUi)
+    const retriedLaunch = await fixtureUi('window.copilotDesktopSettings.lastSavedLaunch()')
+    assert.equal(retriedLaunch.model, 'auto-deployment')
+    assert.equal(retriedLaunch.reasoningEffort, 'high', 'a rejected save must preserve effort for the retry')
     await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).focus()`)
     await setInput(customInput, 'auto', fixtureUi)
     await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).blur()`)

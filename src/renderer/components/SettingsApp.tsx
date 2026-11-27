@@ -443,8 +443,6 @@ function WorkspaceProfileEditor({
                 nextOtherCli[cli] = remaining
               }
             }
-            setLaunch(nextLaunch)
-            setOtherCli(nextOtherCli)
             setSaving(true)
             void onSave(
               window.copilotDesktopSettings.updateWorkspaceProfile(
@@ -455,7 +453,11 @@ function WorkspaceProfileEditor({
                 nextLaunch,
                 Object.keys(nextOtherCli).length > 0 ? nextOtherCli : undefined,
                 reviewerOverride ?? undefined,
-              ),
+              ).then((next) => {
+                setLaunch((current) => current === launch ? nextLaunch : current)
+                setOtherCli((current) => current === otherCli ? nextOtherCli : current)
+                return next
+              }),
               `Saved profile "${name.trim() || profile.name}".`,
               `Could not save profile "${profile.name}"`,
             ).finally(() => setSaving(false))
