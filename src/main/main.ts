@@ -5988,43 +5988,49 @@ async function advanceGroupTempReviewers(
           if (seat.cli === 'copilot' && seat.tabId && seat.area) {
             const managed = managedTabs.get(seat.tabId)
             if (managed && managed.session.activity === 'idle' && meetingPromptSettled(seat.tabId)) {
-              const refreshed = await refreshAgnosticReviewWorktree(runner, seat.area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
-              if (!refreshed) {
-                await relaunchSeatAtNewHead(seat)
-                continue
-              }
-              seat.checkedOut = refreshed
-              seat.checkedOutBase = revisions.base
-              seat.roundStartedAt = Date.now()
-              seat.submittedReceipt = null
-              const seatStateDir = join(seat.area.helper, 'pr-state')
-              await writeFile(join(seat.area.helper, 'reviewer-brief.md'), buildReviewerBrief({
-                cli: seat.cli,
-                repository: group.repository,
-                prLabel: group.prLabel,
-                prNumber: group.prNumber,
-                prUrl: group.prUrl,
-                round: targetRound,
-                head: revisions.head,
-                base: revisions.base,
-                marker: group.marker,
-                reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
-                prToolsDir: prWorkflows.tools,
-                seatStateDir,
-                checkoutPath: seat.area.checkout,
-                roundHistory: group.roundHistory,
-                forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.cli),
-              }), { encoding: 'utf8', mode: 0o600 }).catch(() => {})
-              startTempSeatRoundTimer(group, seat)
-              const label = sessionCliLabel(seat.cli)
-              const sent = sendSessionTask(
-                seat.tabId,
-                `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "[${label}]" directly on the PR.`,
-                false,
-              )
-              if (sent.result !== 'sent') {
-                await relaunchSeatAtNewHead(seat)
-              }
+              // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
+              // and its area; a relaunch, if needed, runs after (it takes the queue itself).
+              const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
+                const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.cli) === seat
+                const area = seat.area
+                if (!owned()) return 'stale'
+                if (!area || !seat.tabId) return 'relaunch'
+                const refreshed = await refreshAgnosticReviewWorktree(runner, area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
+                if (!owned()) return 'stale'
+                if (!refreshed || seat.area !== area || !seat.tabId) return 'relaunch'
+                seat.checkedOut = refreshed
+                seat.checkedOutBase = revisions.base
+                seat.roundStartedAt = Date.now()
+                seat.submittedReceipt = null
+                const seatStateDir = join(area.helper, 'pr-state')
+                await writeFile(join(area.helper, 'reviewer-brief.md'), buildReviewerBrief({
+                  cli: seat.cli,
+                  repository: group.repository,
+                  prLabel: group.prLabel,
+                  prNumber: group.prNumber,
+                  prUrl: group.prUrl,
+                  round: targetRound,
+                  head: revisions.head,
+                  base: revisions.base,
+                  marker: group.marker,
+                  reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
+                  prToolsDir: prWorkflows.tools,
+                  seatStateDir,
+                  checkoutPath: area.checkout,
+                  roundHistory: group.roundHistory,
+                  forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.cli),
+                }), { encoding: 'utf8', mode: 0o600 }).catch(() => {})
+                if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
+                startTempSeatRoundTimer(group, seat)
+                const label = sessionCliLabel(seat.cli)
+                const sent = sendSessionTask(
+                  seat.tabId,
+                  `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "[${label}]" directly on the PR.`,
+                  false,
+                )
+                return sent.result === 'sent' ? 'done' : 'relaunch'
+              })
+              if (outcome === 'relaunch') await relaunchSeatAtNewHead(seat)
             } else {
               await relaunchSeatAtNewHead(seat)
             }
@@ -6036,7 +6042,8 @@ async function advanceGroupTempReviewers(
         }
         broadcastState()
       } catch (error) {
-        if (group.stage !== 'ended') {
+        // Only the current round ends the run: a superseded round's failure is not about the seats running now.
+        if (!isStaleOrEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', error instanceof Error ? error.message : 'Could not advance temporary PR reviewers.')
           await teardownTempReviewerSeats(seats)
           broadcastState()
