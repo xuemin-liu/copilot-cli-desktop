@@ -4116,9 +4116,15 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
  */
 const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
 
-/** The seat's launch in flight was cancelled (by a round or a Retry taking it over) and has not finished yet. */
+/**
+ * The generation of each seat whose takeover (by a round or a Retry) has begun. It stays recorded through the teardown
+ * until the seat gets a new generation, so nothing its old tab does in between is taken as a verdict.
+ */
+const supersededTempSeatGenerations = new WeakMap<TempReviewerSeat, string>()
+
+/** The seat's current launch has been cancelled or its takeover has begun, and it has no new generation yet. */
 function tempSeatLaunchCancelled(seat: TempReviewerSeat): boolean {
-  return tempSeatLaunchesInFlight.get(seat)?.cancel.cancelled === true
+  return tempSeatLaunchesInFlight.get(seat)?.cancel.cancelled === true || supersededTempSeatGenerations.get(seat) === seat.generation
 }
 async function writeTempReviewerReceipt(group: TempReviewerGroup, seat: TempReviewerSeat, helper: string): Promise<string> {
   const port = await meetingControl.port()
@@ -4180,6 +4186,7 @@ function withTempSeatArea<T>(seat: TempReviewerSeat, work: () => Promise<T>): Pr
  * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
  */
 async function settleTempSeatLaunch(seat: TempReviewerSeat): Promise<void> {
+  supersededTempSeatGenerations.set(seat, seat.generation)
   const inFlight = tempSeatLaunchesInFlight.get(seat)
   if (!inFlight) return
   inFlight.cancel.cancelled = true
