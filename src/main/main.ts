@@ -4067,8 +4067,11 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
   tempSeatTimers.set(key, timer)
 }
 
-/** Each seat's launch still in flight, settled either way: a round that reuses or replaces the seat waits for it first. */
-const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, Promise<void>>()
+/**
+ * Each seat's launch still in flight, settled either way, with the token that cancels it: a round that reuses or
+ * replaces the seat cancels it and waits for it first.
+ */
+const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
 
 async function launchTempReviewerSeat(
   group: TempReviewerGroup,
@@ -4076,26 +4079,28 @@ async function launchTempReviewerSeat(
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
-  const run = launchTempReviewerSeatNow(group, seat, profile, options)
-  const settled = run.then(() => {}, () => {})
-  tempSeatLaunchesInFlight.set(seat, settled)
+  const cancel = { cancelled: false }
+  const run = launchTempReviewerSeatNow(group, seat, profile, cancel, options)
+  const entry = { settled: run.then(() => {}, () => {}), cancel }
+  tempSeatLaunchesInFlight.set(seat, entry)
   try {
     await run
   } finally {
-    if (tempSeatLaunchesInFlight.get(seat) === settled) tempSeatLaunchesInFlight.delete(seat)
+    if (tempSeatLaunchesInFlight.get(seat) === entry) tempSeatLaunchesInFlight.delete(seat)
   }
 }
 
 /**
- * Wait up to `ms` for a seat's earlier launch, cleanup included, to finish. False when it is still running: the caller
- * must not reuse that launch's area then.
+ * Cancel a seat's earlier launch and wait up to `ms` for it, cleanup included, to finish. False when it is still
+ * running: the caller must not reuse that launch's area then.
  */
 async function settleTempSeatLaunch(seat: TempReviewerSeat, ms = 60_000): Promise<boolean> {
   const inFlight = tempSeatLaunchesInFlight.get(seat)
   if (!inFlight) return true
+  inFlight.cancel.cancelled = true
   let timer: NodeJS.Timeout | undefined
   const done = await Promise.race([
-    inFlight.then(() => true),
+    inFlight.settled.then(() => true),
     new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), ms) }),
   ])
   clearTimeout(timer)
@@ -4106,6 +4111,7 @@ async function launchTempReviewerSeatNow(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
+  cancel: { readonly cancelled: boolean },
   options?: { reuseArea?: boolean },
 ): Promise<void> {
   const runner = await meetingGitRunner()
@@ -4201,6 +4207,7 @@ async function launchTempReviewerSeatNow(
       || group.requiredSeats.get(seat.cli) !== seat
       || seat.generation !== expectedGeneration
       || seat.lifecycle === 'stopped'
+      || cancel.cancelled
     )
 
     const allowAll = desktopConfig.reviewerAllowAll
@@ -5902,6 +5909,8 @@ async function advanceGroupTempReviewers(
           // An earlier launch of this seat still setting up finishes (or cleans up) before its area is touched; one that
           // does not finish in time keeps its area, and this round starts from a fresh one.
           const earlierSettled = await settleTempSeatLaunch(seat)
+          // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
+          if (earlierSettled) await stopAndCloseTempReviewerTabOnly(seat)
           if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
           if (!profile) {
             tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
