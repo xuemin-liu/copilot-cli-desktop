@@ -268,11 +268,20 @@ test('a listener that throws never breaks the command it watches', { skip }, asy
 test('a working folder that is gone is named as such, not reported as a missing git', { skip }, async (t) => {
   const fixture = (await createGitFixture())!
   t.after(() => fixture.cleanup())
-  const gone = join(fixture.repo('plain'), '..', 'removed-worktree')
+  const repo = fixture.repo('plain')
+  const gone = join(repo, '..', 'removed-worktree')
   await assert.rejects(fixture.runner.run({ cwd: gone, args: statusArgs() }), (error: Error) => {
     assert.match(error.message, /removed-worktree no longer exists/)
     assert.doesNotMatch(error.message, /git was not found/)
     assert.equal(error instanceof GitUnavailableError, false, 'git itself is there')
+    return true
+  })
+  // A path that is a file now (a stale worktree path) fails the spawn the same way.
+  const file = join(repo, '..', 'worktree-that-is-a-file')
+  writeFileSync(file, 'not a folder')
+  await assert.rejects(fixture.runner.run({ cwd: file, args: statusArgs() }), (error: Error) => {
+    assert.match(error.message, /worktree-that-is-a-file no longer exists/)
+    assert.equal(error instanceof GitUnavailableError, false)
     return true
   })
 })

@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { posix, win32 } from 'node:path'
@@ -154,6 +154,10 @@ const MAX_STDERR_BYTES = 64 * 1024
 /** Upper bound on waiting for a killed tree: taskkill's own 5 s limit plus a second for the pipes to close. */
 const KILL_GRACE_MS = 6_000
 
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory() } catch { return false }
+}
+
 export class GitRunner {
   private readonly options: GitRunnerOptions
   private hooksReady: Promise<void> | null = null
@@ -237,10 +241,10 @@ export class GitRunner {
         clearTimeout(graceTimer)
         options.signal?.removeEventListener('abort', onAbort)
         lease?.release()
-        // A spawn fails with ENOENT for a working folder that is gone as well as for a missing executable; saying git
-        // was not found for the first sends the person looking for the wrong thing.
+        // A spawn fails with ENOENT for a working folder that is gone, or is a file now, as well as for a missing
+        // executable; saying git was not found for those sends the person looking for the wrong thing.
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') reject(error)
-        else if (!existsSync(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
+        else if (!isDirectory(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
         else reject(new GitUnavailableError('git was not found'))
       })
       const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
