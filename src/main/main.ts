@@ -4091,20 +4091,14 @@ async function launchTempReviewerSeat(
 }
 
 /**
- * Cancel a seat's earlier launch and wait up to `ms` for it, cleanup included, to finish. False when it is still
- * running: the caller must not reuse that launch's area then.
+ * Cancel a seat's earlier launch and wait for it, cleanup and reservation release included, to finish. It stops at its
+ * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
  */
-async function settleTempSeatLaunch(seat: TempReviewerSeat, ms = 60_000): Promise<boolean> {
+async function settleTempSeatLaunch(seat: TempReviewerSeat): Promise<void> {
   const inFlight = tempSeatLaunchesInFlight.get(seat)
-  if (!inFlight) return true
+  if (!inFlight) return
   inFlight.cancel.cancelled = true
-  let timer: NodeJS.Timeout | undefined
-  const done = await Promise.race([
-    inFlight.settled.then(() => true),
-    new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), ms) }),
-  ])
-  clearTimeout(timer)
-  return done
+  await inFlight.settled
 }
 
 async function launchTempReviewerSeatNow(
@@ -5906,11 +5900,11 @@ async function advanceGroupTempReviewers(
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
           await stopAndCloseTempReviewerTabOnly(seat)
-          // An earlier launch of this seat still setting up finishes (or cleans up) before its area is touched; one that
-          // does not finish in time keeps its area, and this round starts from a fresh one.
-          const earlierSettled = await settleTempSeatLaunch(seat)
+          // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
+          // reservation) before its area is touched.
+          await settleTempSeatLaunch(seat)
           // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
-          if (earlierSettled) await stopAndCloseTempReviewerTabOnly(seat)
+          await stopAndCloseTempReviewerTabOnly(seat)
           if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
           if (!profile) {
             tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
@@ -5918,10 +5912,7 @@ async function advanceGroupTempReviewers(
             return
           }
           let canReuseWorktree = false
-          if (!earlierSettled) {
-            seat.area = null
-            seat.launchId = ''
-          } else if (!requiresConsent && seat.area && seat.launchId) {
+          if (!requiresConsent && seat.area && seat.launchId) {
             const refreshed = await refreshAgnosticReviewWorktree(
               runner,
               seat.area,
