@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildOtherCliLaunchArgs } from './agent-cli-settings.js'
-import { resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
+import { prefetchReviewerCatalogs, resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
 import { buildSessionLaunchArgs, DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 
 test('reviewer model and effort resolve together against the reviewed workspace', async () => {
@@ -58,33 +58,44 @@ test('reviewer settings validate both the entry and roster without collapsing a 
   assert.throws(() => validateReviewerEntries(Array.from({ length: 9 }, (_, i) => ({ id: String(i), cli: 'copilot' }))), /between 1 and 8/)
 })
 
-test('catalog validation reports the incompatible reviewer before saving', async () => {
-  const catalog = async () => [{ id: 'small', label: 'Small', efforts: ['low'] }]
+test('model catalog prefetch reads each requested CLI once', async () => {
+  const calls: string[] = []
+  await prefetchReviewerCatalogs([
+    { id: 'one', cli: 'codex', model: 'full', reasoningEffort: 'high' },
+    { id: 'two', cli: 'codex', reasoningEffort: 'low' },
+    { id: 'three', cli: 'claude', reasoningEffort: 'default' },
+    { id: 'four', cli: 'copilot', reasoningEffort: 'high' },
+  ], async (cli) => { calls.push(cli); return [] })
+  assert.deepEqual(calls, ['codex', 'copilot'])
+})
+
+test('catalog validation reports the incompatible reviewer before saving', () => {
+  const catalogs = { codex: [{ id: 'small', label: 'Small', efforts: ['low'] }] }
   const entries: ReviewerEntry[] = [
     { id: 'inherited', cli: 'codex', reasoningEffort: 'high' },
     { id: 'override', cli: 'codex', model: 'small', reasoningEffort: 'high' },
   ]
-  await assert.rejects(validateReviewerModelOverrides(entries, catalog), /Reviewer 2: small does not support high/)
-  await validateReviewerModelOverrides([entries[0]!, { ...entries[1]!, reasoningEffort: 'default' }], catalog)
-  await validateReviewerModelOverrides(entries, async () => [])
+  assert.throws(() => validateReviewerModelOverrides(entries, catalogs), /Reviewer 2: small does not support high/)
+  validateReviewerModelOverrides([entries[0]!, { ...entries[1]!, reasoningEffort: 'default' }], catalogs)
+  validateReviewerModelOverrides(entries, {})
 })
 
-test('workspace model edits are checked against reviewers with an effort-only override', async () => {
+test('workspace model edits are checked against reviewers with an effort-only override', () => {
   const entries: ReviewerEntry[] = [{ id: 'inherited', cli: 'codex', reasoningEffort: 'high' }]
-  const catalog = async () => [
+  const catalogs = { codex: [
     { id: 'full', label: 'Full', efforts: ['high'] },
     { id: 'small', label: 'Small', efforts: ['low'] },
-  ]
+  ] }
   const withModel = (model: string) => reviewerWorkspaceModels(DEFAULT_SESSION_LAUNCH_CONFIG, { codex: { model } })
-  await validateReviewerModelOverrides(entries, catalog, withModel('full'))
-  await assert.rejects(validateReviewerModelOverrides(entries, catalog, withModel('small')), /Reviewer 1: small does not support high/)
-  await validateReviewerModelOverrides([{ ...entries[0]!, model: 'full' }], catalog, withModel('small'))
-  await validateReviewerModelOverrides(entries, catalog)
-  await assert.rejects(
-    validateReviewerModelOverrides(entries, catalog, withModel('small'), 'the Desktop list'),
+  validateReviewerModelOverrides(entries, catalogs, withModel('full'))
+  assert.throws(() => validateReviewerModelOverrides(entries, catalogs, withModel('small')), /Reviewer 1: small does not support high/)
+  validateReviewerModelOverrides([{ ...entries[0]!, model: 'full' }], catalogs, withModel('small'))
+  validateReviewerModelOverrides(entries, catalogs)
+  assert.throws(
+    () => validateReviewerModelOverrides(entries, catalogs, withModel('small'), 'the Desktop list'),
     /Reviewer 1 in the Desktop list: small does not support high/,
   )
   const workspace = { name: 'Docs', launch: DEFAULT_SESSION_LAUNCH_CONFIG, otherCli: { codex: { model: 'small' } } }
-  await assert.rejects(validateDesktopReviewerModels(entries, [workspace], catalog), /Desktop list for workspace "Docs"/)
-  await validateDesktopReviewerModels(entries, [{ ...workspace, reviewerEntries: [{ id: 'local', cli: 'codex' }] }], catalog)
+  assert.throws(() => validateDesktopReviewerModels(entries, [workspace], catalogs), /Desktop list for workspace "Docs"/)
+  validateDesktopReviewerModels(entries, [{ ...workspace, reviewerEntries: [{ id: 'local', cli: 'codex' }] }], catalogs)
 })

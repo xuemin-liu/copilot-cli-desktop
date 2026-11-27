@@ -80,36 +80,39 @@ export function reviewerWorkspaceModels(
   }
 }
 
-export async function validateReviewerModelOverrides(
+export type ReviewerModelCatalogs = Partial<Record<ReviewerCli, readonly CliModelOption[]>>
+
+export async function prefetchReviewerCatalogs(
   entries: readonly ReviewerEntry[],
   getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
-  workspaceModels?: Readonly<Record<ReviewerCli, string>>,
-  listLabel?: string,
 ): Promise<void> {
-  const errors = await Promise.all(entries.map(async ({ cli, model, reasoningEffort }) => {
-    const effectiveModel = model ?? workspaceModels?.[cli]
-    return effectiveModel && reasoningEffort && reasoningEffort !== 'default'
-      ? reviewerModelEffortError(effectiveModel, reasoningEffort, await getCatalog(cli))
-      : null
-  }))
-  const invalid = errors.findIndex((error) => error !== null)
-  if (invalid !== -1) throw new Error(`Reviewer ${invalid + 1}${listLabel ? ` in ${listLabel}` : ''}: ${errors[invalid]}`)
+  const clis = new Set(entries.filter(({ reasoningEffort }) => reasoningEffort && reasoningEffort !== 'default').map(({ cli }) => cli))
+  await Promise.all([...clis].map((cli) => getCatalog(cli)))
 }
 
-export async function validateDesktopReviewerModels(
+export function validateReviewerModelOverrides(
+  entries: readonly ReviewerEntry[],
+  catalogs: ReviewerModelCatalogs,
+  workspaceModels?: Readonly<Record<ReviewerCli, string>>,
+  listLabel?: string,
+): void {
+  for (const [index, { cli, model, reasoningEffort }] of entries.entries()) {
+    const error = reviewerModelEffortError(model ?? workspaceModels?.[cli], reasoningEffort, catalogs[cli])
+    if (error) throw new Error(`Reviewer ${index + 1}${listLabel ? ` in ${listLabel}` : ''}: ${error}`)
+  }
+}
+
+export function validateDesktopReviewerModels(
   entries: readonly ReviewerEntry[],
   profiles: readonly Pick<WorkspaceProfile, 'name' | 'launch' | 'otherCli' | 'reviewerEntries' | 'general'>[],
-  getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
-): Promise<void> {
-  const inheritedLists = profiles.filter((profile) => !profile.general && !profile.reviewerEntries).map((profile) => ({
-    name: profile.name,
-    models: reviewerWorkspaceModels(profile.launch, profile.otherCli),
-  }))
-  await validateReviewerModelOverrides(entries, getCatalog)
-  if (entries.some(({ model, reasoningEffort }) => !model && reasoningEffort && reasoningEffort !== 'default')) {
-    await Promise.all(inheritedLists.map(({ name, models }) =>
-      validateReviewerModelOverrides(entries, getCatalog, models, `the Desktop list for workspace "${name}"`),
-    ))
+  catalogs: ReviewerModelCatalogs,
+): void {
+  validateReviewerModelOverrides(entries, catalogs)
+  if (!entries.some(({ model, reasoningEffort }) => !model && reasoningEffort && reasoningEffort !== 'default')) return
+  for (const profile of profiles) {
+    if (profile.general || profile.reviewerEntries) continue
+    const models = reviewerWorkspaceModels(profile.launch, profile.otherCli)
+    validateReviewerModelOverrides(entries, catalogs, models, `the Desktop list for workspace "${profile.name}"`)
   }
 }
 
