@@ -6147,6 +6147,10 @@ async function advanceGroupTempReviewers(
             } else {
               await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
             }
+          } else {
+            // Planned for reuse, but its tab or area went while earlier seats were handled (its old launch cleaned up):
+            // start it again rather than leave it running with no tab or timer.
+            await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
           }
         }
         if (!isStaleOrEnded() && group.stage === 'starting') {
