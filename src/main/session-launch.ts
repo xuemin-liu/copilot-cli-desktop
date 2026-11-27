@@ -31,7 +31,7 @@ export const DEFAULT_SESSION_LAUNCH_CONFIG: SessionLaunchConfig = {
   remoteExport: 'inherit',
 }
 
-const REASONING_EFFORTS: readonly ReasoningEffort[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max']
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max']
 const CONTEXT_TIERS: readonly ContextTier[] = ['default', 'long_context']
 const SESSION_MODES: readonly SessionMode[] = ['interactive', 'plan', 'autopilot', 'plan-autopilot']
 const REMOTE_PREFERENCES: readonly RemotePreference[] = ['inherit', 'enable', 'disable']

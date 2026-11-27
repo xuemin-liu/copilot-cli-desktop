@@ -5,10 +5,31 @@ import {
   buildOtherCliLaunchArgs,
   helpListsFlag,
   incompatibleOtherCliFields,
+  otherCliModelsOnly,
   normalizeOtherCliConfig,
   normalizePerCliConfig,
   validateOtherCliConfig,
 } from './agent-cli-settings.js'
+
+test('model effort survives settings validation and restore and uses the installed CLI’s launch flag', () => {
+  const saved = {
+    claude: { model: 'sonnet', reasoningEffort: 'max', approval: 'plan' },
+    codex: { model: 'gpt-6.2-sol', reasoningEffort: 'high' },
+  }
+  assert.deepEqual(validateOtherCliConfig(saved, undefined), saved)
+  assert.deepEqual(normalizeOtherCliConfig(saved), saved)
+  assert.deepEqual(otherCliModelsOnly(saved), {
+    claude: { model: 'sonnet', reasoningEffort: 'max' },
+    codex: saved.codex,
+  })
+  assert.deepEqual(buildOtherCliLaunchArgs('claude', saved.claude),
+    ['--permission-mode', 'plan', '--model', 'sonnet', '--effort', 'max'])
+  assert.deepEqual(buildOtherCliLaunchArgs('codex', saved.codex),
+    ['--model', 'gpt-6.2-sol', '--config', 'model_reasoning_effort="high"'])
+  assert.deepEqual(incompatibleOtherCliFields('codex', saved.codex, '--model <model>\n--config <key=value>'), [])
+  assert.deepEqual(incompatibleOtherCliFields('codex', saved.codex, '--model <model>').map((field) => field.key), ['reasoningEffort'])
+  assert.throws(() => validateOtherCliConfig({ codex: { reasoningEffort: 'wrong' } }, undefined), /does not support reasoning effort/)
+})
 
 test('buildOtherCliLaunchArgs emits Claude approval and model as separate tokens, including allow-all', () => {
   assert.deepEqual(

@@ -142,9 +142,10 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeProjectTrusted, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
+import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
+import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
 import {
@@ -2569,6 +2570,43 @@ async function startSessionTab(
 }
 
 const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
+
+const modelCatalogs = new Map<SessionCli, { providerKey: string; promise: Promise<CliModelOption[]> }>()
+let copilotModelCatalogRevision = 0
+
+function invalidateCopilotModelCatalog(): void {
+  modelCatalogs.delete('copilot')
+  copilotModelCatalogRevision++
+}
+
+function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOption[]> {
+  const provider = desktopConfig.provider
+  const providerKey = cli === 'copilot' ? JSON.stringify(provider) : ''
+  const cached = modelCatalogs.get(cli)
+  if (!reload && cached?.providerKey === providerKey) return cached.promise
+  const entry = {
+    providerKey,
+    promise: load().catch(() => []).then((models) => {
+      if (models.length === 0 && modelCatalogs.get(cli) === entry) modelCatalogs.delete(cli)
+      return models
+    }),
+  }
+  modelCatalogs.set(cli, entry)
+  return entry.promise
+
+  async function load(): Promise<CliModelOption[]> {
+    const models = cli === 'copilot'
+      ? await loadCopilot()
+      : await readOtherCliModelCatalog(await otherCliResolution(cli, reload))
+    return [...new Map(models.map((model) => [model.id, model])).values()]
+  }
+
+  async function loadCopilot(): Promise<CliModelOption[]> {
+    const resolution = (!reload && state.resolution) || (await probeCopilotResolution()).resolution
+    const inherited = { ...process.env, ...await credentialStore?.resolveEnvironment() }
+    return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(provider, inherited) })
+  }
+}
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
 async function listSessionClis(): Promise<SessionCliChoice[]> {
@@ -7164,6 +7202,7 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(restoreAllWorkspaces = false): Promise<DesktopState> {
   const probe = await probeCopilotResolution()
+  if (state.resolution && !sameCopilotResolution(state.resolution, probe.resolution)) invalidateCopilotModelCatalog()
   state.resolution = probe.resolution
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
@@ -7215,6 +7254,7 @@ async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
     return false
   }
   state.resolution = next
+  invalidateCopilotModelCatalog()
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
   broadcastState()
@@ -7315,6 +7355,7 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
         : await updateCopilotCli(current!)
     } finally { copilotBeingReplaced = false }
     await bestEffortUsage(usageService?.collect())
+    invalidateCopilotModelCatalog()
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -7693,6 +7734,7 @@ interface DesktopSettingsSnapshot extends DesktopPreferences {
   rollbackVersion: string | null
   access: Awaited<ReturnType<typeof readAccessStatus>>
   provider: CopilotProviderConfig
+  copilotModelCatalogRevision: number
   cliVersion: string | null
   cliCapabilities: CopilotCapabilities
   cliMaintenance: CopilotMaintenanceState
@@ -7753,6 +7795,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     rollbackVersion: desktopConfig.rollbackVersion,
     access,
     provider: { ...desktopConfig.provider },
+    copilotModelCatalogRevision,
     cliVersion: state.resolution?.version ?? null,
     cliCapabilities: { ...copilotCapabilities },
     cliMaintenance: { ...copilotMaintenance },
@@ -7785,6 +7828,7 @@ function broadcastCopilotSettingsState(): void {
       cliVersion: state.resolution?.version ?? null,
       cliCapabilities: { ...copilotCapabilities },
       cliMaintenance: { ...copilotMaintenance },
+      copilotModelCatalogRevision,
     })
   }
 }
@@ -8883,6 +8927,11 @@ ipcMain.handle('desktop-settings:get', (event) => {
   assertTrustedSettingsSender(event, true)
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:model-catalog', (event, cli: unknown, reload: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (!isReviewerCli(cli) || typeof reload !== 'boolean') throw new Error('Invalid model catalog request')
+  return getModelCatalog(cli, reload)
+})
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
   assertTrustedSettingsSender(event)
   if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
@@ -9182,6 +9231,7 @@ ipcMain.handle('desktop-settings:save-credential', async (event, name: unknown, 
   if (!isCredentialName(name) || typeof secret !== 'string') throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.saveCredential(name as CredentialName, secret)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown) => {
@@ -9189,6 +9239,7 @@ ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown
   if (!isCredentialName(name)) throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.deleteCredential(name as CredentialName)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:install-copilot', async (event) => {
@@ -9545,6 +9596,9 @@ if (!app.requestSingleInstanceLock()) {
     updateTrayVisibility()
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    if (!packageSmokeTest) {
+      for (const cli of SESSION_CLIS) void getModelCatalog(cli)
+    }
     if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)

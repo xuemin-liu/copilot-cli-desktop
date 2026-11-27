@@ -3,7 +3,7 @@ import { rm } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { parseSafeHttpUrl } from './external-targets.js'
-import { helpListsFlag, type PerCliConfig } from './agent-cli-settings.js'
+import { helpListsFlag, otherCliModelSelection, type PerCliConfig } from './agent-cli-settings.js'
 import type { PermissionPreset } from './permission-presets.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import type { ReviewerArea } from './pr-review-launch.js'
@@ -261,7 +261,7 @@ export function resolveCopilotReviewerPreset(
 
 /**
  * Resolves launch settings and permission flags for a non-Copilot temporary PR reviewer session (`claude`, `codex`,
- * or `antigravity`). When `reviewerAllowAll` is enabled (the default), preserves any configured `model` while supplying
+ * or `antigravity`). When `reviewerAllowAll` is enabled (the default), preserves the model and effort while supplying
  * verified allow-all flags (`--dangerously-skip-permissions` for Claude Code and Antigravity CLI,
  * `--dangerously-bypass-approvals-and-sandbox` for Codex CLI) so hidden background reviews do not block on prompts.
  */
@@ -283,7 +283,7 @@ export function resolveOtherCliReviewerArgs(
     return { configForLaunch: savedConfig, allowAllArgs: [] }
   }
 
-  const configForLaunch: PerCliConfig | undefined = savedConfig?.model ? { model: savedConfig.model } : undefined
+  const configForLaunch = otherCliModelSelection(savedConfig)
   if (cli === 'claude') {
     if (help && helpListsFlag(help, '--dangerously-skip-permissions')) {
       return { configForLaunch, allowAllArgs: ['--dangerously-skip-permissions'] }
