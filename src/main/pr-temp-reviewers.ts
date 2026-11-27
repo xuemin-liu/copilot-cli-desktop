@@ -8,7 +8,8 @@ import type { PermissionPreset } from './permission-presets.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import type { ReviewerArea } from './pr-review-launch.js'
 import type { ReviewReservation, ReviewReservations } from './pr-review-reservations.js'
-import { sessionCliLabel, SUPPORTED_REVIEWER_CLIS, type ReviewerCli } from './session-cli.js'
+import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
+import type { ResolvedReviewer } from './reviewer-settings.js'
 import type {
   TempReviewerGroupView,
   TempReviewerSeatVerdict,
@@ -412,13 +413,12 @@ export function claudeBypassesPermissions(args: readonly string[]): boolean {
  */
 export function interactiveSeatsToReconcile(
   groups: readonly TempReviewerGroup[],
-  reviewerAllowAll: boolean,
 ): { group: TempReviewerGroup; seat: TempReviewerSeat }[] {
   const found: { group: TempReviewerGroup; seat: TempReviewerSeat }[] = []
   for (const group of groups) {
     if (group.stage !== 'active') continue
     for (const seat of group.requiredSeats.values()) {
-      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, reviewerAllowAll, true)) continue
+      if (seat.lifecycle !== 'running' || seat.cli === 'copilot' || otherCliReviewerOneShot(seat.cli, group.allowAll, true)) continue
       found.push({ group, seat })
     }
   }
@@ -485,7 +485,7 @@ export function buildOtherCliReviewerCliArgs(
 }
 
 export function buildReviewerBrief(options: {
-  cli: ReviewerCli
+  tag: string
   repository: string
   prLabel: string
   prNumber: number | null
@@ -502,8 +502,7 @@ export function buildReviewerBrief(options: {
   forceFullDiff?: boolean
   seatReceiptConfigPath?: string
 }): string {
-  const label = sessionCliLabel(options.cli)
-  const tag = `[${label}]`
+  const tag = options.tag
   const markerTrimmed = options.marker.trimEnd()
   const round = options.round ?? 1
   const targetDesc = options.prUrl ? `${options.prLabel} (${options.prUrl})` : options.prLabel
@@ -512,10 +511,10 @@ export function buildReviewerBrief(options: {
     : 'Follow the `review-pr` workflow for this single managed round.'
   const approveTargetArg = options.prUrl || options.repository
   const approveHelperHint = options.prToolsDir && options.prNumber !== null
-    ? `\n   - When \`$COPILOT_DESKTOP_PR_TOOLS\` is available on GitHub, Gitea/Forgejo, or GitLab, you may post your current-head approval with \`node "${options.prToolsDir}/pr-approve.mjs" "${approveTargetArg}" ${options.prNumber} ${options.head} ${options.base} <temp-note-file>\` (where \`<temp-note-file>\` starts with \`${tag} \` so the comment begins \`Approved at ${options.head}\\n\\n${tag} ...\\n\\nReviewed base: ${options.base}\`).`
+    ? `\n   - When \`$COPILOT_DESKTOP_PR_TOOLS\` is available on GitHub, Gitea/Forgejo, or GitLab, you may post your current-head approval with \`node "${options.prToolsDir}/pr-approve.mjs" "${approveTargetArg}" ${options.prNumber} ${options.head} ${options.base} <temp-note-file>\` (where \`<temp-note-file>\` starts with \`${tag}\` on its own line, followed by your validation note).`
     : ''
   const receiptHint = options.prToolsDir && options.seatReceiptConfigPath
-    ? `\n   - Immediately after your review or approval comment lands on the PR host, register its numeric remote review/comment ID with Desktop via \`node "${options.prToolsDir}/pr-seat-receipt.mjs" --kind <approved|findings> --id <remote-id>\`.`
+    ? `\n   - Immediately after your review or approval comment lands on the PR host, register its numeric remote review/comment ID with Desktop via \`node "${options.prToolsDir}/pr-seat-receipt.mjs" --kind <approved|findings> --id <remote-id> --kind-type <review|inline|issue>\`.`
     : ''
   const checkoutNote = options.checkoutPath
     ? `\`${options.checkoutPath}\``
@@ -535,7 +534,7 @@ ${historySection}
 2. **Access the PR directly on its remote repository host**: inspect \`git remote -v\` and use the matching CLI or REST API available in this session (\`gh pr view\` / \`gh api\` on GitHub; \`tea\`, \`pr-poll.mjs --snapshot\`, or \`/api/v1/repos/<owner>/<repo>/pulls/<index>\` + \`git credential fill\` on Gitea/Forgejo; \`glab\`, \`pr-poll.mjs --snapshot\`, or \`/api/v4/projects/<encoded-path>/merge_requests/<iid>\` on GitLab; or the matching API on other hosts).
 3. **Post all reviews, inline findings, thread replies, and approvals directly onto the PR on its remote host** — never do a local-only review or leave findings only in terminal output:
    - Diff \`git diff ${options.base}...${options.head}\`, inspect modified files and callers, and run the project's local typecheck, build, and relevant tests when eligible (on Windows use \`npm.cmd\`, not \`npm\`; if dependencies are missing in this isolated worktree, either run a lockfile-pinned offline-preferred install inside this worktree without modifying tracked files or disclose which checks could not run — never junction or modify the main checkout's \`node_modules\`). Write any temporary request payload files in the system temp folder (\`$env:TEMP\` / \`/tmp\`), verify the post landed on the PR host, and remove temporary files so \`git status --porcelain=v1 --untracked-files=normal\` stays empty.
-   - Label every actionable finding **Blocking**, **Non-blocking**, or **Nit**, and include your reviewer tag \`${tag}\` in your review summary body (and inline comments when posting individual comments) so cooperating sessions on the same account can identify which CLI posted each review.
+   - Label every actionable finding **Blocking**, **Non-blocking**, or **Nit**, and include your reviewer tag \`${tag}\` on its own unquoted line in your review summary and any individually posted comments. Use only this seat's tag.
    - Never start any comment or reply with \`${markerTrimmed}\` (reserved for the PR author's fix replies). Never edit repository files, commit, push, or merge.
    - When zero findings remain on the assessed revision, post an explicit approval on the PR whose unquoted body starts with \`Approved at ${options.head}\`, includes \`Reviewed base: ${options.base}\`, and includes \`${tag}\` plus the validation checks you ran and any limits.${approveHelperHint}${receiptHint}
 4. **Exit immediately after completing this round**:
@@ -618,9 +617,9 @@ export interface TempReviewerSeatReceipt {
   itemType?: string
 }
 
-export interface TempReviewerSeat {
+export type TempReviewerSeat = ResolvedReviewer & {
   groupId: string
-  cli: ReviewerCli
+  tag: string
   generation: string
   launchId: string
   tabId: string | null
@@ -657,6 +656,9 @@ export interface TempReviewerGroup {
   prNumber: number | null
   prUrl: string | null
   marker: string
+  allowAll: boolean
+  consentGranted: boolean
+  requireExactReviewerTags: boolean
   round: number
   head: string
   base: string
@@ -668,8 +670,8 @@ export interface TempReviewerGroup {
   notice: string | null
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
   lastObservedHostSettledKey: string | null
-  /** Active required seats; only explicit user Dismiss removes a CLI from this map. */
-  requiredSeats: Map<ReviewerCli, TempReviewerSeat>
+  /** Active required seats; only explicit user Dismiss removes a seat from this map. */
+  requiredSeats: Map<string, TempReviewerSeat>
   /** Remote forge evidence keys (`review:<id>`, `inline:<id>`, `issue:<id>`) already claimed by seats across rounds. */
   claimedEvidenceKeys: Set<string>
   /** Subset of `claimedEvidenceKeys` claimed in earlier rounds (`< group.round`), used during live finish verification. */
@@ -677,7 +679,7 @@ export interface TempReviewerGroup {
   /** Author round history passed into subsequent round briefs. */
   roundHistory: TempReviewerRoundRecord[]
   /** Seats that were still active when `advanceRound(..., { force: true })` superseded a round; blocks finish('approved') until retried or dismissed. */
-  skippedSeatsForHead: Set<ReviewerCli>
+  skippedSeatsForHead: Set<string>
 }
 
 export function deriveSeatVerdict(seat: Pick<TempReviewerSeat, 'lifecycle'>): TempReviewerSeatVerdict {
@@ -780,10 +782,11 @@ export class TempReviewerRegistry {
     marker?: string
     head: string
     base: string
-    clis: readonly ReviewerCli[]
+    reviewers: readonly ResolvedReviewer[]
+    allowAll: boolean
     origin: string
   }): { group: TempReviewerGroup; hostKey: string } {
-    if (init.clis.length === 0) throw new Error('Choose at least one PR reviewer CLI')
+    if (init.reviewers.length === 0) throw new Error('Choose at least one PR reviewer')
     if (!init.origin.trim()) {
       throw new Error('Temporary PR reviewers require a remote Git origin hosting the pull request.')
     }
@@ -815,11 +818,14 @@ export class TempReviewerRegistry {
     const id = randomUUID()
     const hostKey = randomBytes(32).toString('hex')
     const now = Date.now()
-    const requiredSeats = new Map<ReviewerCli, TempReviewerSeat>()
-    for (const cli of SUPPORTED_REVIEWER_CLIS.filter((c) => init.clis.includes(c))) {
-      requiredSeats.set(cli, {
+    const requiredSeats = new Map<string, TempReviewerSeat>()
+    for (const reviewer of init.reviewers) {
+      const cliLabel = sessionCliLabel(reviewer.cli)
+      const tag = reviewer.name === cliLabel ? `[${cliLabel}]` : `[${reviewer.name} r${id.slice(0, 8)}]`
+      requiredSeats.set(reviewer.id, {
+        ...reviewer,
         groupId: id,
-        cli,
+        tag,
         generation: randomUUID(),
         launchId: '',
         tabId: null,
@@ -849,6 +855,9 @@ export class TempReviewerRegistry {
       prNumber: init.prNumber,
       prUrl: init.prUrl,
       marker: init.marker ?? DEFAULT_PR_MARKER,
+      allowAll: init.allowAll,
+      consentGranted: false,
+      requireExactReviewerTags: init.reviewers.length > 1,
       round: 1,
       head: init.head,
       base: init.base,
@@ -863,7 +872,7 @@ export class TempReviewerRegistry {
       claimedEvidenceKeys: new Set<string>(),
       priorRoundClaimedKeys: new Set<string>(),
       roundHistory: [],
-      skippedSeatsForHead: new Set<ReviewerCli>(),
+      skippedSeatsForHead: new Set<string>(),
     }
     this.groups.set(id, group)
     this.wakeAll()
@@ -891,14 +900,14 @@ export class TempReviewerRegistry {
       (seat) => seat.lifecycle === 'starting' || seat.lifecycle === 'running',
     )
     if ((group.stage === 'starting' || activeUnfinished.length > 0) && options?.force !== true) {
-      const names = activeUnfinished.map((s) => `${sessionCliLabel(s.cli)} (${deriveSeatVerdict(s)})`).join(', ')
+      const names = activeUnfinished.map((s) => `${s.label} (${deriveSeatVerdict(s)})`).join(', ')
       throw new Error(
         `Cannot advance to a new round while reviewer seat(s) are still active${names ? ` (${names})` : ''}. Wait with pr_reviewers_wait until allSeatsSettledForRound is true before pushing and advancing, or pass force: true (-Force) to supersede the round.`,
       )
     }
     if (options?.force === true && activeUnfinished.length > 0) {
       for (const seat of activeUnfinished) {
-        group.skippedSeatsForHead.add(seat.cli)
+        group.skippedSeatsForHead.add(seat.id)
       }
     }
     if (base !== group.base) {
@@ -921,9 +930,9 @@ export class TempReviewerRegistry {
     return group
   }
 
-  resetSeatGeneration(groupId: string, cli: ReviewerCli, options?: { keepArea?: boolean; clearForceSkip?: boolean }): TempReviewerSeat {
+  resetSeatGeneration(groupId: string, seatId: string, options?: { keepArea?: boolean; clearForceSkip?: boolean }): TempReviewerSeat {
     const group = this.groups.get(groupId)
-    const seat = group?.requiredSeats.get(cli)
+    const seat = group?.requiredSeats.get(seatId)
     if (!group || group.stage === 'ended' || !seat) throw new Error('That reviewer seat is not active')
     seat.generation = randomUUID()
     seat.lifecycle = 'starting'
@@ -940,7 +949,7 @@ export class TempReviewerRegistry {
     seat.submittedReceipt = null
     seat.roundStartedAt = Date.now()
     if (options?.clearForceSkip === true) {
-      group.skippedSeatsForHead.delete(cli)
+      group.skippedSeatsForHead.delete(seatId)
     }
     group.lastObservedHostSettledKey = null
     this.wakeAll()
@@ -970,13 +979,13 @@ export class TempReviewerRegistry {
     this.recordSeatOutcome(seat, lifecycle, { error })
   }
 
-  dismissSeat(groupId: string, cli: ReviewerCli): { removed: TempReviewerSeat; groupEnded: boolean } {
+  dismissSeat(groupId: string, seatId: string): { removed: TempReviewerSeat; groupEnded: boolean } {
     const group = this.groups.get(groupId)
-    const seat = group?.requiredSeats.get(cli)
+    const seat = group?.requiredSeats.get(seatId)
     if (!group || group.stage === 'ended' || !seat) throw new Error('That reviewer seat is not active')
     this.revokeSeat(seat, 'stopped')
-    group.requiredSeats.delete(cli)
-    group.skippedSeatsForHead.delete(cli)
+    group.requiredSeats.delete(seatId)
+    group.skippedSeatsForHead.delete(seatId)
     group.lastObservedHostSettledKey = null
     let groupEnded = false
     if (group.requiredSeats.size === 0) {
@@ -1041,7 +1050,7 @@ export class TempReviewerRegistry {
       throw new Error('Cannot finish as approved while temporary reviewers are still starting or no reviewer seats remain.')
     }
     if (group.skippedSeatsForHead.size > 0) {
-      const skippedNames = [...group.skippedSeatsForHead].map((cli) => sessionCliLabel(cli)).join(', ')
+      const skippedNames = [...group.skippedSeatsForHead].map((id) => group.requiredSeats.get(id)?.label ?? id).join(', ')
       throw new Error(
         `Cannot finish as approved because ${skippedNames} had a round force-skipped earlier. Retry or dismiss ${skippedNames} in ReviewerBar first.`,
       )
@@ -1051,7 +1060,7 @@ export class TempReviewerRegistry {
     )
     if (unapprovedSeats.length > 0) {
       const summary = [...group.requiredSeats.values()]
-        .map((s) => `${sessionCliLabel(s.cli)}: ${deriveSeatVerdict(s)}${s.checkedOut && s.checkedOut !== group.head ? ` (@${s.checkedOut.slice(0, 7)})` : ''}`)
+        .map((s) => `${s.label}: ${deriveSeatVerdict(s)}${s.checkedOut && s.checkedOut !== group.head ? ` (@${s.checkedOut.slice(0, 7)})` : ''}`)
         .join(', ')
       throw new Error(
         `Cannot finish as approved until every required reviewer seat has a verified approval for head ${group.head.slice(0, 12)} (base ${group.base.slice(0, 12)}) on the PR (${summary}). Address open findings and advance the round, or retry/dismiss incomplete or failed seats.`,
@@ -1074,6 +1083,9 @@ export class TempReviewerRegistry {
     const seats: TempReviewerSeatView[] = [...group.requiredSeats.values()].map((seat) => {
       const verdict = deriveSeatVerdict(seat)
       return {
+        id: seat.id,
+        label: seat.label,
+        tag: seat.tag,
         cli: seat.cli,
         tabId: seat.tabId,
         verdict,
@@ -1115,14 +1127,14 @@ export class TempReviewerRegistry {
     )
     if (!anyNotable) return null
     const seatSig = view.seats
-      .map((s) => `${s.cli}:${group.requiredSeats.get(s.cli)?.generation ?? ''}:${s.verdict}:${s.checkedOut ?? ''}:${s.needsAttention ? '1' : '0'}:${s.error ?? ''}`)
+      .map((s) => `${s.id}:${group.requiredSeats.get(s.id)?.generation ?? ''}:${s.verdict}:${s.checkedOut ?? ''}:${s.needsAttention ? '1' : '0'}:${s.error ?? ''}`)
       .join('|')
     return `${group.round}:${group.head}:${group.base}:${allSettled ? 'settled' : 'partial'}:${seatSig}`
   }
 
   statusPayload(group: TempReviewerGroup): string {
     const view = this.view(group)
-    const expectedReviewerTags = [...group.requiredSeats.keys()].map((cli) => `[${sessionCliLabel(cli)}]`)
+    const expectedReviewerTags = [...group.requiredSeats.values()].map((seat) => seat.tag)
     return JSON.stringify({
       done: group.stage === 'ended',
       outcome: group.outcome,
@@ -1130,6 +1142,7 @@ export class TempReviewerRegistry {
       allApprovedCurrentHead: this.allApprovedCurrentHead(group),
       skippedSeatsForHead: [...group.skippedSeatsForHead],
       expectedReviewerTags,
+      requireExactReviewerTags: group.requireExactReviewerTags,
       group: view,
     })
   }
@@ -1206,7 +1219,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
     !isShuttingDown()
     && !isGroupEnded()
     && group.round === expectedRound
-    && group.requiredSeats.get(seat.cli) === seat
+    && group.requiredSeats.get(seat.id) === seat
     && seat.generation === expectedGen
     && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
   )
@@ -1215,7 +1228,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
     isShuttingDown()
     || isGroupEnded()
     || group.round !== expectedRound
-    || group.requiredSeats.get(seat.cli) !== seat
+    || group.requiredSeats.get(seat.id) !== seat
     || seat.generation !== expectedGen
   ) {
     return { ok: false, message: 'This temporary reviewer seat is no longer active.' }
@@ -1246,19 +1259,25 @@ export async function reconcileSeatWithEvidenceLoader(options: {
         }
       }
     } else if (seat.submittedReceipt) {
+      const { itemType, remoteId, kind } = seat.submittedReceipt
+      if (group.requireExactReviewerTags && (!itemType || itemType === 'any')) {
+        return { ok: false, message: 'Supply the remote item type (review, inline, or issue) so Desktop can distinguish reviewer receipts.' }
+      }
+      const key = `${itemType ?? 'any'}:${remoteId}`
+      if (group.claimedEvidenceKeys.has(key)) return { ok: false, message: 'This remote item has already been claimed by a reviewer.' }
       onClearTimer?.(seat)
-      registry.recordSeatOutcome(seat, seat.submittedReceipt.kind, { error: null })
+      registry.recordSeatOutcome(seat, kind, { error: null, claimedKeys: [key] })
       onBroadcast?.()
       return {
         ok: true,
-        message: `Recorded ${seat.submittedReceipt.kind} receipt #${seat.submittedReceipt.remoteId}.`,
+        message: `Recorded ${kind} receipt #${remoteId}. Confirm ${seat.tag} on the PR host before completing the run.`,
       }
     }
 
     if (trigger === 'receipt') {
       return {
         ok: false,
-        message: `Could not verify review/comment receipt on the PR host for head ${group.head.slice(0, 12)}. Confirm your post landed on the PR and includes [${sessionCliLabel(seat.cli)}].`,
+        message: `Could not verify review/comment receipt on the PR host for head ${group.head.slice(0, 12)}. Confirm your post landed on the PR and includes ${seat.tag}.`,
       }
     }
     if (trigger === 'idle') {

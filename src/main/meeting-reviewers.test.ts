@@ -4,14 +4,26 @@ import {
   MeetingReviewerError, MeetingReviewerRegistry, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine, meetingSeatStallReason,
 } from './meeting-reviewers.js'
 
+import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
+import type { ResolvedReviewer } from './reviewer-settings.js'
+import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
+
+const resolvedReviewers = (clis: readonly ReviewerCli[]): ResolvedReviewer[] => clis.map((cli) => {
+  const name = sessionCliLabel(cli)
+  const identity = { id: cli, name, label: name }
+  return cli === 'copilot'
+    ? { ...identity, cli, launch: DEFAULT_SESSION_LAUNCH_CONFIG, permissionPreset: 'full-access' }
+    : { ...identity, cli, config: {} }
+})
+
 const run = (registry: MeetingReviewerRegistry, meetingId = 'K7QF', profileId = 'p1', clis: readonly ('claude' | 'codex' | 'antigravity' | 'copilot')[] = ['claude', 'codex']) =>
-  registry.create({ meetingId, hostTabId: 'tab-1', profileId, projectPath: 'D:\\api', clis })
+  registry.create({ meetingId, hostTabId: 'tab-1', profileId, projectPath: 'D:\\api', reviewers: resolvedReviewers(clis), allowAll: false })
 
 test('a run is recorded before anything starts, one per workspace and one per meeting', () => {
   const registry = new MeetingReviewerRegistry()
   const group = run(registry)
   assert.equal(group.stage, 'consent', 'recorded while the person is still being asked')
-  assert.equal(group.allowAll, null, 'no permission mode until the person has answered')
+  assert.equal(group.allowAll, false, 'the permission mode is recorded before consent')
   assert.deepEqual([...group.seats.keys()], ['claude', 'codex'])
   assert.equal(registry.activeForProfile('p1'), group)
   assert.equal(registry.forMeeting('K7QF'), group)
@@ -159,14 +171,14 @@ test('the bar and meeting_status show the seats of a meeting run', () => {
 
 test('what a hidden reviewer is told holds its credential, the rules, and what its folder is', () => {
   const token = 'f'.repeat(64)
-  const pinned = meetingReviewerBrief({ cli: 'claude', meetingId: 'K7QF', token, checkout: 'C:\\r\\checkout', commit: 'a'.repeat(40), serverName: 'copilot-meeting' })
+  const pinned = meetingReviewerBrief({ name: 'Claude Code', meetingId: 'K7QF', token, checkout: 'C:\\r\\checkout', commit: 'a'.repeat(40), serverName: 'copilot-meeting' })
   assert.match(pinned, new RegExp(`invitation: "${token}"`))
   assert.match(pinned, /`meeting_join` tool of the `copilot-meeting` MCP server/)
   assert.match(pinned, /until it says the meeting is closed/)
   assert.match(pinned, /detached checkout of the host's project at commit a{40}/)
   assert.match(pinned, /uncommitted changes are not in it/)
   assert.match(pinned, /Review only: do not edit, create or delete files/)
-  const planOnly = meetingReviewerBrief({ cli: 'codex', meetingId: 'K7QF', token, checkout: 'C:\\r\\checkout', commit: null, serverName: 'copilot-meeting' })
+  const planOnly = meetingReviewerBrief({ name: 'Codex CLI', meetingId: 'K7QF', token, checkout: 'C:\\r\\checkout', commit: null, serverName: 'copilot-meeting' })
   assert.match(planOnly, /There is no checkout of a project for this meeting/)
   assert.doesNotMatch(planOnly, /detached checkout/)
   // The command line names the file only: the credential is not on it.
@@ -177,7 +189,7 @@ test('what a hidden reviewer is told holds its credential, the rules, and what i
 
 test('the consent names the reviewers, what they are given, where it goes, and what full access means', () => {
   const flags = { claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox' }
-  const on = meetingReviewerConsentDetail({ clis: ['claude', 'codex'], allowAll: true, allowAllFlags: flags, commit: 'abcdef0123456789'.padEnd(40, '0'), projectPath: 'D:\\api', hasChanges: true })
+  const on = meetingReviewerConsentDetail({ reviewers: resolvedReviewers(['claude', 'codex']), allowAll: true, allowAllFlags: flags, commit: 'abcdef0123456789'.padEnd(40, '0'), projectPath: 'D:\\api', hasChanges: true })
   assert.match(on, /Reviewers: Claude Code, Codex CLI\./)
   assert.match(on, /detached checkout of D:\\api at commit abcdef012345/)
   assert.match(on, /the attached changes/)
@@ -186,7 +198,7 @@ test('the consent names the reviewers, what they are given, where it goes, and w
   assert.match(on, /Claude Code \(--dangerously-skip-permissions\), Codex CLI \(--dangerously-bypass-approvals-and-sandbox\) run without permission prompts/)
   assert.match(on, /nothing prevents them from reading or changing files anywhere your account can/)
   assert.match(on, /not a sandbox/)
-  const off = meetingReviewerConsentDetail({ clis: ['copilot'], allowAll: false, allowAllFlags: {}, commit: null, projectPath: 'D:\\notes', hasChanges: false })
+  const off = meetingReviewerConsentDetail({ reviewers: resolvedReviewers(['copilot']), allowAll: false, allowAllFlags: {}, commit: null, projectPath: 'D:\\notes', hasChanges: false })
   assert.match(off, /no Git commit to check out in D:\\notes/)
   assert.match(off, /start in an empty folder/)
   assert.doesNotMatch(off, /their own providers/)

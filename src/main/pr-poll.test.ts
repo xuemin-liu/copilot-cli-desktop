@@ -105,7 +105,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
           path: 'src/index.ts',
           position: 4,
           user: { id: 7, login: 'alice' },
-          body: 'Non-blocking: [Codex CLI] inline review comment on Gitea review #11',
+          body: '[Codex CLI]\nNon-blocking: inline review comment on Gitea review #11',
           original_commit_id: HEAD_1,
           created_at: '2026-11-26T00:00:30Z',
           updated_at: '2026-11-26T00:00:30Z',
@@ -295,8 +295,8 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       assert.equal(inlineEv.parentReviewId, 11)
       const parentReceiptMatch = verifySeatOutcomeFromSnapshot({
         snapshot: liveEv,
-        cli: 'codex',
-        totalRequiredSeats: 2,
+        tag: '[Codex CLI]',
+        requireExactReviewerTags: true,
         head: HEAD_1,
         base: BASE_1,
         baseMovedInGroup: false,
@@ -491,7 +491,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       assert.equal(reviews.length, 2, 'refused note posts nothing to the PR host')
     }
     const noteClaude = join(dir, 'claude-approve.md')
-    writeFileSync(noteClaude, '[Claude Code] Verified build and unit tests pass.\n')
+    writeFileSync(noteClaude, '[Claude Code]\nVerified build and unit tests pass.\n')
     const approve1 = await runNodeScript(
       PR_APPROVE,
       [prUrl, '12', HEAD_1, BASE_1, noteClaude, '--origin', gitOrigin],
@@ -538,7 +538,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
     issueComments.push({
       id: ++nextCommentId,
       user: { id: 7, login: 'alice' },
-      body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Claude Code] [Codex CLI] combined`,
+      body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Claude Code]\n[Codex CLI]\ncombined`,
       created_at: '2026-11-26T00:06:00Z',
       updated_at: '2026-11-26T00:06:00Z',
     })
@@ -555,14 +555,14 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
       {
         id: ++nextCommentId,
         user: { id: 999, login: 'random-bystander' },
-        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Codex CLI] bystander`,
+        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Codex CLI]\nbystander`,
         created_at: '2026-11-26T00:06:10Z',
         updated_at: '2026-11-26T00:06:10Z',
       },
       {
         id: ++nextCommentId,
         user: { id: 7, login: 'alice' },
-        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Claude Code] ok`,
+        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\n[Claude Code]\nok`,
         created_at: '2026-11-26T00:06:20Z',
         updated_at: '2026-11-26T00:06:20Z',
       },
@@ -576,7 +576,7 @@ test('pr-poll.mjs + pr-approve.mjs work end-to-end on Gitea REST API, preserve a
 
     // Add real Codex approval from alice -> both tags now satisfied!
     const noteCodex = join(dir, 'codex-approve.md')
-    writeFileSync(noteCodex, '[Codex CLI] All checks green.\n')
+    writeFileSync(noteCodex, '[Codex CLI]\nAll checks green.\n')
     const approveCodex = await runNodeScript(
       PR_APPROVE,
       ['daq/service', '12', HEAD_1, BASE_1, noteCodex, '--pr-url', prUrl, '--origin', gitOrigin],
@@ -822,8 +822,8 @@ test('pr-poll.mjs + pr-approve.mjs + Desktop evidence work end-to-end on GitLab 
       assert.equal(glSnapshot.base, BASE_2)
       const staleVerify = verifySeatOutcomeFromSnapshot({
         snapshot: glSnapshot,
-        cli: 'antigravity',
-        totalRequiredSeats: 1,
+        tag: '[Antigravity CLI]',
+        requireExactReviewerTags: false,
         head: HEAD_1,
         base: BASE_2,
         baseMovedInGroup: true,
@@ -892,6 +892,7 @@ test('pr-seat-receipt.mjs posts seat-scoped token + metadata to loopback /pr-sea
       port,
       seatToken: token,
       groupId: 'grp-1',
+      seatId: 'seat-1',
       cli: 'claude',
       generation: 'gen-1',
       round: 2,
@@ -904,6 +905,7 @@ test('pr-seat-receipt.mjs posts seat-scoped token + metadata to loopback /pr-sea
     assert.equal(res.code, 0, res.stderr)
     assert.match(res.stdout, /Verified approved on PR/)
     assert.equal(received.body?.remoteId, 777)
+    assert.equal(received.body?.seatId, 'seat-1')
     assert.equal(received.body?.kind, 'approved')
     assert.equal(hashSeatReceiptToken(token).length, 64)
   } finally {
@@ -1163,7 +1165,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         id: 1,
         user: 'alice',
         userId: 7,
-        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Claude Code] old`,
+        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Claude Code]\nold`,
         commitId: null,
         createdAtMs: roundStart - 60_000,
       },
@@ -1182,7 +1184,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         id: 3,
         user: 'alice',
         userId: 7,
-        body: 'Blocking: [Claude Code] null dereference on line 42',
+        body: '[Claude Code]\nBlocking: null dereference on line 42',
         commitId: HEAD_1,
         createdAtMs: roundStart + 2_000,
       },
@@ -1192,7 +1194,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         id: 4,
         user: 'alice',
         userId: 7,
-        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Codex CLI] checks ran`,
+        body: `Approved at ${HEAD_1}\nReviewed base: ${BASE_2}\n\n[Codex CLI]\nchecks ran`,
         commitId: null,
         createdAtMs: roundStart + 3_000,
       },
@@ -1201,7 +1203,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         id: 5,
         user: 'alice',
         userId: 7,
-        body: '[Codex CLI] Round 2: both earlier findings are verified fixed, thanks.',
+        body: '[Codex CLI]\nRound 2: both earlier findings are verified fixed, thanks.',
         commitId: null,
         createdAtMs: roundStart + 3_500,
       },
@@ -1211,8 +1213,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
   const claimed = new Set<string>()
   const claudeOutcome = verifySeatOutcomeFromSnapshot({
     snapshot,
-    cli: 'claude',
-    totalRequiredSeats: 2,
+    tag: '[Claude Code]',
+    requireExactReviewerTags: true,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: true,
@@ -1224,8 +1226,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
 
   const codexOutcome = verifySeatOutcomeFromSnapshot({
     snapshot,
-    cli: 'codex',
-    totalRequiredSeats: 2,
+    tag: '[Codex CLI]',
+    requireExactReviewerTags: true,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: true,
@@ -1237,7 +1239,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
 
   // Findings review naming head SHA + the word "approved" MUST NEVER match approval in either Desktop or pr-forge.mjs!
   for (const nonApprovalBody of [
-    `[Claude Code] Review of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
+    `[Claude Code]\nReview of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
     `this cannot be approved at ${HEAD_1} until fixed`,
     `Approved at ${HEAD_1}\nReviewed base: ${BASE_1}\n\nNon-blocking: [Claude Code] still needs a null check`,
     `> Approved at ${HEAD_1}\nNot approved yet at ${HEAD_1}`,
@@ -1275,14 +1277,14 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
           state: 'COMMENTED',
           user: 'alice',
           userId: 7,
-          body: `[Claude Code] Review of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
+          body: `[Claude Code]\nReview of ${HEAD_1}.\n\n**Blocking**: the approved-seat gate is wrong`,
           commitId: HEAD_1,
           createdAtMs: roundStart + 1_000,
         },
       ],
     },
-    cli: 'claude',
-    totalRequiredSeats: 2,
+    tag: '[Claude Code]',
+    requireExactReviewerTags: true,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: false,
@@ -1308,8 +1310,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         },
       ],
     },
-    cli: 'claude',
-    totalRequiredSeats: 1,
+    tag: '[Claude Code]',
+    requireExactReviewerTags: false,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: false,
@@ -1343,8 +1345,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         },
       ],
     },
-    cli: 'claude',
-    totalRequiredSeats: 1,
+    tag: '[Claude Code]',
+    requireExactReviewerTags: false,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: true,
@@ -1365,7 +1367,7 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
           state: 'COMMENTED',
           user: 'alice',
           userId: 7,
-          body: '[Codex CLI] Review summary for this round.',
+          body: '[Codex CLI]\nReview summary for this round.',
           commitId: HEAD_1,
           createdAtMs: roundStart + 1_000,
         },
@@ -1381,8 +1383,8 @@ test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged
         },
       ],
     },
-    cli: 'codex',
-    totalRequiredSeats: 2,
+    tag: '[Codex CLI]',
+    requireExactReviewerTags: true,
     head: HEAD_1,
     base: BASE_2,
     baseMovedInGroup: false,
@@ -1827,4 +1829,35 @@ test('ghPagedItems reads the items out of a gh api --paginate --slurp result, wh
   assert.deepEqual(ghPagedItems([{ id: 1 }, { id: 2 }]), [{ id: 1 }, { id: 2 }])
   assert.deepEqual(ghPagedItems(null), [])
   assert.deepEqual(ghPagedItems({ message: 'Not Found' }), [])
+})
+
+test('a remaining seat in a multi-seat run needs its own unquoted tag and exact receipt', async () => {
+  const first = '[Codex CLI 1 r1234]'
+  const second = '[Codex CLI 2 r1234]'
+  const stamp = Date.now()
+  const ownApproval = { kind: 'review' as const, id: 1, state: 'APPROVED', user: 'alice', userId: 7, body: first, commitId: HEAD_1, createdAtMs: stamp }
+  const wrongApproval = { ...ownApproval, id: 2, body: second }
+  const quotedApproval = { ...ownApproval, id: 3, body: '> ' + first }
+  const mentionedApproval = { ...wrongApproval, id: 5, body: second + '\nDiscussed with ' + first + ' in the previous round.' }
+  const wrongFinding = { ...wrongApproval, id: 4, state: 'CHANGES_REQUESTED', body: second + '\nBlocking: wrong seat' }
+  const snapshot: ForgePullEvidenceSnapshot = {
+    forge: 'github', open: true, merged: false, sameRepo: true, head: HEAD_1, base: BASE_1, actorId: 7, actorLogin: 'alice',
+    items: [wrongApproval, quotedApproval, mentionedApproval, wrongFinding, ownApproval],
+  }
+  const options = {
+    snapshot, tag: first, requireExactReviewerTags: true, head: HEAD_1, base: BASE_1, baseMovedInGroup: false,
+    roundStartedAtMs: stamp, marker: '🤖 ', claimedEvidenceKeys: new Set<string>(),
+  }
+  assert.deepEqual(verifySeatOutcomeFromSnapshot(options), { verdict: 'approved', claimedKeys: ['review:1'] })
+  assert.equal(verifySeatOutcomeFromSnapshot({ ...options, receipt: { kind: 'approved', remoteId: 2, itemType: 'review' } }), null)
+  assert.equal(verifySeatOutcomeFromSnapshot({ ...options, receipt: { kind: 'findings', remoteId: 4, itemType: 'review' } }), null)
+  assert.equal(verifySeatOutcomeFromSnapshot({ ...options, claimedEvidenceKeys: new Set(['review:1']) }), null)
+
+  const forge = await import(pathToFileURL(join(TOOLS_DIR, 'pr-forge.mjs')).href) as PrForgeModule
+  const poll = {
+    inline: [], issue: [], reviews: [{ ...wrongApproval, body: quotedApproval.body }, mentionedApproval],
+    headSha: HEAD_1, baseSha: BASE_1, actorId: 7, requiredTags: [first],
+  }
+  assert.equal(forge.evaluateRevisionApprovals(poll).approvalForHead, true, 'legacy formal approval is allowed for an original singleton')
+  assert.equal(forge.evaluateRevisionApprovals({ ...poll, requireExactReviewerTags: true }).approvalForHead, false)
 })

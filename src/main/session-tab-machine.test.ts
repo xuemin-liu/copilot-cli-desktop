@@ -206,7 +206,7 @@ test('tabsForWorkspace filters by workspace profile id', () => {
 test('createBackgroundTab preserves activeTabId, uses its own cap, and closeTab skips hidden reviewers', () => {
   let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Author', workspaceProfileId: 'ws-1' }, 1)
   assert.equal(canOpenAnotherTab(state, 1), false, 'regular tab limit reached')
-  const meta = { groupId: 'g-1', hostTabId: 'host', cli: 'claude' as const, repository: 'o/r', prLabel: 'PR #7', prNumber: 7, prUrl: 'https://github.com/o/r/pull/7' }
+  const meta = { groupId: 'g-1', hostTabId: 'host', seatId: 'seat-1', cli: 'claude' as const, repository: 'o/r', prLabel: 'PR #7', prNumber: 7, prUrl: 'https://github.com/o/r/pull/7' }
   state = createBackgroundTab(state, {
     id: 'rev-claude',
     title: 'Review #7 (Claude Code)',
@@ -235,7 +235,7 @@ test('visibleSessionTabs supports non-destructive peekTabId without clobbering a
   let state = createTab(EMPTY_TABS_STATE, { id: 'host', title: 'Host', workspaceProfileId: 'ws-1' })
   state = createTab(state, { id: 'side', title: 'Side', workspaceProfileId: 'ws-1', sideChat: true, sideParentTabId: 'host' })
   state = activateTab(state, 'host')
-  const meta = { groupId: 'g-1', hostTabId: 'host', cli: 'codex' as const, repository: 'o/r', prLabel: 'PR #9', prNumber: 9, prUrl: 'https://github.com/o/r/pull/9' }
+  const meta = { groupId: 'g-1', hostTabId: 'host', seatId: 'seat-1', cli: 'codex' as const, repository: 'o/r', prLabel: 'PR #9', prNumber: 9, prUrl: 'https://github.com/o/r/pull/9' }
   state = createBackgroundTab(state, {
     id: 'rev-codex',
     title: 'Review #9 (Codex)',
@@ -277,7 +277,7 @@ test('visibleSessionTabs supports non-destructive peekTabId without clobbering a
 })
 
 test('resolvePeekHostAndTab and visibleSessionTabs support profile-scoped (hostTabId: null) reviewers with or without open regular tabs', () => {
-  const profileMeta = { groupId: 'g-prof', hostTabId: null, cli: 'claude' as const, repository: 'omaha:3001/o/r', prLabel: 'PR #15', prNumber: 15, prUrl: 'http://omaha:3001/o/r/pulls/15' }
+  const profileMeta = { groupId: 'g-prof', hostTabId: null, seatId: 'seat-2', cli: 'claude' as const, repository: 'omaha:3001/o/r', prLabel: 'PR #15', prNumber: 15, prUrl: 'http://omaha:3001/o/r/pulls/15' }
 
   // 1. No regular tabs open in workspace ws-1:
   let noHostState = createBackgroundTab(EMPTY_TABS_STATE, {
@@ -329,7 +329,7 @@ test('fanOutAvailableSlots ignores hidden temporary reviewer tabs when computing
     sessionPermissionPreset: null,
     permissionWarning: null,
     remote: false,
-    tempReviewer: { groupId: 'g-1', hostTabId: 'host', cli: 'claude', repository: 'o/r', prLabel: 'PR #12', prNumber: 12, prUrl: 'https://github.com/o/r/pull/12' },
+    tempReviewer: { groupId: 'g-1', hostTabId: 'host', seatId: 'claude', cli: 'claude', repository: 'o/r', prLabel: 'PR #12', prNumber: 12, prUrl: 'https://github.com/o/r/pull/12' },
   })
   assert.equal(fanOutAvailableSlots(state, 3), 2, '1 regular host + 1 hidden reviewer under cap 3 leaves 2 fan-out slots')
 })

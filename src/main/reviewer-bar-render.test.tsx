@@ -50,6 +50,8 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
     outcome: null,
     seats: [
       {
+        id: 'copilot',
+        label: 'Copilot CLI',
         cli: 'copilot',
         tabId: 'tab-2',
         verdict: 'reviewing',
@@ -59,6 +61,8 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
         keptCheckoutPath: null,
       },
       {
+        id: 'claude',
+        label: 'Claude Code',
         cli: 'claude',
         tabId: 'tab-3',
         verdict: 'reviewing',
@@ -68,6 +72,8 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
         keptCheckoutPath: null,
       },
       {
+        id: 'codex',
+        label: 'Codex CLI',
         cli: 'codex',
         tabId: null,
         verdict: 'failed',
@@ -77,6 +83,8 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
         keptCheckoutPath: null,
       },
       {
+        id: 'antigravity',
+        label: 'Antigravity CLI',
         cli: 'antigravity',
         tabId: 'tab-4',
         verdict: 'reviewing',
@@ -110,6 +118,8 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
     ...group,
     stage: 'starting',
     seats: [{
+      id: 'copilot',
+      label: 'Copilot CLI',
       cli: 'copilot',
       tabId: null,
       verdict: 'starting',
@@ -161,7 +171,7 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
     tempReviewer: {
       groupId: '22222222-2222-4222-8222-222222222222',
       hostTabId: 'tab-1',
-      cli: 'claude',
+      seatId: 'claude', cli: 'claude',
       prLabel: 'PR #42',
       prNumber: 42,
       repository: 'omaha:3001/owner/repo',
@@ -207,7 +217,7 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
     tempReviewer: {
       groupId: '22222222-2222-4222-8222-222222222222',
       hostTabId: null,
-      cli: 'antigravity',
+      seatId: 'antigravity', cli: 'antigravity',
       prLabel: 'PR #42',
       prNumber: 42,
       repository: 'omaha:3001/owner/repo',

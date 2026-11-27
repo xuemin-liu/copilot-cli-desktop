@@ -145,7 +145,12 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
+import {
+  desktopReviewerWorkspaces, resolveReviewerEntries, reviewerCatalogClis, reviewerWorkspaceModels, saveWithReviewerCatalogs,
+  validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides,
+  type ResolvedReviewer, type ReviewerEntry, type ReviewerModelCatalogs,
+} from './reviewer-settings.js'
+import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
 import {
@@ -203,7 +208,7 @@ import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_MCP_SERVER_NAME, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
-  guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
+  cleanGuestName, guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
 import { guestWakeText, queueCodexWake } from './meeting-guest-wake.js'
@@ -2572,7 +2577,12 @@ async function startSessionTab(
 
 const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
 
-const modelCatalogs = new Map<SessionCli, { providerKey: string; promise: Promise<CliModelOption[]> }>()
+interface CachedModelCatalog {
+  providerKey: string
+  promise: Promise<CliModelOption[]>
+  models?: CliModelOption[]
+}
+const modelCatalogs = new Map<SessionCli, CachedModelCatalog>()
 let copilotModelCatalogRevision = 0
 
 function invalidateCopilotModelCatalog(): void {
@@ -2585,9 +2595,11 @@ function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOptio
   const providerKey = cli === 'copilot' ? JSON.stringify(provider) : ''
   const cached = modelCatalogs.get(cli)
   if (!reload && cached?.providerKey === providerKey) return cached.promise
-  const entry = {
+  const entry: CachedModelCatalog = {
     providerKey,
+    ...(cached?.providerKey === providerKey && cached.models ? { models: cached.models } : {}),
     promise: load().catch(() => []).then((models) => {
+      entry.models = models
       if (models.length === 0 && modelCatalogs.get(cli) === entry) modelCatalogs.delete(cli)
       return models
     }),
@@ -2607,6 +2619,25 @@ function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOptio
     const inherited = { ...process.env, ...await credentialStore?.resolveEnvironment() }
     return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(provider, inherited) })
   }
+}
+
+function persistReviewerSettings(
+  requiredClis: (() => readonly ReviewerCli[]) | null,
+  change: (catalogs: ReviewerModelCatalogs) => void,
+  onFailure?: () => void,
+): Promise<void> {
+  if (!requiredClis) return persistConfig(() => change({}), onFailure)
+  return saveWithReviewerCatalogs(
+    () => {
+      const known: ReviewerModelCatalogs = {}
+      for (const [cli, entry] of modelCatalogs) {
+        if (entry.models) known[cli] = entry.models
+      }
+      return { required: requiredClis(), known, copilotRevision: copilotModelCatalogRevision }
+    },
+    getModelCatalog,
+    (catalogsForWrite) => persistConfig(() => change(catalogsForWrite()), onFailure),
+  )
 }
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
@@ -3658,6 +3689,9 @@ const guestDeps: GuestDeps = {
   ready: () => guestsReady,
   isOpen: (id) => meetingHub.isOpen(id),
   join: (seat) => {
+    if (meetingReviewerPlacesUsed(seat.meetingId) > MAX_MEETING_PARTICIPANTS) {
+      return `Meeting ${seat.meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`
+    }
     // A hidden reviewer that takes the place of an earlier launch of its seat starts with the next round.
     const replacement = meetingReviewers.seatByGuest(seat.id)?.seat.replacement === true
     try { meetingHub.join({ tabId: seat.id, title: `${seat.name} (guest)`, folder: null }, seat.meetingId, { role: seat.role, ...(replacement ? { nextRound: true } : {}) }) }
@@ -3713,7 +3747,7 @@ const guestDeps: GuestDeps = {
   prReviewersStart: (options) => startTempReviewersMcp(options),
   prReviewersWait: (hostKey, desktopTag, waitSeconds, signal) => waitMcpTempReviewers(hostKey, desktopTag, waitSeconds, signal),
   prReviewersRound: (hostKey, desktopTag, options) => roundMcpTempReviewers(hostKey, desktopTag, options),
-  prReviewersFinish: (hostKey, desktopTag, outcome) => finishMcpTempReviewers(hostKey, desktopTag, outcome),
+  prReviewersFinish: finishMcpTempReviewers,
 }
 
 /** The helper and the endpoint file, written each time the endpoint starts: its port changes with every app start. */
@@ -3788,11 +3822,11 @@ const DEFAULT_TEMP_REVIEWER_TIMEOUT_MS = 45 * 60_000
 const tempSeatTimers = new Map<string, NodeJS.Timeout>()
 const tempGroupVerifyQueues = new Map<string, Promise<void>>()
 
-function tempSeatTimerKey(seat: Pick<TempReviewerSeat, 'groupId' | 'cli' | 'generation'>): string {
-  return `${seat.groupId}:${seat.cli}:${seat.generation}`
+function tempSeatTimerKey(seat: Pick<TempReviewerSeat, 'groupId' | 'id' | 'generation'>): string {
+  return `${seat.groupId}:${seat.id}:${seat.generation}`
 }
 
-function clearTempSeatTimer(seat: Pick<TempReviewerSeat, 'groupId' | 'cli' | 'generation'>): void {
+function clearTempSeatTimer(seat: Pick<TempReviewerSeat, 'groupId' | 'id' | 'generation'>): void {
   const key = tempSeatTimerKey(seat)
   const existing = tempSeatTimers.get(key)
   if (existing) {
@@ -3847,8 +3881,8 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
     seat.keptCheckoutPath = area.checkout
     const group = tempReviewers.group(seat.groupId)
     const msg = removal.reason === 'dirty'
-      ? `The ${sessionCliLabel(seat.cli)} review worktree for ${group?.prLabel ?? 'this PR'} has local changes and was kept at ${area.checkout}.`
-      : `The ${sessionCliLabel(seat.cli)} review worktree for ${group?.prLabel ?? 'this PR'} could not be removed (${removal.detail ?? removal.reason}) and was kept at ${area.checkout}.`
+      ? `The ${seat.label} review worktree for ${group?.prLabel ?? 'this PR'} has local changes and was kept at ${area.checkout}.`
+      : `The ${seat.label} review worktree for ${group?.prLabel ?? 'this PR'} could not be removed (${removal.detail ?? removal.reason}) and was kept at ${area.checkout}.`
     if (group) group.notice = group.notice ? `${group.notice} ${msg}` : msg
     workflowNotice = msg
   }
@@ -3933,8 +3967,8 @@ async function reconcileTempReviewerSeatEvidence(
         if (!loaded.supported) return { supported: false }
         const verified = verifySeatOutcomeFromSnapshot({
           snapshot: loaded.snapshot,
-          cli: seat.cli,
-          totalRequiredSeats: group.requiredSeats.size,
+          tag: seat.tag,
+          requireExactReviewerTags: group.requireExactReviewerTags,
           head: group.head,
           base: group.base,
           baseMovedInGroup: group.baseMovedInGroup,
@@ -3958,6 +3992,7 @@ async function reconcileTempReviewerSeatEvidence(
 async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<MeetingResponse> {
   const groupId = typeof payload.groupId === 'string' ? payload.groupId : ''
   const cli = payload.cli
+  const seatId = typeof payload.seatId === 'string' ? payload.seatId : ''
   const generation = typeof payload.generation === 'string' ? payload.generation : ''
   const seatToken = typeof payload.seatToken === 'string' ? payload.seatToken : ''
   const round = Number(payload.round)
@@ -3968,7 +4003,9 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
   const itemType = typeof payload.itemType === 'string' ? payload.itemType : undefined
   if (
     !groupId
+    || !seatId
     || !isReviewerCli(cli)
+    || (itemType !== undefined && !['review', 'inline', 'issue', 'any'].includes(itemType))
     || !/^[a-f0-9]{64}$/.test(seatToken)
     || (kind !== 'approved' && kind !== 'findings')
     || !Number.isSafeInteger(remoteId)
@@ -3977,8 +4014,8 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
     return { ok: false, message: 'Invalid seat receipt parameters.' }
   }
   const group = tempReviewers.group(groupId)
-  const seat = group?.requiredSeats.get(cli)
-  if (!group || group.stage === 'ended' || !seat || !seat.seatReceiptTokenHash) {
+  const seat = group?.requiredSeats.get(seatId)
+  if (!group || group.stage === 'ended' || !seat || seat.cli !== cli || !seat.seatReceiptTokenHash) {
     return { ok: false, message: 'This temporary reviewer seat is no longer active.' }
   }
   const candidateHash = hashSeatReceiptToken(seatToken)
@@ -3988,15 +4025,18 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
   if (seat.generation !== generation || group.round !== round || group.head !== head || group.base !== base) {
     return { ok: false, message: 'Stale seat receipt for an earlier round or revision.' }
   }
-  seat.submittedReceipt = {
-    kind,
-    remoteId,
-    ...(itemType ? { itemType } : {}),
+  const receipt = { kind, remoteId, ...(itemType ? { itemType } : {}) } as const
+  if (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running') {
+    return { ok: false, message: 'This reviewer already has a result for the current round.' }
   }
-  return reconcileTempReviewerSeatEvidence(group, seat, 'receipt', {
+  if (seat.submittedReceipt) return { ok: false, message: 'A receipt is already being checked for this reviewer.' }
+  seat.submittedReceipt = receipt
+  const result = await reconcileTempReviewerSeatEvidence(group, seat, 'receipt', {
     expectedRound: round,
     expectedGeneration: generation,
   })
+  if (!result.ok && seat.submittedReceipt === receipt) seat.submittedReceipt = null
+  return result
 }
 
 let interactiveSeatReconciler: NodeJS.Timeout | null = null
@@ -4013,7 +4053,7 @@ function ensureInteractiveSeatReconciler(): void {
     reconcilingInteractiveSeats = true
     void (async () => {
       try {
-        for (const { group, seat } of interactiveSeatsToReconcile(tempReviewers.list(), desktopConfig.reviewerAllowAll)) {
+        for (const { group, seat } of interactiveSeatsToReconcile(tempReviewers.list())) {
           await reconcileTempReviewerSeatEvidence(group, seat, 'idle', { expectedRound: group.round, expectedGeneration: seat.generation }).catch(() => {})
         }
       } finally { reconcilingInteractiveSeats = false }
@@ -4036,7 +4076,7 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
         !shuttingDown()
         && group.stage !== 'ended'
         && group.round === expectedRound
-        && group.requiredSeats.get(seat.cli) === seat
+        && group.requiredSeats.get(seat.id) === seat
         && seat.generation === expectedGen
         && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
       )
@@ -4065,29 +4105,62 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
   tempSeatTimers.set(key, timer)
 }
 
+async function writeTempReviewerReceipt(group: TempReviewerGroup, seat: TempReviewerSeat, helper: string): Promise<string> {
+  const port = await meetingControl.port()
+  const seatToken = randomBytes(32).toString('hex')
+  const path = join(helper, 'seat-receipt.json')
+  seat.seatReceiptTokenHash = hashSeatReceiptToken(seatToken)
+  seat.submittedReceipt = null
+  seat.roundStartedAt = Date.now()
+  await writeFile(path, JSON.stringify({
+    port,
+    seatToken,
+    groupId: group.id,
+    seatId: seat.id,
+    cli: seat.cli,
+    generation: seat.generation,
+    round: group.round,
+    head: group.head,
+    base: group.base,
+  }), { encoding: 'utf8', mode: 0o600 })
+  return path
+}
+
 async function launchTempReviewerSeat(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
+  const expectedGeneration = seat.generation
+  const expectedRound = group.round
+  const isSeatCancelled = (): boolean => (
+    shuttingDown()
+    || group.stage === 'ended'
+    || !group.consentGranted
+    || group.round !== expectedRound
+    || group.requiredSeats.get(seat.id) !== seat
+    || seat.generation !== expectedGeneration
+    || seat.lifecycle === 'stopped'
+  )
+  if (isSeatCancelled()) throw new Error('Temporary review stopped')
   const runner = await meetingGitRunner()
   const store = reviewReservations()
   if (!runner) throw new Error('Git is not available')
   if (!store) throw new Error('Review reservations are unavailable')
-  const expectedGeneration = seat.generation
+  if (isSeatCancelled()) throw new Error('Temporary review stopped')
   const reusingExistingArea = Boolean(options?.reuseArea && seat.area && seat.launchId)
   const area = reusingExistingArea ? seat.area! : planReviewerArea(reviewerAreaBase())
   const launchId = reusingExistingArea ? seat.launchId : basename(area.root)
   seat.launchId = launchId
   seat.area = area
   if (!reusingExistingArea) {
-    await clearDetachedReviewHold(store, group.repository, group.prNumber ?? 1, `temp:${group.id}:${seat.cli}`)
+    await clearDetachedReviewHold(store, group.repository, group.prNumber ?? 1, `temp:${group.id}:${seat.id}`)
     await store.reserve({
       launchId,
       repository: group.repository,
       number: group.prNumber ?? 1,
-      reviewer: `temp:${group.id}:${seat.cli}`,
+      reviewer: `temp:${group.id}:${seat.id}`,
       project: resolve(group.projectPath),
       root: area.root,
       checkout: area.checkout,
@@ -4106,26 +4179,11 @@ async function launchTempReviewerSeat(
     const prWorkflows = bundledPrWorkflows()
     const seatStateDir = join(area.helper, 'pr-state')
     await mkdir(seatStateDir, { recursive: true, mode: 0o700 })
-    const controlPort = await meetingControl.port()
-    const seatToken = randomBytes(32).toString('hex')
-    seat.seatReceiptTokenHash = hashSeatReceiptToken(seatToken)
-    seat.submittedReceipt = null
-    seat.roundStartedAt = Date.now()
-    const seatReceiptPath = join(area.helper, 'seat-receipt.json')
-    await writeFile(seatReceiptPath, JSON.stringify({
-      port: controlPort,
-      seatToken,
-      groupId: group.id,
-      cli: seat.cli,
-      generation: seat.generation,
-      round: group.round,
-      head: group.head,
-      base: group.base,
-    }), { encoding: 'utf8', mode: 0o600 })
+    const seatReceiptPath = await writeTempReviewerReceipt(group, seat, area.helper)
     const allowHttpOrigin = explicitHttpOriginFromGitOrigin(seat.origin)
     const briefPath = join(area.helper, 'reviewer-brief.md')
     await writeFile(briefPath, buildReviewerBrief({
-      cli: seat.cli,
+      tag: seat.tag,
       repository: group.repository,
       prLabel: group.prLabel,
       prNumber: group.prNumber,
@@ -4139,34 +4197,27 @@ async function launchTempReviewerSeat(
       seatStateDir,
       checkoutPath: area.checkout,
       roundHistory: group.roundHistory,
-      forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.cli),
+      forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.id),
       seatReceiptConfigPath: seatReceiptPath,
     }), { encoding: 'utf8', mode: 0o600 })
     const prompt = reviewerPromptLine(group.prUrl ?? `${group.repository} ${group.prLabel}`, briefPath)
     const tempMeta = {
       groupId: group.id,
       hostTabId: group.hostTabId,
+      seatId: seat.id,
       cli: seat.cli,
       prLabel: group.prLabel,
       prNumber: group.prNumber,
       repository: group.repository,
       prUrl: group.prUrl,
     }
-    const title = `Review ${group.prLabel} · ${sessionCliLabel(seat.cli)}`
+    const title = `Review ${group.prLabel} · ${seat.label}`
 
-    const isSeatCancelled = (): boolean => (
-      shuttingDown()
-      || group.stage === 'ended'
-      || group.requiredSeats.get(seat.cli) !== seat
-      || seat.generation !== expectedGeneration
-      || seat.lifecycle === 'stopped'
-    )
-
-    const allowAll = desktopConfig.reviewerAllowAll
+    const allowAll = group.allowAll
 
     if (seat.cli === 'copilot') {
-      const reviewerPreset: PermissionPreset = resolveCopilotReviewerPreset(profile.permissionPreset, allowAll, profile.name)
-      const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: reviewerPreset, launch: { ...profile.launch, worktree: false } }
+      const reviewerPreset: PermissionPreset = resolveCopilotReviewerPreset(seat.permissionPreset, allowAll, profile.name)
+      const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: reviewerPreset, launch: seat.launch }
       const id = `tab-${nextTabSequence++}`
       allocatedTabId = id
       const canResumeCopilot = seat.lastSessionId && await copilotSessionStored(seat.lastSessionId)
@@ -4277,7 +4328,7 @@ async function launchTempReviewerSeat(
     }
 
     const cli = seat.cli
-    const savedConfig = profile.otherCli?.[cli]
+    const savedConfig = seat.config
     const resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${sessionCliLabel(cli)} is not installed`)
     const help = await otherCliHelp(resolution)
@@ -4410,12 +4461,12 @@ let tempReviewerConsentChain: Promise<void> = Promise.resolve()
 async function askTempReviewerConsent(
   repository: string,
   prLabel: string,
-  clis: readonly ReviewerCli[],
+  reviewers: readonly Pick<ResolvedReviewer, 'cli' | 'label'>[],
   requireExplicitConsent: boolean,
   allowAll: boolean,
   warnings: readonly string[] = [],
 ): Promise<boolean> {
-  const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
+  const nonCopilotReviewers = [...new Set(reviewers.map((reviewer) => reviewer.cli).filter((cli) => cli !== 'copilot'))]
   if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && warnings.length === 0) return true
   const previous = tempReviewerConsentChain
   let release!: () => void
@@ -4428,7 +4479,7 @@ async function askTempReviewerConsent(
     owner.focus()
     if (!owner.isFocused()) owner.flashFrame(true)
     const details: string[] = [
-      `Reviewers to launch: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}.`,
+      `Reviewers to launch: ${reviewers.map((reviewer) => reviewer.label).join(', ')}.`,
       'Each reviewer runs in a hidden background tab inside an isolated detached Git worktree, accesses the pull request using your configured CLI and Git credentials, and posts its review comments and approvals directly on the pull request.',
       allowAll
         ? 'Allow all permissions is enabled for these hidden reviewer sessions (--allow-all for Copilot CLI, --dangerously-skip-permissions for Claude Code and Antigravity CLI, --dangerously-bypass-approvals-and-sandbox for Codex CLI) so background reviews do not block on terminal prompts.'
@@ -4556,7 +4607,8 @@ async function startTempReviewersFlow(options: {
   if (busyMeeting) {
     return { ok: false, message: `${options.profile.name} is already running hidden reviewers for meeting ${busyMeeting.meetingId}. Stop them first.` }
   }
-  const clis = options.profile.reviewerClis ?? desktopConfig.reviewerClis
+  const entries = options.profile.reviewerEntries ?? desktopConfig.reviewerEntries
+  const clis = entries.map((entry) => entry.cli)
   const allowAll = desktopConfig.reviewerAllowAll
   if (!allowAll && clis.includes('copilot') && options.profile.permissionPreset === 'read-only') {
     return {
@@ -4574,7 +4626,7 @@ async function startTempReviewersFlow(options: {
   if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) {
     return {
       ok: false,
-      message: `Cannot start ${clis.length} temporary reviewer session(s): ${inUseSeats}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce configured reviewer CLIs.`,
+      message: `Cannot start ${clis.length} temporary reviewer session(s): ${inUseSeats}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce the reviewer list.`,
     }
   }
 
@@ -4608,6 +4660,12 @@ async function startTempReviewersFlow(options: {
     consentWarnings.push(
       `${options.profile.name} configures Antigravity CLI approval mode "${options.profile.otherCli.antigravity.approval}", while "Allow all permissions in hidden reviewer sessions" launches Antigravity CLI with --dangerously-skip-permissions.`,
     )
+  }
+  let reviewers: ResolvedReviewer[]
+  try {
+    reviewers = await resolveReviewerEntries(entries, options.profile, getModelCatalog)
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
   if (ghRepo && prNumber !== null) {
     try {
@@ -4702,7 +4760,7 @@ async function startTempReviewersFlow(options: {
   if (meetingNow) return { ok: false, message: `${options.profile.name} is already running hidden reviewers for meeting ${meetingNow.meetingId}. Stop them first.` }
   const seatsNow = hiddenReviewerSlotsInUse()
   if (seatsNow + clis.length > MAX_TEMP_REVIEWER_TABS) {
-    return { ok: false, message: `Cannot start ${clis.length} temporary reviewer session(s): ${seatsNow}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce configured reviewer CLIs.` }
+    return { ok: false, message: `Cannot start ${clis.length} temporary reviewer session(s): ${seatsNow}/${MAX_TEMP_REVIEWER_TABS} temporary reviewer slots are already in use. Stop existing reviewers or reduce the reviewer list.` }
   }
   let created: { group: TempReviewerGroup; hostKey: string }
   try {
@@ -4718,7 +4776,8 @@ async function startTempReviewersFlow(options: {
       marker: DEFAULT_PR_MARKER,
       head: revisions.head,
       base: revisions.base,
-      clis,
+      reviewers,
+      allowAll,
       origin,
     })
   } catch (error) {
@@ -4728,34 +4787,39 @@ async function startTempReviewersFlow(options: {
   const { group, hostKey } = created
   broadcastState()
 
+  const firstRound = group.round
   void (async () => {
-    const isEnded = (): boolean => group.stage === 'ended'
+    const isOver = (): boolean => group.stage === 'ended' || group.round !== firstRound
     try {
-      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings)
+      const approved = await askTempReviewerConsent(repository, prLabel, reviewers, options.requireConsent, allowAll, consentWarnings)
       if (!approved) {
-        if (!isEnded()) {
+        if (!isOver()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
           await teardownTempReviewerSeats(seats)
           broadcastState()
         }
         return
       }
-      for (const seat of group.requiredSeats.values()) {
-        if (isEnded()) break
+      if (isOver()) return
+      group.consentGranted = true
+      for (const seat of [...group.requiredSeats.values()]) {
+        if (isOver()) break
+        if (group.requiredSeats.get(seat.id) !== seat || seat.lifecycle !== 'starting') continue
         try {
           await launchTempReviewerSeat(group, seat, options.profile)
         } catch (error) {
+          if (isOver() || group.requiredSeats.get(seat.id) !== seat) continue
           tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
           broadcastState()
         }
       }
-      if (group.stage === 'starting') {
+      if (!isOver() && group.stage === 'starting') {
         group.stage = 'active'
         tempReviewers.wakeAll()
         broadcastState()
       }
     } catch (error) {
-      if (!isEnded()) {
+      if (!isOver()) {
         const seats = tempReviewers.endGroup(group.id, 'stopped', error instanceof Error ? error.message : 'Temporary PR reviewers failed to start.')
         await teardownTempReviewerSeats(seats)
         broadcastState()
@@ -5167,9 +5231,18 @@ function resolveMeetingHostTab(tabId: string): { ok: true; profile: WorkspacePro
   return { ok: true, profile, hostTab: tab, checkoutFolder: managedTabs.get(tab.id)?.session.sessionCwd ?? tab.worktree?.path ?? tab.launchWorktreePath ?? profile.path }
 }
 
+/** Includes places reserved for hidden reviewers before their invitations exist. */
+function meetingReviewerPlacesUsed(meetingId: string): number {
+  const participants = meetingHub.views().find((meeting) => meeting.id === meetingId)?.participants.length ?? 0
+  const invitations = guestMailbox.seatsOf(meetingId).filter((seat) => !seat.joined).length
+  const group = meetingReviewers.forMeeting(meetingId)
+  const pending = group ? [...group.seats.values()].filter((seat) => seat.lifecycle === 'starting' && !seat.guestSeatId).length : 0
+  return participants + invitations + pending
+}
+
 /**
- * `meeting_start` with `reviewers: true`. The first round is held at once, before anything is awaited, so nobody who joins
- * meanwhile is sent the post alone. The answer goes to the host; the question to the person and the launches go on after it.
+ * Hold the first round before resolving the reviewer entries so nobody sees it alone while Desktop starts the group.
+ * The host gets the result while the consent dialog and launches continue.
  */
 async function startMeetingReviewers(options: { meetingId: string; desktopTag: string | null; folder: string | null; hasChanges: boolean; hostTabId?: string }): Promise<string> {
   const { meetingId } = options
@@ -5181,15 +5254,23 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
   if (!resolved.ok) return refuse(`${resolved.message.replace(/ when calling pr_reviewers_start\.?$/, '.').replace(/, then call pr_reviewers_start\.?$/, '.')}`)
   if (!meetingHub.isOpen(meetingId)) { meetingHub.release(meetingId); return 'The meeting closed before its reviewers could start.' }
   const { profile } = resolved
-  const clis = profile.reviewerClis ?? desktopConfig.reviewerClis
+  const entries = profile.reviewerEntries ?? desktopConfig.reviewerEntries
+  const allowAll = desktopConfig.reviewerAllowAll
+  let reviewers: ResolvedReviewer[]
+  try {
+    reviewers = await resolveReviewerEntries(entries, profile, getModelCatalog)
+  } catch (error) {
+    return refuse(error instanceof Error ? error.message : String(error))
+  }
+  if (!meetingHub.isOpen(meetingId)) { meetingHub.release(meetingId); return 'The meeting closed before its reviewers could start.' }
   const busyPull = tempReviewers.activeForProfile(profile.id)
   if (busyPull) return refuse(`${profile.name} is already running hidden reviewers for ${busyPull.prLabel}. Stop them first.`)
   const inUseSeats = hiddenReviewerSlotsInUse()
-  if (inUseSeats + clis.length > MAX_TEMP_REVIEWER_TABS) return refuse(`${inUseSeats} of ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use, and ${clis.length} more are needed.`)
-  if (clis.length > MAX_MEETING_PARTICIPANTS) return refuse(`a meeting takes at most ${MAX_MEETING_PARTICIPANTS} reviewers.`)
+  if (inUseSeats + reviewers.length > MAX_TEMP_REVIEWER_TABS) return refuse(`${inUseSeats} of ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use, and ${reviewers.length} more are needed.`)
+  if (meetingReviewerPlacesUsed(meetingId) + reviewers.length > MAX_MEETING_PARTICIPANTS) return refuse(`a meeting takes at most ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
   let group: MeetingReviewerGroup
   try {
-    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, clis })
+    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, reviewers, allowAll })
   } catch (error) {
     if (error instanceof MeetingReviewerError) return refuse(error.message)
     meetingHub.release(meetingId)
@@ -5202,7 +5283,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
     meetingHub.release(meetingId)
     void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
   })
-  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${reviewers.map((reviewer) => reviewer.label).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
 }
 
 async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
@@ -5211,10 +5292,8 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
   if (over()) return
   group.projectPath = pinned.project
   group.commit = pinned.commit
-  // Read once: what the person is asked about is what every launch of this run gets, a Retry included.
-  const allowAll = desktopConfig.reviewerAllowAll
-  const clis = [...group.seats.keys()]
-  const approved = await askMeetingReviewerConsent(group.meetingId, meetingReviewerConsentDetail({ clis, allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
+  const reviewers = [...group.seats.values()]
+  const approved = await askMeetingReviewerConsent(group.meetingId, meetingReviewerConsentDetail({ reviewers, allowAll: group.allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
   if (over()) return
   if (!approved) {
     meetingReviewers.end(group.id, 'stopped', `You declined hidden reviewers for meeting ${group.meetingId}. Reviewers can still join with "join meeting ${group.meetingId}".`)
@@ -5222,12 +5301,11 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
     broadcastState()
     return
   }
-  group.allowAll = allowAll
   group.stage = 'starting'
   broadcastState()
   for (const seat of [...group.seats.values()]) {
     if (over()) return
-    if (group.seats.get(seat.cli) !== seat || seat.lifecycle !== 'starting') continue
+    if (group.seats.get(seat.id) !== seat || seat.lifecycle !== 'starting') continue
     const generation = seat.generation
     try {
       await launchMeetingReviewerSeat(group, seat, profile)
@@ -5244,7 +5322,7 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
 async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, profile: WorkspaceProfile): Promise<void> {
   const generation = seat.generation
   const cancelled = (): boolean => (
-    shuttingDown() || group.stage === 'ended' || group.seats.get(seat.cli) !== seat || seat.generation !== generation
+    shuttingDown() || group.stage === 'ended' || group.seats.get(seat.id) !== seat || seat.generation !== generation
     || seat.lifecycle !== 'starting' || !meetingHub.isOpen(group.meetingId)
   )
   const cli = seat.cli
@@ -5260,7 +5338,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
   // Recorded before anything is made: a crash leaves nothing the next start cannot account for.
   // A plan-only launch makes no worktree: recorded without a project, so the sweep after a crash removes the folder
   // itself instead of asking Git about a folder that may be no repository.
-  await store.reserve({ launchId, repository: `meeting/${group.meetingId}`, number: 1, reviewer: `meeting:${group.id}:${cli}:${generation}`, project: group.commit ? resolve(group.projectPath) : '', root: area.root, checkout: area.checkout, ref: area.ref })
+  await store.reserve({ launchId, repository: `meeting/${group.meetingId}`, number: 1, reviewer: `meeting:${group.id}:${seat.id}:${generation}`, project: group.commit ? resolve(group.projectPath) : '', root: area.root, checkout: area.checkout, ref: area.ref })
   reviewLaunches.add(launchId)
   try {
     await makeReviewerArea(area)
@@ -5277,27 +5355,34 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
       await launchMeetingCopilotSeat(group, seat, profile, area, cancelled)
       return
     }
-    const label = sessionCliLabel(cli)
+    const label = seat.label
     const taken = new Set(guestMailbox.seatsOf(group.meetingId).map((guest) => guest.name))
-    let name = label
-    for (let count = 2; taken.has(name); count++) name = `${label} ${count}`
+    for (const sibling of group.seats.values()) {
+      if (sibling !== seat && sibling.guestName) taken.add(sibling.guestName)
+    }
+    if (!seat.guestName) {
+      const preferred = cleanGuestName(label)
+      seat.guestName = preferred
+      for (let count = 2; taken.has(seat.guestName); count++) {
+        seat.guestName = cleanGuestName(`${seat.name} guest ${count}`)
+      }
+    }
     // A seat the desktop makes for the person who allowed this run: granted, as an invitation the person makes is.
-    const { seat: guest, token } = guestMailbox.invite(group.meetingId, name, null, { managed: true })
+    const { seat: guest, token } = guestMailbox.invite(group.meetingId, seat.guestName, null, { managed: true })
     seat.guestSeatId = guest.id
     await mkdir(guestSeatFolder(guestRoot(), guest.id), { recursive: true })
     const briefPath = join(area.helper, MEETING_REVIEWER_BRIEF_FILE)
-    await writeFile(briefPath, meetingReviewerBrief({ cli, meetingId: group.meetingId, token, checkout: area.checkout, commit: group.commit, serverName: GUEST_MCP_SERVER_NAME }), { encoding: 'utf8', mode: 0o600 })
+    await writeFile(briefPath, meetingReviewerBrief({ name: guest.name, meetingId: group.meetingId, token, checkout: area.checkout, commit: group.commit, serverName: GUEST_MCP_SERVER_NAME }), { encoding: 'utf8', mode: 0o600 })
     const prompt = meetingReviewerPromptLine(group.meetingId, briefPath)
 
     // The mode the person allowed for this run, not the setting as it is now.
     const allowAll = group.allowAll
-    if (allowAll === null) throw new Error('The person has not allowed this run yet')
     const resolution = await otherCliLaunchResolution(cli)
     if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not installed`)
     const help = await otherCliHelp(resolution)
     // A meeting's reviewer talks to this computer only, so the check a pull request reviewer needs (a sandbox that
     // can reach the pull request host) is not applied.
-    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, profile.otherCli?.[cli], allowAll, help, profile.name, false)
+    const { configForLaunch, allowAllArgs } = resolveOtherCliReviewerArgs(cli, seat.config, allowAll, help, profile.name, false)
     // Its own address for the meeting tools, as a tab that runs this CLI gets. Antigravity reads the one shared file.
     const meetingArgs = await otherCliMeetingArgs(cli, newMeetingTabTag(), resolution, area.checkout)
     const configArgs = [...await otherCliLaunchArgs(cli, resolution, configForLaunch), ...allowAllArgs, ...meetingArgs]
@@ -5351,7 +5436,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
       canFork: false,
       launchWorktree: false,
       autoTitle: false,
-      tempReviewer: { groupId: group.id, hostTabId: group.hostTabId, cli, repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
+      tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: group.hostTabId, cli, repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
     })
     managedTabs.set(id, { session })
     profilesWithSessionTabs.add(profile.id)
@@ -5440,14 +5525,12 @@ function watchMeetingCopilotDeliveries(group: MeetingReviewerGroup, seat: Meetin
  * by the desktop once the delivery pump would accept it. Starting returns as soon as the session runs, so the other
  * seats are not kept waiting; joining goes on, and fails the seat with its reason when it does not get there in time.
  */
-async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, profile: WorkspaceProfile, area: ReviewerArea, cancelled: () => boolean): Promise<void> {
+async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Extract<MeetingReviewerSeat, { cli: 'copilot' }>, profile: WorkspaceProfile, area: ReviewerArea, cancelled: () => boolean): Promise<void> {
   const generation = seat.generation
-  // The mode the person allowed for this run, not the setting as it is now.
-  if (group.allowAll === null) throw new Error('The person has not allowed this run yet')
-  const preset: PermissionPreset = group.allowAll ? 'full-access' : profile.permissionPreset
-  const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: preset, launch: { ...profile.launch, worktree: false } }
+  const preset: PermissionPreset = group.allowAll ? 'full-access' : seat.permissionPreset
+  const launchProfile: WorkspaceProfile = { ...profile, permissionPreset: preset, launch: seat.launch }
   const id = `tab-${nextTabSequence++}`
-  const title = `Meeting ${group.meetingId} · ${sessionCliLabel('copilot')}`
+  const title = `Meeting ${group.meetingId} · ${seat.label}`
   pendingSessionCreations++
   let plan: SessionSpawnPlan
   try {
@@ -5495,7 +5578,7 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeti
     canFork: false,
     launchWorktree: false,
     autoTitle: false,
-    tempReviewer: { groupId: group.id, hostTabId: group.hostTabId, cli: 'copilot', repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
+    tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: group.hostTabId, cli: 'copilot', repository: profile.name, prLabel: `Meeting ${group.meetingId}`, prNumber: null, prUrl: null, meetingId: group.meetingId },
     })
   } catch (error) {
     meetingControl.forget(id)
@@ -5615,7 +5698,7 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
     await teardownMeetingReviewerSeats(seats, 'The person stopped the hidden reviewers.')
     return snapshot()
   }
-  if (!isReviewerCli(payload)) throw new Error('Invalid reviewer CLI')
+  if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
   if (action === 'dismiss') {
     const removed = meetingReviewers.dismiss(group.id, payload)
     await releaseMeetingReviewerSeat(removed, 'The person removed this reviewer.')
@@ -5630,6 +5713,9 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
     const current = group.seats.get(payload)
     if (current && current.tabId === null && current.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
       throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
+    }
+    if (current && current.lifecycle !== 'starting' && current.lifecycle !== 'joined' && meetingReviewerPlacesUsed(group.meetingId) >= MAX_MEETING_PARTICIPANTS) {
+      throw new Error(`Meeting ${group.meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
     }
     const { previous, next } = meetingReviewers.replace(group.id, payload)
     broadcastState()
@@ -5695,6 +5781,8 @@ async function advanceGroupTempReviewers(
   summary: string,
   options?: { force?: boolean },
 ): Promise<MeetingResponse> {
+  if (!group.consentGranted) return { ok: false, message: 'Answer the question about hidden reviewers first.' }
+  const previousRound = group.round
   const runner = await meetingGitRunner()
   if (!runner) return { ok: false, message: 'Git is not available.' }
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
@@ -5750,21 +5838,23 @@ async function advanceGroupTempReviewers(
       }
     }
     const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
+    if (!group.consentGranted || group.round !== previousRound) return { ok: false, message: 'The review round changed while preparing this revision.' }
+    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
-    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
-    if (requiresConsent && group.stage === 'active') {
+    if (requiresConsent) {
+      group.consentGranted = false
       group.stage = 'starting'
     }
-    const plannedRelaunches = new Set<ReviewerCli>()
+    const plannedRelaunches = new Set<string>()
     for (const seat of group.requiredSeats.values()) {
       const canReuseInteractiveCopilot = !requiresConsent
-        && !desktopConfig.reviewerAllowAll
+        && !group.allowAll
         && seat.cli === 'copilot'
         && seat.lifecycle === 'running'
         && Boolean(seat.tabId && seat.area)
       if (!canReuseInteractiveCopilot) {
-        plannedRelaunches.add(seat.cli)
+        plannedRelaunches.add(seat.id)
         seat.lifecycle = 'starting'
         seat.needsAttention = false
         seat.error = null
@@ -5783,13 +5873,13 @@ async function advanceGroupTempReviewers(
             await cleanupTempReviewerSeat(seat)
           }
           if (isStaleOrEnded()) return
-          const activeClis = [...group.requiredSeats.keys()]
+          const activeReviewers = [...group.requiredSeats.values()]
           const approved = await askTempReviewerConsent(
             group.repository,
             group.prLabel,
-            activeClis,
+            activeReviewers,
             true,
-            desktopConfig.reviewerAllowAll,
+            group.allowAll,
             [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`],
           )
           if (!approved) {
@@ -5801,11 +5891,12 @@ async function advanceGroupTempReviewers(
             return
           }
           if (isStaleOrEnded()) return
+          group.consentGranted = true
         }
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
           await stopAndCloseTempReviewerTabOnly(seat)
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
+          if (isStaleOrEnded() || !group.requiredSeats.has(seat.id)) return
           if (!profile) {
             tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
             broadcastState()
@@ -5831,8 +5922,8 @@ async function advanceGroupTempReviewers(
           } else {
             await cleanupTempReviewerSeat(seat)
           }
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
-          const reset = tempReviewers.resetSeatGeneration(group.id, seat.cli, { keepArea: canReuseWorktree })
+          if (isStaleOrEnded() || !group.requiredSeats.has(seat.id)) return
+          const reset = tempReviewers.resetSeatGeneration(group.id, seat.id, { keepArea: canReuseWorktree })
           broadcastState()
           try {
             await launchTempReviewerSeat(group, reset, profile, { reuseArea: canReuseWorktree })
@@ -5844,8 +5935,8 @@ async function advanceGroupTempReviewers(
 
         for (const seat of [...group.requiredSeats.values()]) {
           if (isStaleOrEnded()) break
-          if (!group.requiredSeats.has(seat.cli)) continue
-          if (plannedRelaunches.has(seat.cli)) {
+          if (!group.requiredSeats.has(seat.id)) continue
+          if (plannedRelaunches.has(seat.id)) {
             await relaunchSeatAtNewHead(seat)
             continue
           }
@@ -5859,11 +5950,10 @@ async function advanceGroupTempReviewers(
               }
               seat.checkedOut = refreshed
               seat.checkedOutBase = revisions.base
-              seat.roundStartedAt = Date.now()
-              seat.submittedReceipt = null
+              const seatReceiptPath = await writeTempReviewerReceipt(group, seat, seat.area.helper)
               const seatStateDir = join(seat.area.helper, 'pr-state')
               await writeFile(join(seat.area.helper, 'reviewer-brief.md'), buildReviewerBrief({
-                cli: seat.cli,
+                tag: seat.tag,
                 repository: group.repository,
                 prLabel: group.prLabel,
                 prNumber: group.prNumber,
@@ -5877,13 +5967,13 @@ async function advanceGroupTempReviewers(
                 seatStateDir,
                 checkoutPath: seat.area.checkout,
                 roundHistory: group.roundHistory,
-                forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.cli),
-              }), { encoding: 'utf8', mode: 0o600 }).catch(() => {})
+                forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.id),
+                seatReceiptConfigPath: seatReceiptPath,
+              }), { encoding: 'utf8', mode: 0o600 })
               startTempSeatRoundTimer(group, seat)
-              const label = sessionCliLabel(seat.cli)
               const sent = sendSessionTask(
                 seat.tabId,
-                `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "[${label}]" directly on the PR.`,
+                `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "${seat.tag}" on its own line directly on the PR. Use the updated reviewer brief and receipt instructions.`,
                 false,
               )
               if (sent.result !== 'sent') {
@@ -5926,7 +6016,7 @@ async function roundMcpTempReviewers(
   return advanceGroupTempReviewers(group, folder, options.head, options.base, options.summary, options.force ? { force: true } : undefined)
 }
 
-async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'approved' | 'stopped'): Promise<MeetingResponse> {
+async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'approved' | 'stopped', confirmedRemoteTags = false): Promise<MeetingResponse> {
   try {
     if (outcome === 'approved' && group.stage !== 'ended') {
       if (!tempReviewers.allApprovedCurrentHead(group)) {
@@ -5955,8 +6045,8 @@ async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'appr
         for (const seat of requiredList) {
           const verified = verifySeatOutcomeFromSnapshot({
             snapshot: snap,
-            cli: seat.cli,
-            totalRequiredSeats: requiredList.length,
+            tag: seat.tag,
+            requireExactReviewerTags: group.requireExactReviewerTags,
             head: group.head,
             base: group.base,
             baseMovedInGroup: group.baseMovedInGroup,
@@ -5968,11 +6058,13 @@ async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'appr
           if (!verified || verified.verdict !== 'approved') {
             return {
               ok: false,
-              message: `Live verification on the PR host could not confirm a current-head approval from ${sessionCliLabel(seat.cli)} at ${group.head.slice(0, 12)} (with zero open findings in this round).`,
+              message: `Live verification on the PR host could not confirm a current-head approval from ${seat.label} at ${group.head.slice(0, 12)} (with zero open findings in this round).`,
             }
           }
           for (const k of verified.claimedKeys) liveClaimed.add(k)
         }
+      } else if (group.requireExactReviewerTags && !confirmedRemoteTags) {
+        return { ok: false, message: 'Desktop only has receipts for this PR host. Verify every required reviewer tag on the PR host, then confirm with confirmed_remote_tags: true.' }
       }
     }
     const { seats } = tempReviewers.finishByHost(group.id, outcome)
@@ -5988,10 +6080,10 @@ async function finishGroupTempReviewers(group: TempReviewerGroup, outcome: 'appr
   }
 }
 
-async function finishMcpTempReviewers(hostKey: string | null, desktopTag: string | null, outcome: 'approved' | 'stopped'): Promise<MeetingResponse> {
+async function finishMcpTempReviewers(hostKey: string | null, desktopTag: string | null, outcome: 'approved' | 'stopped', confirmedRemoteTags: boolean): Promise<MeetingResponse> {
   const group = resolveMcpHostGroup(hostKey, desktopTag)
   if (!group) return { ok: false, message: 'No temporary PR reviewers are bound to this session; call pr_reviewers_start first (or pass host_key).' }
-  return finishGroupTempReviewers(group, outcome)
+  return finishGroupTempReviewers(group, outcome, confirmedRemoteTags)
 }
 
 const meetingControl = new MeetingControlServer(handleMeetingCommand, {
@@ -6210,7 +6302,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (action === 'finish') {
           const group = tempReviewers.latestForHost(tabId)
           if (!group) return { ok: false, message: 'No temporary PR reviewers have been started for this session.' }
-          return finishGroupTempReviewers(group, 'approved')
+          return finishGroupTempReviewers(group, 'approved', request.confirmedRemoteTags)
         }
         if (action === 'stop') {
           const group = tempReviewers.activeForHost(tabId)
@@ -6343,7 +6435,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         if (!target) return { ok: false, message: `There is no open meeting ${join.id}.` }
         if (target.hostTabId === tabId) return { ok: false, message: `This tab hosts meeting ${join.id}.` }
         // Reject a full meeting before publishing a switch that would remove the preceding conversation's seat.
-        if (target.participants.length >= MAX_MEETING_PARTICIPANTS && !target.participants.some(participant => participant.tabId === tabId)) {
+        if (meetingReviewerPlacesUsed(join.id) >= MAX_MEETING_PARTICIPANTS && !target.participants.some(participant => participant.tabId === tabId)) {
           return { ok: false, message: `Meeting ${join.id} already has ${MAX_MEETING_PARTICIPANTS} participants.` }
         }
         session.commitSessionBinding()
@@ -6648,7 +6740,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
       tabsState = closeTab(tabsState, tabId)
       if (closing?.tempReviewer) {
-        const seat = tempReviewers.group(closing.tempReviewer.groupId)?.requiredSeats.get(closing.tempReviewer.cli)
+        const seat = tempReviewers.group(closing.tempReviewer.groupId)?.requiredSeats.get(closing.tempReviewer.seatId)
         if (seat && seat.tabId === tabId) {
           seat.tabId = null
           if (seat.lifecycle === 'starting' || seat.lifecycle === 'running') {
@@ -7447,7 +7539,7 @@ async function updateWorkspaceProfile(
   defaultResumeMode: ResumeMode,
   launch: SessionLaunchConfig,
   otherCli: unknown,
-  reviewerClis?: unknown,
+  reviewerEntries?: unknown,
 ): Promise<void> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
@@ -7457,17 +7549,31 @@ async function updateWorkspaceProfile(
   if (!isResumeMode(defaultResumeMode)) throw new Error('Invalid resume mode')
   // Check the submitted settings before changing anything, so a malformed value fails the save instead of being dropped.
   const validatedOtherCli = validateOtherCliConfig(otherCli, profile.otherCli)
-  const validatedReviewerClis = reviewerClis === undefined ? profile.reviewerClis : validateReviewerClis(reviewerClis, true) ?? undefined
-  profile.name = normalizedName
-  profile.permissionPreset = permissionPreset
-  profile.defaultResumeMode = defaultResumeMode
-  profile.launch = normalizeSessionLaunchConfig(launch)
-  if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
-  else delete profile.otherCli
-  if (validatedReviewerClis && validatedReviewerClis.length > 0) profile.reviewerClis = validatedReviewerClis
-  else delete profile.reviewerClis
-  syncWorkspaceState()
-  await persistConfig()
+  const validatedLaunch = normalizeSessionLaunchConfig(launch)
+  const submittedReviewers = reviewerEntries == null ? undefined : validateReviewerEntries(reviewerEntries)
+  const workspaceModels = reviewerWorkspaceModels(validatedLaunch, validatedOtherCli)
+  const workspaceReviewers = () => reviewerEntries === undefined ? profile.reviewerEntries : submittedReviewers
+  const desktopReviewers = () => profile.general ? [] : desktopConfig.reviewerEntries
+  const requiredClis = () => reviewerCatalogClis(workspaceReviewers() ?? desktopReviewers(), [workspaceModels])
+  await persistReviewerSettings(requiredClis, (catalogs) => {
+    assertWorkspaceListed(profile)
+    const validatedReviewerEntries = workspaceReviewers()
+    validateReviewerModelOverrides(
+      validatedReviewerEntries ?? desktopReviewers(),
+      catalogs,
+      workspaceModels,
+      validatedReviewerEntries ? undefined : 'the Desktop list',
+    )
+    profile.name = normalizedName
+    profile.permissionPreset = permissionPreset
+    profile.defaultResumeMode = defaultResumeMode
+    profile.launch = validatedLaunch
+    if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
+    else delete profile.otherCli
+    if (validatedReviewerEntries) profile.reviewerEntries = validatedReviewerEntries
+    else delete profile.reviewerEntries
+    syncWorkspaceState()
+  })
   broadcastState()
 }
 
@@ -8036,7 +8142,7 @@ function settingsPreferences(): DesktopPreferences {
     desktopControl: desktopConfig.desktopControl,
     openFilesOutsideWorkspace: desktopConfig.openFilesOutsideWorkspace,
     turnCheckpoints: desktopConfig.turnCheckpoints,
-    reviewerClis: [...desktopConfig.reviewerClis],
+    reviewerEntries: desktopConfig.reviewerEntries.map((entry) => ({ ...entry })),
     reviewerAllowAll: desktopConfig.reviewerAllowAll,
   }
 }
@@ -8631,15 +8737,17 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     return snapshot()
   }
   if (action === 'dismiss') {
-    if (!isReviewerCli(payload)) throw new Error('Invalid reviewer CLI')
+    if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
     const { removed } = tempReviewers.dismissSeat(groupId, payload)
     await cleanupTempReviewerSeat(removed)
     broadcastState()
     return snapshot()
   }
   if (action === 'retry') {
-    if (!isReviewerCli(payload)) throw new Error('Invalid reviewer CLI')
+    if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
+    if (!group.consentGranted) throw new Error('Answer the question about hidden reviewers first.')
     const previous = group.requiredSeats.get(payload)
+    const retryRound = group.round
     if (!previous) throw new Error('That reviewer seat is not in this group')
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
@@ -8653,6 +8761,7 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
       broadcastState()
       return snapshot()
     }
+    if (!group.consentGranted || group.round !== retryRound) throw new Error('The review round changed while retrying this seat.')
     const reset = tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     broadcastState()
     try {
@@ -8739,6 +8848,10 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
       throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
     }
     if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
+    const meeting = meetingHub.views().find((candidate) => candidate.id === meetingId)
+    if (meetingReviewerPlacesUsed(meetingId) >= MAX_MEETING_PARTICIPANTS && !meeting?.participants.some((participant) => participant.tabId === tabId)) {
+      throw new Error(`Meeting ${meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
+    }
     try { meetingHub.join(meetingParty(tabId), meetingId, { role: role || null, usage: meetingReaders.get(tabId)?.usage ?? null }) }
     catch (error) { throw error instanceof MeetingError ? new Error(error.message) : error }
   } else if (action === 'use-answer') {
@@ -8770,14 +8883,13 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
   if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
   if (short !== undefined && typeof short !== 'boolean') throw new Error('Invalid invitation kind')
   if (short && guestMcp.url() === null) throw new Error('The meeting tools are not served, so the agent needs the full invitation.')
-  const meeting = meetingViews().find((candidate) => candidate.id === meetingId)
-  if (!meeting || meeting.stage === 'closed') throw new Error(`There is no open meeting ${meetingId}.`)
-  if (meeting.participants.length + (meeting.invited?.length ?? 0) >= MAX_MEETING_PARTICIPANTS) {
-    throw new Error(`Meeting ${meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
-  }
   // The endpoint file must be there before the guest's first call, even if no session has started the server yet.
   await meetingControl.port()
   await guestEndpointWrite
+  if (!meetingHub.isOpen(meetingId)) throw new Error(`There is no open meeting ${meetingId}.`)
+  if (meetingReviewerPlacesUsed(meetingId) >= MAX_MEETING_PARTICIPANTS) {
+    throw new Error(`Meeting ${meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
+  }
   const { seat, token } = guestMailbox.invite(meetingId, name, typeof role === 'string' ? role : null)
   await mkdir(guestSeatFolder(guestRoot(), seat.id), { recursive: true })
   const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
@@ -9226,14 +9338,14 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'desktopControl',
     'openFilesOutsideWorkspace',
     'turnCheckpoints',
-    'reviewerClis',
+    'reviewerEntries',
     'reviewerAllowAll',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
     throw new Error('Invalid desktop preferences')
   }
-  const validatedReviewerClis = 'reviewerClis' in values ? validateReviewerClis(values.reviewerClis, false) : null
+  const validatedReviewerEntries = 'reviewerEntries' in values ? validateReviewerEntries(values.reviewerEntries) : null
   if (
     ('closeBehavior' in values && !isCloseBehavior(values.closeBehavior))
     || ('trayEnabled' in values && typeof values.trayEnabled !== 'boolean')
@@ -9267,7 +9379,16 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let checkpointsTurnedOff = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
-  await persistConfig(() => {
+  const requiredClis = validatedReviewerEntries
+    ? () => reviewerCatalogClis(
+        validatedReviewerEntries,
+        desktopReviewerWorkspaces(desktopConfig.profiles).map(({ models }) => models),
+      )
+    : null
+  await persistReviewerSettings(requiredClis, (catalogs) => {
+    if (validatedReviewerEntries) {
+      validateDesktopReviewerModels(validatedReviewerEntries, desktopConfig.profiles, catalogs)
+    }
     before = settingsPreferences()
     updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'
       && desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
@@ -9305,7 +9426,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     // New turns follow it at once. Turning it off also deletes every snapshot taken so far.
     checkpointsTurnedOff = values.turnCheckpoints === false && desktopConfig.turnCheckpoints
     if (typeof values.turnCheckpoints === 'boolean') desktopConfig.turnCheckpoints = values.turnCheckpoints
-    if (validatedReviewerClis) desktopConfig.reviewerClis = validatedReviewerClis
+    if (validatedReviewerEntries) desktopConfig.reviewerEntries = validatedReviewerEntries
     if (typeof values.reviewerAllowAll === 'boolean') desktopConfig.reviewerAllowAll = values.reviewerAllowAll
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
@@ -9380,7 +9501,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
   defaultResumeMode: unknown,
   launch: unknown,
   otherCli: unknown,
-  reviewerClis?: unknown,
+  reviewerEntries?: unknown,
 ) => {
   assertTrustedSettingsSender(event)
   if (
@@ -9392,7 +9513,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     || typeof launch !== 'object'
     || Array.isArray(launch)
     || (otherCli !== undefined && (typeof otherCli !== 'object' || otherCli === null || Array.isArray(otherCli)))
-    || (reviewerClis !== undefined && reviewerClis !== null && !Array.isArray(reviewerClis))
+    || (reviewerEntries !== undefined && reviewerEntries !== null && !Array.isArray(reviewerEntries))
   ) {
     throw new Error('Invalid workspace profile')
   }
@@ -9403,7 +9524,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     defaultResumeMode as ResumeMode,
     launch as SessionLaunchConfig,
     otherCli,
-    reviewerClis,
+    reviewerEntries,
   )
   return settingsSnapshot()
 })
@@ -9434,7 +9555,9 @@ ipcMain.handle('desktop-settings:update-provider', async (event, provider: unkno
     offline: value.offline,
   }
   validateProviderConfig(next)
+  const providerChanged = JSON.stringify(desktopConfig.provider) !== JSON.stringify(next)
   desktopConfig.provider = next
+  if (providerChanged) invalidateCopilotModelCatalog()
   await persistConfig()
   return settingsSnapshot()
 })

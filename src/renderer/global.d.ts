@@ -3,7 +3,8 @@ import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserVi
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { NewSessionOptions } from '../main/session-name.js'
-import type { ReviewerCli, SessionCli, SessionCliChoice } from '../main/session-cli.js'
+import type { ReviewerEntry } from '../main/reviewer-settings.js'
+import type { SessionCli, SessionCliChoice } from '../main/session-cli.js'
 import type { CliModelOption } from '../main/cli-model-catalog.js'
 import type { CredentialName } from '../main/secure-credentials.js'
 import type { AccessStatus } from '../main/access-status.js'
@@ -144,7 +145,7 @@ export interface CopilotDesktopBridge {
   tempReviewerAction(
     groupId: string,
     action: 'stop' | 'retry' | 'dismiss' | 'dismiss-ended',
-    payload?: ReviewerCli,
+    payload?: string,
   ): Promise<DesktopState>
   configureAutomation(projectId:string,repository:string,template:'assigned-issue'|'default-ci',actors:string[],id?:string):Promise<void>
   automationAction(id:string,action:'off'|'preview'|'automatic'|'start'|'delete'):Promise<void>
@@ -252,7 +253,7 @@ export interface CopilotDesktopSettingsBridge {
     defaultResumeMode: ResumeMode,
     launch: SessionLaunchConfig,
     otherCli: OtherCliConfig | undefined,
-    reviewerClis?: ReviewerCli[] | undefined,
+    reviewerEntries?: ReviewerEntry[] | null,
   ): Promise<DesktopSettingsSnapshot>
   removeWorkspaceProfile(profileId: string): Promise<DesktopSettingsSnapshot>
   updateProvider(provider: CopilotProviderConfig): Promise<DesktopSettingsSnapshot>

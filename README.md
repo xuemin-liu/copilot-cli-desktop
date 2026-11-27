@@ -356,7 +356,8 @@ A meeting lets several sessions review one session's plan or local changes witho
 
 Instead of asking each reviewer to join, have the desktop start them. Ask the host session for it: **"review this plan
 in a meeting"** or `/review-meeting`. The bundled `review-meeting` skill starts the meeting with reviewers, and the
-desktop starts one hidden session for each CLI chosen under **Settings → Reviewers** (a workspace can choose its own).
+desktop starts one hidden session for each row under **Settings → Reviewers**. A workspace can choose its own list.
+Each row follows that workspace's model and reasoning settings unless you choose overrides. You can add the same CLI more than once.
 
 - **You are asked first**, once per meeting, and the default answer is no. The question names the reviewers, the commit
   they get, that later rounds and attachments are covered, and what their permissions allow. Decline, and the meeting

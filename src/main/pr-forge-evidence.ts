@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { GitRunner } from './git-runner.js'
-import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
 import { githubCliApi } from './workflow-github.js'
 
 const SHA_RE = /^[0-9a-f]{40,64}$/i
@@ -962,8 +961,8 @@ export function isItemExplicitApproval(item: ForgeEvidenceItem, head: string, ba
 
 export function verifySeatOutcomeFromSnapshot(options: {
   snapshot: ForgePullEvidenceSnapshot
-  cli: ReviewerCli
-  totalRequiredSeats: number
+  tag: string
+  requireExactReviewerTags: boolean
   head: string
   base: string
   baseMovedInGroup: boolean
@@ -974,8 +973,8 @@ export function verifySeatOutcomeFromSnapshot(options: {
 }): { verdict: 'approved' | 'findings'; claimedKeys: string[] } | null {
   const {
     snapshot,
-    cli,
-    totalRequiredSeats,
+    tag,
+    requireExactReviewerTags,
     head,
     base,
     baseMovedInGroup,
@@ -985,7 +984,10 @@ export function verifySeatOutcomeFromSnapshot(options: {
     receipt,
   } = options
 
-  const tag = `[${sessionCliLabel(cli)}]`
+  const hasUnquotedTag = (body: string): boolean => body.split(/\r?\n/).some((line) => {
+    const text = line.trim()
+    return requireExactReviewerTags ? text === tag : !text.startsWith('>') && text.includes(tag)
+  })
   const isExpectedAccount = (item: ForgeEvidenceItem): boolean => {
     if (item.body.startsWith(marker)) return false
     if (snapshot.actorId === null && !snapshot.actorLogin) return true
@@ -1011,7 +1013,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
     if (
       item.kind === 'review'
       && isExpectedAccount(item)
-      && item.body.includes(tag)
+      && hasUnquotedTag(item.body)
       && (item.commitId === null || item.commitId === head.toLowerCase())
       && (item.createdAtMs === null || item.createdAtMs + 5_000 >= roundStartedAtMs)
     ) {
@@ -1020,7 +1022,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
   }
 
   const hasSeatTag = (item: ForgeEvidenceItem): boolean => (
-    item.body.includes(tag)
+    hasUnquotedTag(item.body)
     || (item.parentReviewId !== undefined && taggedParentReviewIds.has(item.parentReviewId))
   )
 
@@ -1032,8 +1034,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
     if (item.kind === 'review' && item.state === 'COMMENTED' && item.body.trim() === '') return false
     if (item.commitId !== null && item.commitId !== head.toLowerCase()) return false
     if (item.createdAtMs !== null && item.createdAtMs + 5_000 < roundStartedAtMs) return false
-    if (matchesReceipt(item)) return true
-    if (totalRequiredSeats > 1 && !hasSeatTag(item)) return false
+    if (requireExactReviewerTags && !hasSeatTag(item)) return false
     return true
   })
 
@@ -1041,15 +1042,13 @@ export function verifySeatOutcomeFromSnapshot(options: {
 
   const approvalItem = eligible.find((item) => {
     if (!isItemExplicitApproval(item, head, base, baseMovedInGroup)) return false
-    if (totalRequiredSeats > 1 && !hasSeatTag(item)) return false
+    if (receipt && !matchesReceipt(item)) return false
     return true
   })
 
   const findingItems = eligible.filter((item) => {
     if (item === approvalItem || isItemExplicitApproval(item, head, base, baseMovedInGroup)) return false
     if (receipt?.kind === 'findings' && matchesReceipt(item)) return true
-    const hasSeatAttribution = totalRequiredSeats === 1 || hasSeatTag(item)
-    if (!hasSeatAttribution) return false
     if (item.kind === 'review' && item.state === 'CHANGES_REQUESTED') return true
     return hasAffirmativeFindingLabel(item.body)
   })
@@ -1058,7 +1057,7 @@ export function verifySeatOutcomeFromSnapshot(options: {
   if (approvalItem && findingItems.length === 0 && (!receipt || receipt.kind === 'approved')) {
     return { verdict: 'approved', claimedKeys: [keyOf(approvalItem)] }
   }
-  if (findingItems.length > 0) {
+  if (findingItems.length > 0 && (!receipt || (receipt.kind === 'findings' && findingItems.some(matchesReceipt)))) {
     return { verdict: 'findings', claimedKeys: findingItems.map(keyOf) }
   }
   return null

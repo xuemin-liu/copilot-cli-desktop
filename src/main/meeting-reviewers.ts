@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { ReviewerArea } from './pr-review-launch.js'
+import type { ResolvedReviewer } from './reviewer-settings.js'
 import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
 import type { TempReviewerGroupView, TempReviewerSeatVerdict, TempReviewerSeatView } from './types.js'
 
 /**
  * Reviewers the desktop starts for a review meeting (docs/review-meeting-plan.md): one hidden session per configured
- * reviewer CLI, each joining the meeting with a seat the desktop made for it. This is the record of who was planned,
+ * reviewer entry, each joining the meeting with a seat the desktop made for it. This is the record of who was planned,
  * who is in, and who failed; the meeting itself stays in `MeetingHub`, and the sessions are started by `main.ts`.
  *
  * A seat is `joined` only when its agent has taken its seat in the meeting (its first `meeting_next`), not when its
@@ -13,9 +14,9 @@ import type { TempReviewerGroupView, TempReviewerSeatVerdict, TempReviewerSeatVi
  */
 export type MeetingReviewerSeatLifecycle = 'starting' | 'joined' | 'failed' | 'left' | 'stopped'
 
-export interface MeetingReviewerSeat {
+export type MeetingReviewerSeat = ResolvedReviewer & {
   groupId: string
-  cli: ReviewerCli
+  guestName: string | null
   /** A new one for every launch of this seat: what a late event of an earlier launch is told apart by. */
   generation: string
   /** The reviewer folder's name, which is also its reservation. */
@@ -42,13 +43,13 @@ export interface MeetingReviewerGroup {
   commit: string | null
   /**
    * The permission mode the person was asked about and allowed for this run: every launch of every seat, a Retry
-   * included, uses it, whatever the setting says by then. Null until the person has answered.
+   * included, uses it, whatever the setting says by then.
    */
-  allowAll: boolean | null
+  allowAll: boolean
   /** `consent`: the person is being asked. `starting`: seats are coming up and round 1 is held. `active`: the gate is open. */
   stage: 'consent' | 'starting' | 'active' | 'ended'
   outcome: 'closed' | 'stopped' | null
-  seats: Map<ReviewerCli, MeetingReviewerSeat>
+  seats: Map<string, MeetingReviewerSeat>
   notice: string | null
 }
 
@@ -96,17 +97,17 @@ export class MeetingReviewerRegistry {
    * Record a run before the person is asked and before anything is made, so a second start in the same workspace is
    * refused from that moment on.
    */
-  create(input: { meetingId: string; hostTabId: string | null; profileId: string; projectPath: string; clis: readonly ReviewerCli[] }): MeetingReviewerGroup {
-    if (input.clis.length === 0) throw new MeetingReviewerError('No reviewer CLI is selected. Choose reviewers in Settings first.')
+  create(input: { meetingId: string; hostTabId: string | null; profileId: string; projectPath: string; reviewers: readonly ResolvedReviewer[]; allowAll: boolean }): MeetingReviewerGroup {
+    if (input.reviewers.length === 0) throw new MeetingReviewerError('Choose at least one reviewer in Settings.')
     if (this.forMeeting(input.meetingId)) throw new MeetingReviewerError(`Meeting ${input.meetingId} already has hidden reviewers.`)
     const busy = this.activeForProfile(input.profileId)
     if (busy) throw new MeetingReviewerError(`This workspace is already running hidden reviewers for meeting ${busy.meetingId}. Stop them first.`)
     const id = randomUUID()
     const group: MeetingReviewerGroup = {
       id, meetingId: input.meetingId, hostTabId: input.hostTabId, profileId: input.profileId, projectPath: input.projectPath,
-      commit: null, allowAll: null, stage: 'consent', outcome: null, seats: new Map(), notice: null,
+      commit: null, allowAll: input.allowAll, stage: 'consent', outcome: null, seats: new Map(), notice: null,
     }
-    for (const cli of input.clis) group.seats.set(cli, newSeat(id, cli, false))
+    for (const reviewer of input.reviewers) group.seats.set(reviewer.id, newSeat(id, reviewer, false))
     this.groups.set(id, group)
     return group
   }
@@ -145,25 +146,26 @@ export class MeetingReviewerRegistry {
   }
 
   /** Take a seat out of the run: the person does not want this reviewer. Returns it for the caller to clean up. */
-  dismiss(groupId: string, cli: ReviewerCli): MeetingReviewerSeat {
+  dismiss(groupId: string, seatId: string): MeetingReviewerSeat {
     const group = this.groups.get(groupId)
-    const seat = group?.seats.get(cli)
+    const seat = group?.seats.get(seatId)
     if (!group || !seat) throw new MeetingReviewerError('That reviewer seat is not in this run.')
-    group.seats.delete(cli)
+    group.seats.delete(seatId)
     seat.lifecycle = 'stopped'
     return seat
   }
 
   /** A fresh launch of a seat. The earlier one is returned for the caller to clean up first. */
-  replace(groupId: string, cli: ReviewerCli): { previous: MeetingReviewerSeat; next: MeetingReviewerSeat } {
+  replace(groupId: string, seatId: string): { previous: MeetingReviewerSeat; next: MeetingReviewerSeat } {
     const group = this.groups.get(groupId)
-    const previous = group?.seats.get(cli)
+    const previous = group?.seats.get(seatId)
     if (!group || !previous) throw new MeetingReviewerError('That reviewer seat is not in this run.')
     if (group.stage === 'ended') throw new MeetingReviewerError('This run is over.')
     // Nothing starts before the person has answered: a Retry is no way round the question.
     if (group.stage === 'consent') throw new MeetingReviewerError('Answer the question about hidden reviewers first.')
-    const next = newSeat(groupId, cli, true)
-    group.seats.set(cli, next)
+    const next = newSeat(groupId, previous, true)
+    next.guestName = previous.guestName
+    group.seats.set(seatId, next)
     previous.lifecycle = previous.lifecycle === 'starting' || previous.lifecycle === 'joined' ? 'stopped' : previous.lifecycle
     return { previous, next }
   }
@@ -209,6 +211,8 @@ export class MeetingReviewerRegistry {
 
   view(group: MeetingReviewerGroup): TempReviewerGroupView {
     const seats: TempReviewerSeatView[] = [...group.seats.values()].map((seat) => ({
+      id: seat.id,
+      label: seat.label,
       cli: seat.cli,
       tabId: seat.tabId,
       verdict: SEAT_VERDICT[seat.lifecycle],
@@ -242,7 +246,7 @@ export class MeetingReviewerRegistry {
   statusText(meetingId: string): string {
     const group = this.list().filter((candidate) => candidate.meetingId === meetingId).at(-1)
     if (!group) return ''
-    const seats = [...group.seats.values()].map((seat) => `${sessionCliLabel(seat.cli)}: ${SEAT_STATUS[seat.lifecycle]}${seat.error ? ` (${seat.error})` : ''}`)
+    const seats = [...group.seats.values()].map((seat) => `${seat.label}: ${SEAT_STATUS[seat.lifecycle]}${seat.error ? ` (${seat.error})` : ''}`)
     const head = group.stage === 'consent' ? 'Hidden reviewers: waiting for the person to allow them.'
       : group.stage === 'starting' ? 'Hidden reviewers are starting; round 1 opens when each has joined or failed.'
       : group.stage === 'active' ? 'Hidden reviewers:'
@@ -259,8 +263,8 @@ const SEAT_STATUS: Record<MeetingReviewerSeatLifecycle, string> = {
   starting: 'starting', joined: 'in the meeting', failed: 'failed', left: 'left (its session ended)', stopped: 'stopped',
 }
 
-function newSeat(groupId: string, cli: ReviewerCli, replacement: boolean): MeetingReviewerSeat {
-  return { groupId, cli, generation: randomUUID(), launchId: null, tabId: null, guestSeatId: null, lifecycle: 'starting', error: null, area: null, keptCheckoutPath: null, replacement }
+function newSeat(groupId: string, reviewer: ResolvedReviewer, replacement: boolean): MeetingReviewerSeat {
+  return { ...reviewer, groupId, guestName: null, generation: randomUUID(), launchId: null, tabId: null, guestSeatId: null, lifecycle: 'starting', error: null, area: null, keptCheckoutPath: null, replacement }
 }
 
 /** The file name, in a seat's helper folder, of what its agent is told: the meeting, its seat credential, the rules. */
@@ -271,7 +275,7 @@ export const MEETING_REVIEWER_BRIEF_FILE = 'meeting-reviewer.md'
  * seat's credential, and a command line is readable by every process of the person.
  */
 export function meetingReviewerBrief(input: {
-  cli: ReviewerCli
+  name: string
   meetingId: string
   /** The seat's invitation token. */
   token: string
@@ -285,7 +289,7 @@ export function meetingReviewerBrief(input: {
     : `There is no checkout of a project for this meeting: your working folder (${input.checkout}) is empty. Review what the meeting gives you (meeting_show).`
   return `# Review meeting ${input.meetingId}
 
-You are ${sessionCliLabel(input.cli)}, a reviewer in Copilot CLI Desktop review meeting ${input.meetingId}. The desktop started this session for that meeting only.
+You are ${input.name}, a reviewer in Copilot CLI Desktop review meeting ${input.meetingId}. The desktop started this session for that meeting only.
 
 1. Call the \`meeting_join\` tool of the \`${input.serverName}\` MCP server with exactly this argument: invitation: "${input.token}". Do not pass a meeting id, and keep the invitation to yourself: it is this seat's credential.
 2. Call \`meeting_next\` for your first message. Read the material it names with \`meeting_show\`, then answer with \`meeting_reply\`.
@@ -329,7 +333,7 @@ export function meetingReviewerPromptLine(meetingId: string, briefPath: string):
  * given, where it goes, and what full access means. The default answer is no.
  */
 export function meetingReviewerConsentDetail(input: {
-  clis: readonly ReviewerCli[]
+  reviewers: readonly Pick<ResolvedReviewer, 'cli' | 'label'>[]
   allowAll: boolean
   /** The flag each CLI is started with under allow-all, by CLI. */
   allowAllFlags: Partial<Record<ReviewerCli, string>>
@@ -337,8 +341,9 @@ export function meetingReviewerConsentDetail(input: {
   projectPath: string
   hasChanges: boolean
 }): string {
-  const names = input.clis.map((cli) => sessionCliLabel(cli)).join(', ')
-  const outside = input.clis.filter((cli) => cli !== 'copilot')
+  const names = input.reviewers.map((reviewer) => reviewer.label).join(', ')
+  const clis = [...new Set(input.reviewers.map((reviewer) => reviewer.cli))]
+  const outside = clis.filter((cli) => cli !== 'copilot')
   const lines = [
     `Reviewers: ${names}.`,
     'Each runs in a hidden background tab and joins this meeting with a seat of its own. They are closed when the meeting closes.',
@@ -347,9 +352,9 @@ export function meetingReviewerConsentDetail(input: {
       : `There is no Git commit to check out in ${input.projectPath}, so reviewers start in an empty folder and see only what the meeting shares.`,
     `Reviewers read the host's post${input.hasChanges ? ', the attached changes' : ''} and every later round, including changes the host attaches later in this meeting. You are not asked again for those.`,
     ...(outside.length ? [`${outside.map((cli) => sessionCliLabel(cli)).join(', ')} send what they read to their own providers, under your accounts with them.`] : []),
-    ...(input.clis.includes('copilot') ? [`${sessionCliLabel('copilot')} sends what it reads to the model provider this workspace's Copilot sessions use, including a custom provider if one is set.`] : []),
+    ...(clis.includes('copilot') ? [`${sessionCliLabel('copilot')} sends what it reads to the model provider this workspace's Copilot sessions use, including a custom provider if one is set.`] : []),
     input.allowAll
-      ? `"Allow all permissions in hidden reviewer sessions" is on: ${input.clis.map((cli) => `${sessionCliLabel(cli)} ${input.allowAllFlags[cli] ? `(${input.allowAllFlags[cli]})` : ''}`.trim()).join(', ')} run without permission prompts. They are told to review only, but nothing prevents them from reading or changing files anywhere your account can, including your project folder: the checkout is a convenience, not a sandbox.`
+      ? `"Allow all permissions in hidden reviewer sessions" is on: ${clis.map((cli) => `${sessionCliLabel(cli)} ${input.allowAllFlags[cli] ? `(${input.allowAllFlags[cli]})` : ''}`.trim()).join(', ')} run without permission prompts. They are told to review only, but nothing prevents them from reading or changing files anywhere your account can, including your project folder: the checkout is a convenience, not a sandbox.`
       : '"Allow all permissions in hidden reviewer sessions" is off: each reviewer uses its workspace permission settings. A reviewer that stops at a permission prompt waits there; look at it with Peek.',
   ]
   return lines.join('\n\n')

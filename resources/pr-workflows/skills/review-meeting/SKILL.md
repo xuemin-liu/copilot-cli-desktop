@@ -1,12 +1,12 @@
 ---
 name: review-meeting
-description: Host a Copilot CLI Desktop review meeting about a plan or your local changes and have the desktop start hidden reviewer sessions for it, one per reviewer CLI chosen in its settings; answer their replies round by round until the meeting agrees or you end it. Use when the user asks for a review meeting with reviewers started for them (for example `/review-meeting`, "review this plan in a meeting", "start a meeting with the reviewers to discuss the changes").
+description: Host a Copilot CLI Desktop review meeting about a plan or your local changes and have the desktop start hidden reviewer sessions for it, one per reviewer entry chosen in its settings; answer their replies round by round until the meeting agrees or you end it. Use when the user asks for a review meeting with reviewers started for them (for example `/review-meeting`, "review this plan in a meeting", "start a meeting with the reviewers to discuss the changes").
 user-invocable: true
 ---
 
 # Review meeting with hidden reviewers (`review-meeting`)
 
-You host a review meeting. The desktop starts one hidden reviewer session for each reviewer CLI chosen in **Desktop Settings → Reviewers** (a workspace can override the list), each joins the meeting by itself, and all of them are closed when the meeting closes. You do not start, join or message those sessions yourself: you post rounds and read their replies.
+You host a review meeting. The desktop starts one hidden reviewer session for each entry in **Desktop Settings → Reviewers** (a workspace can override the list), each joins the meeting by itself, and all of them are closed when the meeting closes. You do not start, join or message those sessions yourself: you post rounds and read their replies.
 
 Use this skill only when the person asked for the meeting. To have other agents join a meeting without hidden reviewers, start it without the reviewers option and tell the person its id.
 

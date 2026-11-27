@@ -7,6 +7,7 @@ import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import { REASONING_EFFORTS, type SessionLaunchConfig } from '../../main/session-launch.js'
+import { MAX_REVIEWER_ENTRIES, reviewerEfforts, reviewerModelEffortError, reviewerWorkspaceModels, type ReviewerEntry } from '../../main/reviewer-settings.js'
 import type { CliModelOption } from '../../main/cli-model-catalog.js'
 import { AGENT_CLI_SETTINGS, otherCliReasoningEfforts, type OtherCliConfig } from '../../main/agent-cli-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli } from '../../main/session-cli.js'
@@ -104,20 +105,22 @@ function acceptsNewModelEffort(
   return levels === undefined || levels.includes(effort)
 }
 
-function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onChange }: {
+function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], inheritedModel, workspaceDefaults = false, onChange }: {
   label: string
   catalog: CliModelOption[] | undefined
   model: string
   effort?: string
   fallbackEfforts?: readonly string[]
+  inheritedModel?: string | undefined
+  workspaceDefaults?: boolean
   onChange: (model: string, effort: string) => void
 }): JSX.Element {
   const [custom, setCustom] = useState(false)
   const selected = catalog?.find((entry) => entry.id === model)
-  const selectedEfforts = selected?.efforts ?? fallbackEfforts
+  const selectedEfforts = catalog?.find((entry) => entry.id === (model || inheritedModel))?.efforts ?? fallbackEfforts
   const chooseModel = (next: string): void => {
-    const levels = catalog?.find((entry) => entry.id === next)?.efforts ?? fallbackEfforts
-    onChange(next, effort && levels.includes(effort) ? effort : '')
+    const levels = catalog?.find((entry) => entry.id === (next || inheritedModel))?.efforts ?? fallbackEfforts
+    onChange(next, effort && (effort === 'default' || levels.includes(effort)) ? effort : '')
   }
   return <>
     <label>
@@ -127,7 +130,7 @@ function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onCh
         setCustom(next === CUSTOM_MODEL)
         if (next !== CUSTOM_MODEL) chooseModel(next)
       }}>
-        <option value="">Use CLI default</option>
+        <option value="">{workspaceDefaults ? (inheritedModel ? `Workspace default (${inheritedModel})` : 'Workspace default') : 'Use CLI default'}</option>
         {model && !selected && !custom && <option value={model}>{model} (saved)</option>}
         {catalog?.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
         <option value={CUSTOM_MODEL}>Custom model…</option>
@@ -148,9 +151,10 @@ function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onCh
     {effort !== undefined && (
       <label>
         Reasoning effort
-        <select value={effort} disabled={!effort && selectedEfforts.length === 0} onChange={(event) => onChange(model, event.target.value)}>
-          <option value="">Model default</option>
-          {effort && !selectedEfforts.includes(effort) && <option value={effort}>{effortLabels[effort] ?? effort} (saved)</option>}
+        <select value={effort} disabled={!workspaceDefaults && !effort && selectedEfforts.length === 0} onChange={(event) => onChange(model, event.target.value)}>
+          <option value="">{workspaceDefaults ? 'Workspace default' : 'Model default'}</option>
+          {workspaceDefaults && <option value="default">Model default</option>}
+          {effort && effort !== 'default' && !selectedEfforts.includes(effort) && <option value={effort}>{effortLabels[effort] ?? effort} (saved)</option>}
           {selectedEfforts.map((level) => <option key={level} value={level}>{effortLabels[level] ?? level}</option>)}
         </select>
       </label>
@@ -158,16 +162,66 @@ function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onCh
   </>
 }
 
+function ReviewerEditor({ entries, catalogs, workspaceModels, disabled, onChange }: {
+  entries: readonly ReviewerEntry[]
+  catalogs: ModelCatalogs
+  workspaceModels?: Readonly<Record<ReviewerCli, string>>
+  disabled?: boolean
+  onChange: (entries: ReviewerEntry[]) => void
+}): JSX.Element {
+  const update = (entry: ReviewerEntry): void => onChange(entries.map((other) => other.id === entry.id ? entry : other))
+  return <>
+    <ul className="reviewer-settings-list" aria-label="Reviewers">
+      {entries.map(({ id, cli, model, reasoningEffort }, index) => {
+        const efforts = reviewerEfforts(cli)
+        const effortError = reviewerModelEffortError(model ?? workspaceModels?.[cli], reasoningEffort, catalogs[cli])
+        return (
+          <li key={id}>
+            <fieldset className="settings-form-grid" disabled={disabled}>
+              <legend>Reviewer {index + 1}</legend>
+              <label>
+                CLI
+                <select value={cli} onChange={(event) => update({ id, cli: event.target.value as ReviewerCli })}>
+                  {SUPPORTED_REVIEWER_CLIS.map((option) => <option key={option} value={option}>{sessionCliLabel(option)}</option>)}
+                </select>
+              </label>
+              <ModelFields
+                key={cli}
+                label="Model"
+                catalog={catalogs[cli]}
+                model={model ?? ''}
+                inheritedModel={workspaceModels?.[cli]}
+                workspaceDefaults
+                {...(efforts.length ? { effort: reasoningEffort ?? '', fallbackEfforts: efforts } : {})}
+                onChange={(nextModel, effort) => update({
+                  id, cli, ...(nextModel ? { model: nextModel } : {}), ...(effort ? { reasoningEffort: effort } : {}),
+                })}
+              />
+              {effortError && <p className="settings-grid-wide reviewer-settings-error" role="alert">{effortError}</p>}
+              <div className="reviewer-settings-remove">
+                <button type="button" disabled={entries.length <= 1} onClick={() => onChange(entries.filter((entry) => entry.id !== id))}>Remove reviewer</button>
+              </div>
+            </fieldset>
+          </li>
+        )
+      })}
+    </ul>
+    <button type="button" disabled={disabled || entries.length >= MAX_REVIEWER_ENTRIES} onClick={() => onChange([
+      ...entries, { id: crypto.randomUUID(), cli: 'copilot' },
+    ])}>Add reviewer</button>
+  </>
+}
+
 function WorkspaceProfileEditor({
   profile,
   active,
-  defaultReviewerClis,
+  defaultReviewers,
   modelCatalogs,
   onSave,
 }: {
   profile: WorkspaceProfile
   active: boolean
-  defaultReviewerClis: readonly ReviewerCli[]
+  defaultReviewers: readonly ReviewerEntry[]
   modelCatalogs: ModelCatalogs
   onSave: Save
 }): JSX.Element {
@@ -177,7 +231,7 @@ function WorkspaceProfileEditor({
   const [defaultResumeMode, setDefaultResumeMode] = useState(profile.defaultResumeMode)
   const [launch, setLaunch] = useState<SessionLaunchConfig>(profile.launch)
   const [otherCli, setOtherCli] = useState<OtherCliConfig>(profile.otherCli ?? {})
-  const [reviewerOverride, setReviewerOverride] = useState<ReviewerCli[] | null>(profile.reviewerClis ? [...profile.reviewerClis] : null)
+  const [reviewerOverride, setReviewerOverride] = useState<ReviewerEntry[] | null>(profile.reviewerEntries ? [...profile.reviewerEntries] : null)
   const [activeCli, setActiveCli] = useState<OtherCli>(OTHER_CLIS[0])
 
   const nullableNumber = (value: string): number | null => value === '' ? null : Number(value)
@@ -195,6 +249,7 @@ function WorkspaceProfileEditor({
   })
   const activeDescriptor = AGENT_CLI_SETTINGS[activeCli]
   const activeConfig = otherCli[activeCli] ?? {}
+  const workspaceModels = reviewerWorkspaceModels(launch, otherCli)
 
   return (
     <div className="settings-card">
@@ -399,39 +454,28 @@ function WorkspaceProfileEditor({
       </div>
       <div className="other-cli-settings">
         <div className="other-cli-heading">
-          <strong>Hidden reviewer CLIs</strong>
-          <span>Which CLIs start hidden reviewer sessions when <code>review-and-fix-pr</code> or <code>review-meeting</code> runs in this workspace.</span>
+          <strong>Reviewers</strong>
+          <span>Hidden reviewers for <code>review-meeting</code> and <code>review-and-fix-pr</code> in this workspace.</span>
         </div>
         <label className="settings-row">
           <input
             type="checkbox"
             checked={reviewerOverride === null}
-            onChange={(event) => setReviewerOverride(event.target.checked ? null : [...defaultReviewerClis])}
+            onChange={(event) => setReviewerOverride(event.target.checked ? null : [...defaultReviewers])}
           />
-          Use default reviewer CLIs ({defaultReviewerClis.map((cli) => sessionCliLabel(cli)).join(', ')})
+          Use Desktop reviewer list
         </label>
-        {reviewerOverride !== null && (
-          <div className="settings-form-grid" role="group" aria-label={`Reviewer CLIs for ${profile.name}`}>
-            {SUPPORTED_REVIEWER_CLIS.map((cli) => {
-              const checked = reviewerOverride.includes(cli)
-              return (
-                <label key={cli} className="settings-row">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={checked && reviewerOverride.length <= 1}
-                    onChange={(event) => {
-                      const next = event.target.checked
-                        ? SUPPORTED_REVIEWER_CLIS.filter((item) => item === cli || reviewerOverride.includes(item))
-                        : reviewerOverride.filter((item) => item !== cli)
-                      if (next.length > 0) setReviewerOverride(next)
-                    }}
-                  />
-                  {sessionCliLabel(cli)}
-                </label>
-              )
-            })}
-          </div>
+        {reviewerOverride === null ? !profile.general && defaultReviewers.map(({ id, cli, model, reasoningEffort }, index) => {
+          const error = reviewerModelEffortError(model ?? workspaceModels[cli], reasoningEffort, modelCatalogs[cli])
+          return error && <p key={id} className="reviewer-settings-error" role="alert">Desktop reviewer {index + 1} ({sessionCliLabel(cli)}). {error}</p>
+        }) : (
+          <ReviewerEditor
+            entries={reviewerOverride}
+            catalogs={modelCatalogs}
+            workspaceModels={workspaceModels}
+            disabled={saving}
+            onChange={setReviewerOverride}
+          />
         )}
       </div>
       <div className="settings-actions">
@@ -460,7 +504,7 @@ function WorkspaceProfileEditor({
                 defaultResumeMode,
                 nextLaunch,
                 Object.keys(nextOtherCli).length > 0 ? nextOtherCli : undefined,
-                reviewerOverride ?? undefined,
+                reviewerOverride,
               ).then((next) => {
                 if (nextLaunch !== launch) {
                   setLaunch((current) => sameModelEffort(current, launch)
@@ -735,6 +779,8 @@ function CopilotResourcesSettings({
 
 export function SettingsApp(): JSX.Element | null {
   const [snapshot, setSnapshot] = useState<DesktopSettingsSnapshot | null>(null)
+  const [reviewerDraft, setReviewerDraft] = useState<ReviewerEntry[] | null>(null)
+  const [savingReviewers, setSavingReviewers] = useState(false)
   const [modelCatalogs, setModelCatalogs] = useState<ModelCatalogs>({})
   const [catalogRefresh, setCatalogRefresh] = useState(0)
   const lastCatalogRefresh = useRef(0)
@@ -866,7 +912,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerAllowAll'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -1094,27 +1140,24 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>Reviewers</h2>
-        <div role="group" aria-label="Default reviewer CLIs">
-          {SUPPORTED_REVIEWER_CLIS.map((cli) => {
-            const checked = snapshot.reviewerClis.includes(cli)
-            return (
-              <label key={cli} className="settings-row">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={checked && snapshot.reviewerClis.length <= 1}
-                  onChange={(event) => {
-                    const next = event.target.checked
-                      ? SUPPORTED_REVIEWER_CLIS.filter((item) => item === cli || snapshot.reviewerClis.includes(item))
-                      : snapshot.reviewerClis.filter((item) => item !== cli)
-                    if (next.length > 0) updatePreference({ reviewerClis: next })
-                  }}
-                />
-                {sessionCliLabel(cli)}
-              </label>
-            )
-          })}
-        </div>
+        <p className="settings-disclaimer">Default reviewer list for meetings and pull requests. A workspace can set its own list.</p>
+        <ReviewerEditor
+          entries={reviewerDraft ?? snapshot.reviewerEntries}
+          catalogs={modelCatalogs}
+          disabled={savingReviewers}
+          onChange={setReviewerDraft}
+        />
+        {reviewerDraft && <div className="settings-actions">
+          <button type="button" disabled={savingReviewers} onClick={() => {
+            setSavingReviewers(true)
+            void window.copilotDesktopSettings.updatePreferences({ reviewerEntries: reviewerDraft }).then((next) => {
+              refresh(next)
+              setReviewerDraft(null)
+              notify('Reviewers saved.')
+            }).catch((error: unknown) => notifyError(error, 'Reviewers not saved')).finally(() => setSavingReviewers(false))
+          }}>Save reviewers</button>
+          <button type="button" disabled={savingReviewers} onClick={() => setReviewerDraft(null)}>Cancel</button>
+        </div>}
         <label className="settings-row">
           <input
             type="checkbox"
@@ -1124,11 +1167,8 @@ export function SettingsApp(): JSX.Element | null {
           Allow all permissions in hidden reviewer sessions
         </label>
         <p className="settings-disclaimer">
-          Default CLIs launched as hidden reviewer sessions, for a pull request when <code>review-and-fix-pr</code> runs and for a
-          review meeting when <code>review-meeting</code> runs (each workspace profile can override which CLIs run). For a pull
-          request each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and posts its comments and
-          approvals directly onto the pull request; for a meeting each joins the meeting from a detached checkout of the
-          project&rsquo;s last commit, and you are asked before they start. Keeping &ldquo;Allow all permissions&rdquo; enabled
+          For pull requests, each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and
+          posts its comments and approvals directly onto the pull request. Keeping &ldquo;Allow all permissions&rdquo; enabled
           launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
           (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
           reviews do not stall on terminal prompts.
@@ -1265,7 +1305,7 @@ export function SettingsApp(): JSX.Element | null {
             key={profile.id}
             profile={profile}
             active={profile.id === snapshot.activeProfileId}
-            defaultReviewerClis={snapshot.reviewerClis}
+            defaultReviewers={snapshot.reviewerEntries}
             modelCatalogs={modelCatalogs}
             onSave={save}
           />
