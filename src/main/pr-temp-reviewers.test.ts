@@ -560,6 +560,49 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
   assert.equal(finished.seats.length, 2)
 })
 
+test('reconcileSeatWithEvidenceLoader records nothing for a launch that was cancelled while its evidence was read', async () => {
+  const registry = new TempReviewerRegistry()
+  const { group } = registry.createGroup({
+    hostTabId: 'tab-cancel',
+    hostSessionId: 'sess-cancel',
+    profileId: 'prof-cancel',
+    projectPath: '/tmp/repo',
+    repository: 'owner/repo',
+    prLabel: 'PR #51',
+    prNumber: 51,
+    prUrl: 'https://github.com/owner/repo/pull/51',
+    head: HEAD,
+    base: BASE,
+    reviewers: resolvedReviewers(['copilot']),
+    allowAll: true,
+    origin: 'https://github.com/owner/repo.git',
+  })
+  group.stage = 'active'
+  const seat = group.requiredSeats.get('copilot')!
+  seat.lifecycle = 'running'
+  let cancelled = false
+  // The exit arrived before the Retry; the Retry cancels the launch while the forge is read.
+  const result = await reconcileSeatWithEvidenceLoader({
+    registry,
+    group,
+    seat,
+    trigger: 'crashed',
+    isSuperseded: () => cancelled,
+    loadEvidence: async () => {
+      cancelled = true
+      return { supported: true, verified: null }
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(seat.lifecycle, 'running', 'not marked failed for a launch that was taken over')
+  assert.equal(seat.needsAttention, false)
+  // Already cancelled when the event comes in: nothing is read or recorded.
+  let read = false
+  await reconcileSeatWithEvidenceLoader({ registry, group, seat, trigger: 'crashed', isSuperseded: () => true, loadEvidence: async () => { read = true; return { supported: false } } })
+  assert.equal(read, false)
+  assert.equal(seat.lifecycle, 'running')
+})
+
 test('reconcileSeatWithEvidenceLoader refuses to overwrite timed-out or round-advanced seats when in-flight verification resolves or rejects late', async () => {
   const registry = new TempReviewerRegistry()
   const { group } = registry.createGroup({

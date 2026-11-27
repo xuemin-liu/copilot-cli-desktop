@@ -1214,6 +1214,8 @@ export async function reconcileSeatWithEvidenceLoader(options: {
   expectedRound?: number
   expectedGeneration?: string
   isShuttingDown?: () => boolean
+  /** True once whoever is taking the seat over (a round or a Retry) has cancelled the launch this event came from. */
+  isSuperseded?: () => boolean
   onClearTimer?: (seat: TempReviewerSeat) => void
   onBroadcast?: () => void
   loadEvidence: () => Promise<
@@ -1227,6 +1229,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
     seat,
     trigger,
     isShuttingDown = () => false,
+    isSuperseded = () => false,
     onClearTimer,
     onBroadcast,
     loadEvidence,
@@ -1237,6 +1240,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
   const isGroupEnded = (): boolean => group.stage === 'ended'
   const isStillActiveInRound = (): boolean => (
     !isShuttingDown()
+    && !isSuperseded()
     && !isGroupEnded()
     && group.round === expectedRound
     && group.requiredSeats.get(seat.id) === seat
@@ -1246,6 +1250,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
 
   if (
     isShuttingDown()
+    || isSuperseded()
     || isGroupEnded()
     || group.round !== expectedRound
     || group.requiredSeats.get(seat.id) !== seat

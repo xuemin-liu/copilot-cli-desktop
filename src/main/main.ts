@@ -3963,6 +3963,8 @@ async function reconcileTempReviewerSeatEvidence(
       expectedRound,
       expectedGeneration,
       isShuttingDown: shuttingDown,
+      // Rechecked after the forge read too: a Retry can cancel the launch while this event is being reconciled.
+      isSuperseded: () => tempSeatLaunchCancelled(seat),
       onClearTimer: clearTempSeatTimer,
       onBroadcast: broadcastState,
       loadEvidence: async () => {
