@@ -11,11 +11,12 @@ import {
   provisionExistingCliPrWorkflowSkills,
   provisionPrWorkflowSkillsForCli,
 } from './pr-workflow-skills.js'
+import { GUEST_MCP_TOOLS } from './meeting-guest-mcp.js'
 import { SESSION_CLIS } from './session-cli.js'
 
 const BUNDLED_PR_TOOLS = resolve('resources', 'pr-workflows')
 
-test('provisions review-pr, fix-pr, and review-and-fix-pr across Copilot, Claude, Codex, and Antigravity', async (t) => {
+test('provisions the four bundled skills across Copilot, Claude, Codex, and Antigravity', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'pr-workflow-skills-'))
   t.after(() => rm(root, { recursive: true, force: true }))
 
@@ -228,4 +229,35 @@ test('every bundled skill ships a SKILL.md named after it, and review-meeting na
   assert.match(meeting, /Never start reviewer CLIs yourself/)
   assert.match(meeting, /Tell the person the meeting id at once/)
   assert.match(meeting, /\*\*Peek\*\*, \*\*Retry\*\* and \*\*Dismiss\*\*/)
+})
+
+test('bundled skills name only helper flags, meeting tools and paths that exist', async () => {
+  const tools = resolve('resources/pr-workflows')
+  const scripts = ['pr-poll.mjs', 'pr-approve.mjs', 'pr-seat-receipt.mjs'] as const
+  const sources = new Map<string, string>()
+  for (const script of scripts) sources.set(script, await readFile(join(tools, script), 'utf8'))
+  // A flag a script reads is written there as a quoted string: flag('--snapshot'), opt('--kind'), new Set(['--origin']).
+  const knows = (script: string, flag: string): boolean => sources.get(script)!.includes(`'${flag}'`)
+  const toolNames = new Set<string>(GUEST_MCP_TOOLS.map((tool) => tool.name))
+
+  for (const name of PR_WORKFLOW_SKILL_NAMES) {
+    const text = await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8')
+    // Only what a skill writes as code: a command that names a helper script, or a flag on its own. Git's and a
+    // package manager's flags stand in commands that name no helper script, and are not looked at.
+    for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) {
+      const named = scripts.filter((script) => span!.includes(script))
+      const checked = named.length > 0 ? named : span!.startsWith('--') ? scripts : []
+      if (checked.length === 0) continue
+      for (const [flag] of span!.matchAll(/--[a-z][a-z-]*/g)) {
+        assert.ok(checked.some((script) => knows(script, flag)), `${name}: \`${span}\` passes ${flag}, which ${checked.join(' / ')} does not read`)
+      }
+    }
+    for (const [tool] of text.matchAll(/\b(?:meeting|pr_reviewers)_[a-z_]+\b/g)) {
+      assert.ok(toolNames.has(tool), `${name} names ${tool}, which is not a copilot-meeting tool`)
+    }
+    // An installed skill is one SKILL.md in a CLI's skills folder, in any project: a path into this repository is not there.
+    assert.doesNotMatch(text, /resources[\\/]pr-workflows/, `${name} points into this repository`)
+    // Inside a linked worktree .git is a file, so a worktree cannot be added under it.
+    assert.doesNotMatch(text, /worktree add[^`\n]*\s["']?\.git[\\/]/, `${name} adds a worktree under a plain .git path`)
+  }
 })

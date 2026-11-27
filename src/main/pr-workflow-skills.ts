@@ -218,7 +218,7 @@ async function provisionSingleSkill(
 const inFlightBySkillsDir = new Map<string, Promise<void>>()
 
 /**
- * Ensures `review-pr`, `fix-pr`, and `review-and-fix-pr` from `prToolsDir/skills` are provisioned in `cli`'s global
+ * Ensures every skill in `PR_WORKFLOW_SKILL_NAMES` from `prToolsDir/skills` is provisioned in `cli`'s global
  * user skills directory so slash commands and `Skill(...)` invocations work across Copilot CLI, Claude Code, Codex CLI,
  * and Antigravity CLI.
  */
@@ -245,7 +245,7 @@ export function provisionPrWorkflowSkillsForCli(
 }
 
 /**
- * At Desktop startup, provisions the 3 PR workflow skills into every CLI config directory that already exists on disk,
+ * At Desktop startup, provisions the four bundled skills into every CLI config directory that already exists on disk,
  * without creating config directories for CLIs the user has never installed.
  */
 export async function provisionExistingCliPrWorkflowSkills(
