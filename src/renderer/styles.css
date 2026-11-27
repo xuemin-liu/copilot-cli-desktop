@@ -725,6 +725,12 @@ button:disabled {
   scrollbar-width: none;
 }
 
+/* Keep xterm's draggable scrollbar available when the active buffer has history. */
+.terminal-viewport > .terminal-has-scrollback > .xterm-scrollable-element > .scrollbar.vertical {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .terminal-copy-status {
   position: absolute;
   z-index: 5;
