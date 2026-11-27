@@ -128,6 +128,9 @@ One pull request each. Tests travel with the code they cover.
   and never recorded takes the seat out too; the first prompt is marked as the desktop's turn (it authorizes nothing),
   and the seat joins only when the conversation it was typed into has recorded it; a tab that changes conversation
   fails or leaves its seat with that reason; the consent names Copilot's model provider; the helper's `status` lists the
-  hidden reviewers. Known limit, left open: a Copilot seat that took a message and never ends that turn (a permission
-  prompt with allow-all off) holds that one round to its timeout; the next message cannot be typed behind it, and the
-  deadline then takes the seat out.
+  hidden reviewers.
+- Phase 2, review round 2: a Copilot seat that took a message and never ends that turn (a permission prompt with
+  allow-all off) is not covered by the delivery deadline, which does not count a message waiting behind a running turn.
+  So a hidden Copilot seat goes by the hub's rule for the other hidden seats: two rounds in a row without a reply take
+  it out, each of those rounds running to its timeout. An ordinary Copilot tab is still the person's to judge. A seat is
+  the conversation its launch started: a tab that changes to another one before the first prompt fails the seat.
