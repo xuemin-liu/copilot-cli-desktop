@@ -70,6 +70,10 @@ test('reviewerClis and reviewerAllowAll default cleanly and round-trip global an
   assert.equal(normalizeDesktopConfig({}).reviewerAllowAll, true)
   for (const value of ['false', 0, null, {}]) assert.equal(normalizeDesktopConfig({ reviewerAllowAll: value }).reviewerAllowAll, true, String(value))
   assert.equal(normalizeDesktopConfig({ reviewerAllowAll: false }).reviewerAllowAll, false)
+  assert.equal(DEFAULT_DESKTOP_CONFIG.reviewerStartPrompt, true)
+  assert.equal(normalizeDesktopConfig({}).reviewerStartPrompt, true)
+  for (const value of ['false', 0, null, {}]) assert.equal(normalizeDesktopConfig({ reviewerStartPrompt: value }).reviewerStartPrompt, true, String(value))
+  assert.equal(normalizeDesktopConfig({ reviewerStartPrompt: false }).reviewerStartPrompt, false)
   assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity', 'codex', 'claude'] }).reviewerClis, ['claude', 'codex', 'antigravity'])
   assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['unknown-cli'] }).reviewerClis, ['copilot'])
   await withTempFile(async filename => {
@@ -455,6 +459,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     turnCheckpoints: config.turnCheckpoints,
     reviewerClis: [...config.reviewerClis],
     reviewerAllowAll: config.reviewerAllowAll,
+    reviewerStartPrompt: config.reviewerStartPrompt,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
   // Turning the tray off also moved close behavior back to asking.

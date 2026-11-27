@@ -4414,9 +4414,12 @@ async function askTempReviewerConsent(
   requireExplicitConsent: boolean,
   allowAll: boolean,
   warnings: readonly string[] = [],
+  // The pull request is not verified as the person's own, or it changes repo-local CLI/MCP configuration: always asked.
+  untrusted = true,
 ): Promise<boolean> {
   const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
   if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && warnings.length === 0) return true
+  if (!untrusted && !desktopConfig.reviewerStartPrompt) return true
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -4731,7 +4734,8 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings)
+      const untrusted = !verifiedOwnPull || configInspection.modifiedAgentConfigs.length > 0
+      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings, untrusted)
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -5117,6 +5121,8 @@ async function askMeetingReviewerConsent(meetingId: string, detail: string, stil
   try {
     // It may have waited behind another question: a run whose meeting closed meanwhile asks nothing.
     if (!stillWanted()) return false
+    // Turned off in Settings: reviewers of the person's own project start without the question.
+    if (!desktopConfig.reviewerStartPrompt) return true
     const owner = mainWindow
     if (!owner || owner.isDestroyed()) return false
     if (!owner.isVisible()) owner.show()
@@ -5202,7 +5208,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
     meetingHub.release(meetingId)
     void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
   })
-  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. ${desktopConfig.reviewerStartPrompt ? 'The person is being asked to allow them. ' : ''}Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
 }
 
 async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
@@ -8038,6 +8044,7 @@ function settingsPreferences(): DesktopPreferences {
     turnCheckpoints: desktopConfig.turnCheckpoints,
     reviewerClis: [...desktopConfig.reviewerClis],
     reviewerAllowAll: desktopConfig.reviewerAllowAll,
+    reviewerStartPrompt: desktopConfig.reviewerStartPrompt,
   }
 }
 
@@ -9228,6 +9235,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'turnCheckpoints',
     'reviewerClis',
     'reviewerAllowAll',
+    'reviewerStartPrompt',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -9252,6 +9260,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
     || ('turnCheckpoints' in values && typeof values.turnCheckpoints !== 'boolean')
     || ('reviewerAllowAll' in values && typeof values.reviewerAllowAll !== 'boolean')
+    || ('reviewerStartPrompt' in values && typeof values.reviewerStartPrompt !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -9307,6 +9316,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (typeof values.turnCheckpoints === 'boolean') desktopConfig.turnCheckpoints = values.turnCheckpoints
     if (validatedReviewerClis) desktopConfig.reviewerClis = validatedReviewerClis
     if (typeof values.reviewerAllowAll === 'boolean') desktopConfig.reviewerAllowAll = values.reviewerAllowAll
+    // Read when reviewers are about to start, so a start already waiting on its question still asks.
+    if (typeof values.reviewerStartPrompt === 'boolean') desktopConfig.reviewerStartPrompt = values.reviewerStartPrompt
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

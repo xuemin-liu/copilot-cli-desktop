@@ -51,12 +51,14 @@ export interface DesktopConfig {
   reviewerClis: ReviewerCli[]
   /** Launch hidden temporary PR reviewer sessions with allow-all flags so background reviews do not block on prompts. */
   reviewerAllowAll: boolean
+  /** Ask before hidden reviewers start for a meeting or a pull request. Off: they start at once, unless the pull request is not verified as the person's own or changes repo-local CLI/MCP configuration. */
+  reviewerStartPrompt: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll' | 'reviewerStartPrompt'
 >
 
 function samePrefValue(a: unknown, b: unknown): boolean {
@@ -144,6 +146,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   turnCheckpoints: true,
   reviewerClis: [...DEFAULT_REVIEWER_CLIS],
   reviewerAllowAll: true,
+  reviewerStartPrompt: true,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -408,6 +411,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     turnCheckpoints: value.turnCheckpoints !== false,
     reviewerClis: normalizeReviewerClis(value.reviewerClis),
     reviewerAllowAll: value.reviewerAllowAll !== false,
+    reviewerStartPrompt: value.reviewerStartPrompt !== false,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

@@ -4,7 +4,8 @@
 // Covered: a Copilot session hosts with `start -Reviewers` on the meeting helper (consent, the hidden seat, its review
 // delivered to the host, the helper's `status` listing the seats, `end`); a joined seat whose tab changes to another
 // conversation leaves the meeting with that reason; a seat that takes a message and never answers is taken out after
-// two rounds without a reply. Not covered: a conversation change while the first prompt's recipient is being verified.
+// two rounds without a reply. With E2E_NO_PROMPT=1, "Ask before starting hidden reviewers" is off and case 4 checks
+// that the seat starts and joins without the question. Not covered: a conversation change while the first prompt's recipient is being verified.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -175,13 +176,14 @@ if (!process.versions.electron) {
     git('add', '.')
     git('commit', '-q', '-m', 'initial')
 
+    const noPrompt = process.env.E2E_NO_PROMPT === '1'
     const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     // Full access: the host's model runs the meeting helper in its shell, and nobody answers an approval here.
     const project = createWorkspaceProfile(repo, 'full-access')
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), {
       ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['copilot'], reviewerAllowAll: true,
-      meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
+      reviewerStartPrompt: !noPrompt, meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
       provider: { type: 'openai', baseUrl: process.env.E2E_MODEL_URL, model: 'ui-check-model', offline: true },
     })
 
@@ -250,9 +252,12 @@ if (!process.versions.electron) {
     const only = process.env.E2E_ONLY ? new Set(process.env.E2E_ONLY.split(',')) : null
     const wanted = (number) => !only || only.has(String(number))
     const meetings = []
-    if (wanted(1)) await copilotHost()
-    if (wanted(2)) await conversationSwitch()
-    if (wanted(3)) await silentSeat()
+    if (noPrompt) await withoutQuestion()
+    else {
+      if (wanted(1)) await copilotHost()
+      if (wanted(2)) await conversationSwitch()
+      if (wanted(3)) await silentSeat()
+    }
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings }, null, 2))
     app.exit(0)
 
@@ -282,6 +287,20 @@ if (!process.versions.electron) {
     await allClosed('the host\'s hidden tab and checkout to go')
     assert.equal(consents, 1, 'the person was asked once for the whole run, start to teardown')
     meetings.push(hosted.id)
+    }
+
+    async function withoutQuestion() {
+    // 4. The question is turned off in Settings: the seat starts and joins, and nobody is asked.
+    const hostD = await client('claude-code')
+    const answerD = (await start(hostD, 'no question')).text
+    assert.doesNotMatch(answerD, /being asked to allow them/, 'the host is not told the person is being asked')
+    const meetingD = meetingIdOf(answerD)
+    await seatIn(meetingD, 'the seat to join without a question')
+    assert.equal(consents, 0, 'nobody was asked')
+    await hostD('meeting_end')
+    await until('the run without a question to end', async () => (await groupOf(meetingD))?.stage === 'ended')
+    await allClosed('the seat\'s tab and checkout to go')
+    meetings.push(meetingD)
     }
 
     async function conversationSwitch() {

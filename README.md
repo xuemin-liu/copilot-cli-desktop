@@ -335,7 +335,7 @@ A meeting lets several sessions review one session's plan or local changes witho
   votes are not discussed.
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
   answers your own message. [Hidden reviewers](#hidden-reviewers-the-desktop-starts) join because you allowed them for
-  that meeting. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
+  that meeting, or turned that question off. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
   on what it reads, so prefer Restricted reviewers.
 - The shared patch gets the same protection as the Git panel's prompts: files that hold secrets by convention (`.env`,
   keys, credentials) are named but their changes are withheld, and values that look like credentials are masked. This
@@ -361,6 +361,10 @@ desktop starts one hidden session for each CLI chosen under **Settings → Revie
 - **You are asked first**, once per meeting, and the default answer is no. The question names the reviewers, the commit
   they get, that later rounds and attachments are covered, and what their permissions allow. Decline, and the meeting
   stays open for reviewers who join by id.
+  Turn off **Settings → Reviewers → Ask before starting hidden reviewers** to skip the question: reviewers then start as
+  soon as your agent asks for them. Because the meeting tools need no sign-in, any program on this computer could then
+  start them too. For a pull request the question still comes when the pull request is not verified as opened by your
+  GitHub account, or when it adds or changes repo-local CLI or MCP configuration.
 - **Round 1 waits** until each hidden reviewer has joined or failed to, so a fast reviewer does not answer alone. Each
   reviewer has four minutes from its own start to join; your answer to the question and the preparation of the
   checkouts come before that.

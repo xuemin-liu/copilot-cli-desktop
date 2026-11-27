@@ -866,7 +866,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll' | 'reviewerStartPrompt'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -1128,10 +1128,24 @@ export function SettingsApp(): JSX.Element | null {
           review meeting when <code>review-meeting</code> runs (each workspace profile can override which CLIs run). For a pull
           request each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and posts its comments and
           approvals directly onto the pull request; for a meeting each joins the meeting from a detached checkout of the
-          project&rsquo;s last commit, and you are asked before they start. Keeping &ldquo;Allow all permissions&rdquo; enabled
+          project&rsquo;s last commit. Keeping &ldquo;Allow all permissions&rdquo; enabled
           launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
           (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
           reviews do not stall on terminal prompts.
+        </p>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.reviewerStartPrompt}
+            onChange={(event) => updatePreference({ reviewerStartPrompt: event.target.checked })}
+          />
+          Ask before starting hidden reviewers
+        </label>
+        <p className="settings-disclaimer">
+          On by default: each review meeting and pull request review asks you before its hidden reviewers start. Turned off, they
+          start as soon as your agent asks for them. The meeting tools need no sign-in, so a program on this computer could then
+          start reviewers too. You are still asked for a pull request not verified as opened by your GitHub account, and for one
+          that adds or changes repo-local CLI or MCP configuration.
         </p>
       </section>
 
