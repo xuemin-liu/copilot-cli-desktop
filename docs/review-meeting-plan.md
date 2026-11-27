@@ -113,3 +113,24 @@ One pull request each. Tests travel with the code they cover.
   minutes) runs out. A seat's reviewer runs in its CLI's one-shot mode and stays in one turn for the whole meeting.
   Copilot CLI in the reviewer settings is reported as a failed seat until phase 2, and the helper flag for a Copilot
   host comes with it. A voter roster is not saved: a vote restored after a restart counts whoever is back.
+- Phase 1, review (three reviewers, five rounds): the permission mode is the run's, not the setting's; a vote whose last
+  voter left goes back to the host (an existing rule changed for all meetings: such a proposal is no longer put to the
+  next reviewer who joins); a participant not asked in a round is left out of its replies; ending a run takes every seat
+  out of the meeting and stops every session before any teardown is awaited; hidden reviewer slots are counted once for
+  pull requests and meetings. Known limit, left open: a Retry of a pull request reviewer seat can still race a meeting
+  start for the last slot while its old checkout is being removed.
+- Phase 2, built: a Copilot seat is an interactive session in the seat's checkout. It gets one first prompt (Copilot
+  stores a session only then, and the desktop types only into a session it can prove is this one), and the desktop
+  joins it once the delivery pump would accept a message. Starting does not wait for that join, so the other seats are
+  not held up. A message that cannot be typed into it for three minutes takes the seat out of the meeting with the
+  reason; its tab stays for Peek. A Copilot host asks for reviewers with `start -Reviewers` on the meeting helper.
+- Phase 2, review round 1: the delivery deadline of a Copilot seat asks what the hub asks, so a message that was typed
+  and never recorded takes the seat out too; the first prompt is marked as the desktop's turn (it authorizes nothing),
+  and the seat joins only when the conversation it was typed into has recorded it; a tab that changes conversation
+  fails or leaves its seat with that reason; the consent names Copilot's model provider; the helper's `status` lists the
+  hidden reviewers.
+- Phase 2, review round 2: a Copilot seat that took a message and never ends that turn (a permission prompt with
+  allow-all off) is not covered by the delivery deadline, which does not count a message waiting behind a running turn.
+  So a hidden Copilot seat goes by the hub's rule for the other hidden seats: two rounds in a row without a reply take
+  it out, each of those rounds running to its timeout. An ordinary Copilot tab is still the person's to judge. A seat is
+  the conversation its launch started: a tab that changes to another one before the first prompt fails the seat.
