@@ -5899,13 +5899,18 @@ async function advanceGroupTempReviewers(
         }
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
+          // A newer round may take the seat over during any wait below: after each one, this round stops before it
+          // cancels or closes anything that round started.
+          const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.cli) !== seat
           await stopAndCloseTempReviewerTabOnly(seat)
+          if (superseded()) return
           // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
           // reservation) before its area is touched.
           await settleTempSeatLaunch(seat)
+          if (superseded()) return
           // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
           await stopAndCloseTempReviewerTabOnly(seat)
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
+          if (superseded()) return
           if (!profile) {
             tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
             broadcastState()
