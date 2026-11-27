@@ -4484,6 +4484,9 @@ async function launchTempReviewerSeatNow(
     // A newer generation's round timer is not this launch's to clear.
     if (seat.generation === expectedGeneration) clearTempSeatTimer(seat)
     if (allocatedTabId) {
+      // Detach the seat from this tab first: its process may report an exit while it is stopped, and that exit is not
+      // a verdict on the seat whoever cancelled this launch now owns.
+      if (seat.generation === expectedGeneration && seat.tabId === allocatedTabId) seat.tabId = null
       const managed = managedTabs.get(allocatedTabId)
       const pid = managed?.session.processId ?? null
       if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
