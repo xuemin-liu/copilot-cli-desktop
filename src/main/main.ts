@@ -4084,6 +4084,8 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
         && group.requiredSeats.get(seat.id) === seat
         && seat.generation === expectedGen
         && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
+        // A generation being replaced (by a round or a Retry) times out as nothing: its successor has its own timer.
+        && !tempSeatLaunchCancelled(seat)
       )
       if (!isSeatStillActive()) {
         return
