@@ -4067,7 +4067,42 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
   tempSeatTimers.set(key, timer)
 }
 
+/** Each seat's launch still in flight, settled either way: a round that reuses or replaces the seat waits for it first. */
+const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, Promise<void>>()
+
 async function launchTempReviewerSeat(
+  group: TempReviewerGroup,
+  seat: TempReviewerSeat,
+  profile: WorkspaceProfile,
+  options?: { reuseArea?: boolean },
+): Promise<void> {
+  const run = launchTempReviewerSeatNow(group, seat, profile, options)
+  const settled = run.then(() => {}, () => {})
+  tempSeatLaunchesInFlight.set(seat, settled)
+  try {
+    await run
+  } finally {
+    if (tempSeatLaunchesInFlight.get(seat) === settled) tempSeatLaunchesInFlight.delete(seat)
+  }
+}
+
+/**
+ * Wait up to `ms` for a seat's earlier launch, cleanup included, to finish. False when it is still running: the caller
+ * must not reuse that launch's area then.
+ */
+async function settleTempSeatLaunch(seat: TempReviewerSeat, ms = 60_000): Promise<boolean> {
+  const inFlight = tempSeatLaunchesInFlight.get(seat)
+  if (!inFlight) return true
+  let timer: NodeJS.Timeout | undefined
+  const done = await Promise.race([
+    inFlight.then(() => true),
+    new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), ms) }),
+  ])
+  clearTimeout(timer)
+  return done
+}
+
+async function launchTempReviewerSeatNow(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
@@ -4379,7 +4414,8 @@ async function launchTempReviewerSeat(
     if (isSeatCancelled()) throw new Error('Temporary review stopped')
     broadcastState()
   } catch (error) {
-    clearTempSeatTimer(seat)
+    // A newer generation's round timer is not this launch's to clear.
+    if (seat.generation === expectedGeneration) clearTempSeatTimer(seat)
     if (allocatedTabId) {
       const managed = managedTabs.get(allocatedTabId)
       const pid = managed?.session.processId ?? null
@@ -5863,6 +5899,9 @@ async function advanceGroupTempReviewers(
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
           await stopAndCloseTempReviewerTabOnly(seat)
+          // An earlier launch of this seat still setting up finishes (or cleans up) before its area is touched; one that
+          // does not finish in time keeps its area, and this round starts from a fresh one.
+          const earlierSettled = await settleTempSeatLaunch(seat)
           if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
           if (!profile) {
             tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
@@ -5870,7 +5909,10 @@ async function advanceGroupTempReviewers(
             return
           }
           let canReuseWorktree = false
-          if (!requiresConsent && seat.area && seat.launchId) {
+          if (!earlierSettled) {
+            seat.area = null
+            seat.launchId = ''
+          } else if (!requiresConsent && seat.area && seat.launchId) {
             const refreshed = await refreshAgnosticReviewWorktree(
               runner,
               seat.area,
