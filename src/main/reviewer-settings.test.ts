@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildOtherCliLaunchArgs } from './agent-cli-settings.js'
-import { prefetchReviewerCatalogs, resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
+import { queueConfigWrite } from './desktop-config.js'
+import {
+  desktopReviewerWorkspaces, resolveReviewerEntries, reviewerCatalogClis, reviewerWorkspaceModels, saveWithReviewerCatalogs,
+  validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry,
+} from './reviewer-settings.js'
 import { buildSessionLaunchArgs, DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 
 test('reviewer model and effort resolve together against the reviewed workspace', async () => {
@@ -71,12 +75,60 @@ test('model catalog prefetch reads each CLI with a model to check once', async (
     return [{ id: 'full', label: 'Full', efforts: ['low'] }]
   }
   const workspace = reviewerWorkspaceModels(DEFAULT_SESSION_LAUNCH_CONFIG, { codex: { model: 'full' } })
-  const catalogs = await prefetchReviewerCatalogs(entries, resolve, [workspace])
+  await saveWithReviewerCatalogs(
+    () => ({ required: reviewerCatalogClis(entries, [workspace]), known: {}, copilotRevision: 0 }),
+    resolve,
+    async (catalogsForWrite) => {
+      assert.throws(() => validateReviewerModelOverrides(entries, catalogsForWrite(), workspace), /full does not support high/)
+    },
+  )
   assert.deepEqual(calls, ['codex'], 'a second Codex row does not trigger a duplicate lookup and Copilot has no model')
-  assert.throws(() => validateReviewerModelOverrides(entries, catalogs, workspace), /full does not support high/)
-  const noModel = await prefetchReviewerCatalogs([entries[3]!], resolve, [workspace])
-  assert.deepEqual(noModel, {})
-  assert.deepEqual(calls, ['codex'], 'a model-less workspace never waits for a catalog probe')
+  assert.deepEqual(reviewerCatalogClis([entries[3]!], [workspace]), [])
+})
+
+test('a queued reviewer save checks workspace models added while its catalog probe was pending', { timeout: 2_000 }, async () => {
+  const entries: ReviewerEntry[] = [
+    { id: 'one', cli: 'claude', model: 'sonnet', reasoningEffort: 'high' },
+    { id: 'two', cli: 'codex', reasoningEffort: 'high' },
+  ]
+  const profile = { name: 'Docs', launch: DEFAULT_SESSION_LAUNCH_CONFIG, otherCli: { codex: { model: '' } } }
+  let queue = Promise.resolve()
+  const persist = (change: () => void) => {
+    const write = queueConfigWrite(queue, async () => change())
+    queue = write.queue
+    return write.operation
+  }
+  let finishClaude!: () => void
+  const claudePending = new Promise<void>((resolve) => { finishClaude = resolve })
+  const probes: string[] = []
+  let saved = false
+  const saving = saveWithReviewerCatalogs(
+    () => ({
+      required: reviewerCatalogClis(entries, desktopReviewerWorkspaces([profile]).map(({ models }) => models)),
+      known: {},
+      copilotRevision: 0,
+    }),
+    async (cli) => {
+      probes.push(cli)
+      if (cli === 'claude') {
+        await claudePending
+        return []
+      }
+      // Unrelated writes can still proceed while the newly needed catalog loads.
+      await persist(() => {})
+      return [{ id: 'small', label: 'Small', efforts: ['low'] }]
+    },
+    (catalogsForWrite) => persist(() => {
+      validateDesktopReviewerModels(entries, [profile], catalogsForWrite())
+      saved = true
+    }),
+  )
+  assert.deepEqual(probes, ['claude'])
+  await persist(() => { profile.otherCli.codex.model = 'small' })
+  finishClaude()
+  await assert.rejects(saving, /Reviewer 2 in the Desktop list for workspace "Docs": small does not support high/)
+  assert.deepEqual(probes, ['claude', 'codex'])
+  assert.equal(saved, false)
 })
 
 test('catalog validation reports the incompatible reviewer before saving', () => {

@@ -91,19 +91,61 @@ export function desktopReviewerWorkspaces(
   }))
 }
 
-export async function prefetchReviewerCatalogs(
+export function reviewerCatalogClis(
   entries: readonly ReviewerEntry[],
-  getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
   workspaceModels: readonly Readonly<Record<ReviewerCli, string>>[],
-): Promise<ReviewerModelCatalogs> {
+): ReviewerCli[] {
   const clis = new Set<ReviewerCli>()
   for (const { cli, model, reasoningEffort } of entries) {
     if (reasoningEffort && reasoningEffort !== 'default' && (model || workspaceModels.some((models) => models[cli]?.trim()))) {
       clis.add(cli)
     }
   }
-  const catalogs = await Promise.all([...clis].map(async (cli) => [cli, await getCatalog(cli)] as const))
-  return Object.fromEntries(catalogs)
+  return [...clis]
+}
+
+export async function saveWithReviewerCatalogs(
+  current: () => { required: readonly ReviewerCli[]; known: ReviewerModelCatalogs; copilotRevision: number },
+  load: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
+  save: (catalogsForWrite: () => ReviewerModelCatalogs) => Promise<void>,
+): Promise<void> {
+  const fetched: ReviewerModelCatalogs = {}
+  let fetchedCopilotRevision: number | undefined
+  let firstAttempt = true
+  const retry = new Error('Reviewer catalog requirements changed before the Settings write')
+
+  function readCurrent() {
+    const { required, known, copilotRevision } = current()
+    if (copilotRevision !== fetchedCopilotRevision) delete fetched.copilot
+    // A newer resolved catalog takes precedence. An empty result still counts as a probe.
+    const catalogs = { ...fetched, ...known }
+    return { catalogs, copilotRevision, required, missing: required.filter((cli) => catalogs[cli] === undefined) }
+  }
+
+  while (true) {
+    const { copilotRevision, required, missing } = readCurrent()
+    // On the first pass, also wait for any refresh already running for the required CLIs.
+    const clisToFetch = firstAttempt ? required : missing
+    firstAttempt = false
+    if (clisToFetch.length) {
+      await Promise.all(clisToFetch.map(async (cli) => {
+        fetched[cli] = await load(cli)
+      }))
+    }
+    fetchedCopilotRevision = copilotRevision
+    try {
+      await save(() => {
+        const { catalogs, missing } = readCurrent()
+        // Earlier writes can add a model or change which reviewer list a workspace inherits.
+        // Leave the write queue before starting any additional probes.
+        if (missing.length) throw retry
+        return catalogs
+      })
+      return
+    } catch (error) {
+      if (error !== retry) throw error
+    }
+  }
 }
 
 export function validateReviewerModelOverrides(
