@@ -145,7 +145,7 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { resolveReviewerEntries, reviewerWorkspaceModels, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer } from './reviewer-settings.js'
+import { resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer } from './reviewer-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
@@ -1505,20 +1505,22 @@ function dockSessionTab(tabId: string): DesktopState {
 
 /**
  * `change`, when given, runs when this write's turn comes, right before the config is copied, and
- * `onFailure` undoes it before the next queued write copies the config: a change that fails to save
- * is never written by another write.
+ * `onFailure` undoes it before the next queued write copies the config. An optional validation runs on the same turn
+ * so it sees the latest saved settings.
  */
-async function persistConfig(change?: () => void, onFailure?: () => void): Promise<void> {
+async function persistConfig(change?: () => void, onFailure?: () => void, validate?: () => Promise<void>): Promise<void> {
   if (configWritesBlocked) {
+    if (validate) await validate()
     change?.()
     return
   }
+  const write = (): Promise<void> => {
+    change?.()
+    return writeDesktopConfig(configPath(), structuredClone(desktopConfig))
+  }
   const { operation, queue } = queueConfigWrite(
     configWriteQueue,
-    () => {
-      change?.()
-      return writeDesktopConfig(configPath(), structuredClone(desktopConfig))
-    },
+    () => validate ? validate().then(write) : write(),
     onFailure,
   )
   configWriteQueue = queue
@@ -7520,22 +7522,28 @@ async function updateWorkspaceProfile(
   // Check the submitted settings before changing anything, so a malformed value fails the save instead of being dropped.
   const validatedOtherCli = validateOtherCliConfig(otherCli, profile.otherCli)
   const validatedLaunch = normalizeSessionLaunchConfig(launch)
-  const validatedReviewerEntries = reviewerEntries === undefined ? profile.reviewerEntries : reviewerEntries === null ? undefined : validateReviewerEntries(reviewerEntries)
-  if (validatedReviewerEntries) {
-    const workspaceModels = reviewerWorkspaceModels(validatedLaunch, validatedOtherCli)
-    await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog, workspaceModels)
+  let validatedReviewerEntries = reviewerEntries == null ? undefined : validateReviewerEntries(reviewerEntries)
+  const workspaceModels = reviewerWorkspaceModels(validatedLaunch, validatedOtherCli)
+  await persistConfig(() => {
     assertWorkspaceListed(profile)
-  }
-  profile.name = normalizedName
-  profile.permissionPreset = permissionPreset
-  profile.defaultResumeMode = defaultResumeMode
-  profile.launch = validatedLaunch
-  if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
-  else delete profile.otherCli
-  if (validatedReviewerEntries && validatedReviewerEntries.length > 0) profile.reviewerEntries = validatedReviewerEntries
-  else delete profile.reviewerEntries
-  syncWorkspaceState()
-  await persistConfig()
+    profile.name = normalizedName
+    profile.permissionPreset = permissionPreset
+    profile.defaultResumeMode = defaultResumeMode
+    profile.launch = validatedLaunch
+    if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
+    else delete profile.otherCli
+    if (validatedReviewerEntries) profile.reviewerEntries = validatedReviewerEntries
+    else delete profile.reviewerEntries
+    syncWorkspaceState()
+  }, undefined, () => {
+    if (reviewerEntries === undefined) validatedReviewerEntries = profile.reviewerEntries
+    return validateReviewerModelOverrides(
+      validatedReviewerEntries ?? (profile.general ? [] : desktopConfig.reviewerEntries),
+      getModelCatalog,
+      workspaceModels,
+      validatedReviewerEntries ? undefined : 'the Desktop list',
+    )
+  })
   broadcastState()
 }
 
@@ -9308,7 +9316,6 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     throw new Error('Invalid desktop preferences')
   }
   const validatedReviewerEntries = 'reviewerEntries' in values ? validateReviewerEntries(values.reviewerEntries) : null
-  if (validatedReviewerEntries) await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog)
   if (
     ('closeBehavior' in values && !isCloseBehavior(values.closeBehavior))
     || ('trayEnabled' in values && typeof values.trayEnabled !== 'boolean')
@@ -9399,7 +9406,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
     updateTrayVisibility()
     broadcastSettingsPreferences()
-  })
+  }, validatedReviewerEntries ? () => validateDesktopReviewerModels(validatedReviewerEntries, desktopConfig.profiles, getModelCatalog) : undefined)
   broadcastSettingsPreferences()
   if (overridesChanged) broadcastState()
   if (maxTabsChanged) { syncWorkspaceState(); broadcastState(); refreshMenus() }

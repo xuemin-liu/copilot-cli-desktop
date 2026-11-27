@@ -84,6 +84,7 @@ export async function validateReviewerModelOverrides(
   entries: readonly ReviewerEntry[],
   getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
   workspaceModels?: Readonly<Record<ReviewerCli, string>>,
+  listLabel?: string,
 ): Promise<void> {
   const errors = await Promise.all(entries.map(async ({ cli, model, reasoningEffort }) => {
     const effectiveModel = model ?? workspaceModels?.[cli]
@@ -92,7 +93,24 @@ export async function validateReviewerModelOverrides(
       : null
   }))
   const invalid = errors.findIndex((error) => error !== null)
-  if (invalid !== -1) throw new Error(`Reviewer ${invalid + 1}: ${errors[invalid]}`)
+  if (invalid !== -1) throw new Error(`Reviewer ${invalid + 1}${listLabel ? ` in ${listLabel}` : ''}: ${errors[invalid]}`)
+}
+
+export async function validateDesktopReviewerModels(
+  entries: readonly ReviewerEntry[],
+  profiles: readonly Pick<WorkspaceProfile, 'name' | 'launch' | 'otherCli' | 'reviewerEntries' | 'general'>[],
+  getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
+): Promise<void> {
+  const inheritedLists = profiles.filter((profile) => !profile.general && !profile.reviewerEntries).map((profile) => ({
+    name: profile.name,
+    models: reviewerWorkspaceModels(profile.launch, profile.otherCli),
+  }))
+  await validateReviewerModelOverrides(entries, getCatalog)
+  if (entries.some(({ model, reasoningEffort }) => !model && reasoningEffort && reasoningEffort !== 'default')) {
+    await Promise.all(inheritedLists.map(({ name, models }) =>
+      validateReviewerModelOverrides(entries, getCatalog, models, `the Desktop list for workspace "${name}"`),
+    ))
+  }
 }
 
 export type ResolvedReviewer = { id: string; name: string; label: string } & (

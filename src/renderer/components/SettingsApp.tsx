@@ -249,6 +249,7 @@ function WorkspaceProfileEditor({
   })
   const activeDescriptor = AGENT_CLI_SETTINGS[activeCli]
   const activeConfig = otherCli[activeCli] ?? {}
+  const workspaceModels = reviewerWorkspaceModels(launch, otherCli)
 
   return (
     <div className="settings-card">
@@ -464,11 +465,14 @@ function WorkspaceProfileEditor({
           />
           Use Desktop reviewer list
         </label>
-        {reviewerOverride !== null && (
+        {reviewerOverride === null ? !profile.general && defaultReviewers.map(({ id, cli, model, reasoningEffort }, index) => {
+          const error = reviewerModelEffortError(model ?? workspaceModels[cli], reasoningEffort, modelCatalogs[cli])
+          return error && <p key={id} className="reviewer-settings-error" role="alert">Desktop reviewer {index + 1} ({sessionCliLabel(cli)}). {error}</p>
+        }) : (
           <ReviewerEditor
             entries={reviewerOverride}
             catalogs={modelCatalogs}
-            workspaceModels={reviewerWorkspaceModels(launch, otherCli)}
+            workspaceModels={workspaceModels}
             disabled={saving}
             onChange={setReviewerOverride}
           />

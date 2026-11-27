@@ -205,6 +205,7 @@ if (!process.versions.electron) {
 
     // Exercise the built renderer with a fixed Auto catalog independent of any installed account's model policies.
     const fixtureState = await sui('window.copilotDesktopSettings.get()')
+    fixtureState.reviewerEntries = [{ id: 'fixture-reviewer', cli: 'copilot', reasoningEffort: 'high' }]
     const fixturePreload = join(directory, 'fixture-settings-preload.cjs')
     await writeFile(fixturePreload, `
       const { contextBridge } = require('electron')
@@ -297,6 +298,11 @@ if (!process.versions.electron) {
     assert.match(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]').textContent`), /auto does not support high reasoning effort/)
     await setInput(customInput, 'auto-deployment', fixtureUi)
     assert.equal(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]') === null`), true)
+    await fixtureUi(`[...document.querySelectorAll('label.settings-row')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
+    await setInput(customInput, 'auto', fixtureUi)
+    assert.match(await fixtureUi("document.querySelector('.settings-card .reviewer-settings-error').textContent"), /Desktop reviewer 1 \(Copilot CLI\). auto does not support high/)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    assert.equal(await fixtureUi("document.querySelector('.settings-card .reviewer-settings-error') === null"), true)
     fixtureSettings.destroy()
     console.log('OK: custom model typing preserves effort and workspace model changes flag incompatible reviewer overrides')
 

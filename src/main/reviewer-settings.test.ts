@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildOtherCliLaunchArgs } from './agent-cli-settings.js'
-import { resolveReviewerEntries, reviewerWorkspaceModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
+import { resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
 import { buildSessionLaunchArgs, DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 
 test('reviewer model and effort resolve together against the reviewed workspace', async () => {
@@ -80,4 +80,11 @@ test('workspace model edits are checked against reviewers with an effort-only ov
   await assert.rejects(validateReviewerModelOverrides(entries, catalog, withModel('small')), /Reviewer 1: small does not support high/)
   await validateReviewerModelOverrides([{ ...entries[0]!, model: 'full' }], catalog, withModel('small'))
   await validateReviewerModelOverrides(entries, catalog)
+  await assert.rejects(
+    validateReviewerModelOverrides(entries, catalog, withModel('small'), 'the Desktop list'),
+    /Reviewer 1 in the Desktop list: small does not support high/,
+  )
+  const workspace = { name: 'Docs', launch: DEFAULT_SESSION_LAUNCH_CONFIG, otherCli: { codex: { model: 'small' } } }
+  await assert.rejects(validateDesktopReviewerModels(entries, [workspace], catalog), /Desktop list for workspace "Docs"/)
+  await validateDesktopReviewerModels(entries, [{ ...workspace, reviewerEntries: [{ id: 'local', cli: 'codex' }] }], catalog)
 })

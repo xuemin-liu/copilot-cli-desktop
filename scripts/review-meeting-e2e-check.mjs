@@ -472,15 +472,18 @@ class AgyStub {
       return config.reviewerEntries.length === 2 ? config.reviewerEntries : null
     })
     assert.deepEqual(saved.map(({ cli, model }) => [cli, model]), [['antigravity', undefined], ['antigravity', 'custom-reviewer-model']])
+    await until('the saved list to reach Settings', () => sui(`![...document.querySelectorAll('button')].some((button) => button.textContent === 'Save reviewers')`))
 
     // Set a workspace override and return to the Desktop list through the same form.
     const workspaceList = 'label.settings-row'
     const toggleInheritance = () => sui(`[...document.querySelectorAll('${workspaceList}')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
     await toggleInheritance()
+    await until('the workspace to show two reviewer rows', () => sui(`document.querySelectorAll('.settings-card .reviewer-settings-list li').length === 2`))
     await clickSetting('Save profile')
     await until('the workspace override to persist', async () => (await readDesktopConfig(configPath)).profiles[0].reviewerEntries?.length === 2)
     await until('profile save to finish', () => sui(`[...document.querySelectorAll('button')].some(button => button.textContent === 'Save profile' && !button.disabled)`))
     await toggleInheritance()
+    await until('the workspace to use the Desktop list', () => sui(`!document.querySelector('.settings-card .reviewer-settings-list')`))
     await clickSetting('Save profile')
     await until('the workspace override to clear', async () => !(await readDesktopConfig(configPath)).profiles[0].reviewerEntries)
     settings.close()
