@@ -92,6 +92,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         background: '#0b1020',
         foreground: '#e6edf3',
         cursor: '#58a6ff',
+        scrollbarSliderBackground: '#617088',
+        scrollbarSliderHoverBackground: '#7786a0',
+        scrollbarSliderActiveBackground: '#94a3b8',
       },
     })
     const fitAddon = new FitAddon()
@@ -102,6 +105,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     fitAddon.fit()
     terminalRef.current = terminal
     fitRef.current = fitAddon
+    const scrollbackRender = terminal.onRender(() => {
+      terminal.element?.classList.toggle('terminal-has-scrollback', terminal.buffer.active.baseY > 0)
+    })
 
     let hasText = false
     const reportHasText = (): void => {
@@ -457,6 +463,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       container.removeEventListener('mouseup', handleMouseUp, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
+      scrollbackRender.dispose()
       writeParsedDisposable.dispose()
       if (hasText) onHasTextChangeRef.current?.(false)
       hasTextRef.current = false

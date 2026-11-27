@@ -314,8 +314,45 @@ if (!process.versions.electron) {
       // Through every click, notice, dismissal and tab switch above, the session process was never told a new size.
       assert.equal(await terminalBox(), box)
       assert.deepEqual([...new Set(sizes)].filter(reported => reported !== size), [], `the terminal changed size: ${sizes.join(' ')}`)
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'OSC 8 relative file and web links', 'OSC 8 hover destination preview', 'right-click does not open embedded link', 'unsupported OSC 8 protocols ignored', 'rejected file:// OSC 8 preserves visible path fallback', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
-      console.log('PASS: Electron terminal link clicks and error feedback')
+      const scrollbar = () => ui(`(() => {
+        const terminal = document.querySelector('.terminal-viewport')
+        const viewport = terminal.querySelector('.xterm-viewport')
+        const track = terminal.querySelector('.xterm-scrollable-element > .scrollbar.vertical')
+        const slider = track.querySelector('.slider').getBoundingClientRect()
+        const screen = terminal.querySelector('.xterm-screen').getBoundingClientRect()
+        const area = track.getBoundingClientRect()
+        const style = getComputedStyle(track)
+        return {
+          visible: style.opacity === '1' && style.pointerEvents !== 'none',
+          nativeScrollbarWidth: getComputedStyle(viewport).scrollbarWidth,
+          aligned: Math.abs(area.top - screen.top) < 1 && Math.abs(area.bottom - screen.bottom) < 1
+            && area.right <= terminal.getBoundingClientRect().right,
+          x: Math.round(slider.x + slider.width / 2),
+          y: Math.round(slider.y + slider.height / 2),
+          top: Math.ceil(area.top),
+        }
+      })()`)
+      assert.equal((await scrollbar()).visible, false, 'a short terminal has no scrollbar thumb')
+      window.webContents.send('desktop:tab-output', { tabId: 'tab-1', sequence: 1,
+        data: '\r\n' + Array.from({ length: 160 }, (_, index) => 'History line ' + (index + 1)).join('\r\n'),
+      })
+      await until(() => ui('document.querySelector(".xterm-rows").textContent.includes("History line 160")'), 'scrollback output')
+      window.webContents.sendInputEvent({ type: 'mouseMove', x: 0, y: 0 })
+      await delay(1500)
+      const track = await scrollbar()
+      assert.equal(track.visible, true, 'the scrollback thumb is visible with the pointer away')
+      assert.equal(track.nativeScrollbarWidth, 'none', 'only the xterm scrollbar is shown')
+      assert.equal(track.aligned, true, 'the scrollbar spans the rendered rows inside the terminal pane')
+      await writeFile(join(artifacts, 'scrollback.png'), (await window.webContents.capturePage()).toPNG())
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: track.x, y: track.y })
+      window.webContents.sendInputEvent({ type: 'mouseMove', modifiers: ['leftButtonDown'], x: track.x, y: track.top + 1 })
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: track.x, y: track.top + 1 })
+      await until(() => ui('document.querySelector(".xterm-rows").textContent.includes("https://example.com/")'), 'scrollbar drag reveals older output')
+      window.webContents.send('desktop:tab-output', { tabId: 'tab-1', sequence: 2, data: '\u001b[3J' })
+      await until(async () => !(await scrollbar()).visible, 'scrollbar disappears after clearing scrollback')
+
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'OSC 8 relative file and web links', 'OSC 8 hover destination preview', 'right-click does not open embedded link', 'unsupported OSC 8 protocols ignored', 'rejected file:// OSC 8 preserves visible path fallback', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup', 'persistent aligned and draggable scrollback thumb'] }, null, 2))
+      console.log('PASS: Electron terminal links, feedback, and scrollback scrollbar')
     } catch (error) {
       console.error(error)
       console.error(JSON.stringify({ mode, calls, notice: await notice() }))
