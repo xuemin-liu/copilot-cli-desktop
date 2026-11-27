@@ -309,6 +309,16 @@ export function meetingCopilotPrimer(input: { meetingId: string; checkout: strin
   return `The desktop started this session as a reviewer for review meeting ${input.meetingId} and is joining it to that meeting for you: do not run the meeting helper to join or start a meeting. The meeting's messages arrive here as your next prompts; answer each one as it says. ${where} Review only: do not edit, create or delete files, and do not commit or push. Reply now with the single word READY and nothing else.`
 }
 
+/**
+ * Why a meeting message has not reached a hidden Copilot seat, or null when nothing is owed to it. A message that was
+ * typed and never recorded counts like one still waiting to be typed: either way the seat has not been asked.
+ */
+export function meetingSeatStallReason(input: { waiting: boolean; lost: boolean; blockReason: string | null }): string | null {
+  if (input.waiting) return input.blockReason ?? 'It did not take the message.'
+  if (input.lost) return 'A message was typed into it, and its session never recorded it.'
+  return null
+}
+
 /** The one line a hidden reviewer is started with: the rest is in the file it names. */
 export function meetingReviewerPromptLine(meetingId: string, briefPath: string): string {
   return `Join review meeting ${meetingId} as a reviewer by reading and following the instructions in "${briefPath}".`
@@ -337,6 +347,7 @@ export function meetingReviewerConsentDetail(input: {
       : `There is no Git commit to check out in ${input.projectPath}, so reviewers start in an empty folder and see only what the meeting shares.`,
     `Reviewers read the host's post${input.hasChanges ? ', the attached changes' : ''} and every later round, including changes the host attaches later in this meeting. You are not asked again for those.`,
     ...(outside.length ? [`${outside.map((cli) => sessionCliLabel(cli)).join(', ')} send what they read to their own providers, under your accounts with them.`] : []),
+    ...(input.clis.includes('copilot') ? [`${sessionCliLabel('copilot')} sends what it reads to the model provider this workspace's Copilot sessions use, including a custom provider if one is set.`] : []),
     input.allowAll
       ? `"Allow all permissions in hidden reviewer sessions" is on: ${input.clis.map((cli) => `${sessionCliLabel(cli)} ${input.allowAllFlags[cli] ? `(${input.allowAllFlags[cli]})` : ''}`.trim()).join(', ')} run without permission prompts. They are told to review only, but nothing prevents them from reading or changing files anywhere your account can, including your project folder: the checkout is a convenience, not a sandbox.`
       : '"Allow all permissions in hidden reviewer sessions" is off: each reviewer uses its workspace permission settings. A reviewer that stops at a permission prompt waits there; look at it with Peek.',

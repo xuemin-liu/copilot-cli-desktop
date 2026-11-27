@@ -124,3 +124,10 @@ One pull request each. Tests travel with the code they cover.
   joins it once the delivery pump would accept a message. Starting does not wait for that join, so the other seats are
   not held up. A message that cannot be typed into it for three minutes takes the seat out of the meeting with the
   reason; its tab stays for Peek. A Copilot host asks for reviewers with `start -Reviewers` on the meeting helper.
+- Phase 2, review round 1: the delivery deadline of a Copilot seat asks what the hub asks, so a message that was typed
+  and never recorded takes the seat out too; the first prompt is marked as the desktop's turn (it authorizes nothing),
+  and the seat joins only when the conversation it was typed into has recorded it; a tab that changes conversation
+  fails or leaves its seat with that reason; the consent names Copilot's model provider; the helper's `status` lists the
+  hidden reviewers. Known limit, left open: a Copilot seat that took a message and never ends that turn (a permission
+  prompt with allow-all off) holds that one round to its timeout; the next message cannot be typed behind it, and the
+  deadline then takes the seat out.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  MeetingReviewerError, MeetingReviewerRegistry, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
+  MeetingReviewerError, MeetingReviewerRegistry, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine, meetingSeatStallReason,
 } from './meeting-reviewers.js'
 
 const run = (registry: MeetingReviewerRegistry, meetingId = 'K7QF', profileId = 'p1', clis: readonly ('claude' | 'codex' | 'antigravity' | 'copilot')[] = ['claude', 'codex']) =>
@@ -189,7 +189,36 @@ test('the consent names the reviewers, what they are given, where it goes, and w
   const off = meetingReviewerConsentDetail({ clis: ['copilot'], allowAll: false, allowAllFlags: {}, commit: null, projectPath: 'D:\\notes', hasChanges: false })
   assert.match(off, /no Git commit to check out in D:\\notes/)
   assert.match(off, /start in an empty folder/)
-  assert.doesNotMatch(off, /their own providers/, 'Copilot alone goes nowhere new')
+  assert.doesNotMatch(off, /their own providers/)
+  assert.match(off, /Copilot CLI sends what it reads to the model provider this workspace's Copilot sessions use, including a custom provider/, 'a host that is not Copilot has not sent it there yet')
+  assert.doesNotMatch(on, /Copilot sessions use/)
   assert.doesNotMatch(off, /the attached changes/)
   assert.match(off, /is off: each reviewer uses its workspace permission settings/)
+})
+
+test('a seat the desktop joins by its tab is marked joined only while this launch is still starting', () => {
+  const registry = new MeetingReviewerRegistry()
+  const group = run(registry)
+  group.stage = 'active'
+  const seat = group.seats.get('claude')!
+  assert.equal(registry.markJoined(seat, 'another-launch'), false, 'a join of an earlier launch does not touch this one')
+  assert.equal(seat.lifecycle, 'starting')
+  assert.equal(registry.markJoined(seat, seat.generation), true)
+  assert.equal(seat.lifecycle, 'joined')
+  assert.equal(seat.error, null)
+  assert.equal(registry.markJoined(seat, seat.generation), false, 'only a starting seat joins')
+  const codex = group.seats.get('codex')!
+  registry.failSeat(codex, codex.generation, 'It did not join in time.')
+  assert.equal(registry.markJoined(codex, codex.generation), false, 'a late join does not revive a seat that failed')
+  assert.equal(codex.lifecycle, 'failed')
+  assert.equal(codex.error, 'It did not join in time.')
+})
+
+test('a message that was typed and never recorded stalls a seat like one that cannot be typed', () => {
+  assert.equal(meetingSeatStallReason({ waiting: false, lost: false, blockReason: null }), null)
+  assert.equal(meetingSeatStallReason({ waiting: false, lost: false, blockReason: 'It is still working on another turn.' }), null, 'a seat at work on a message it took is not stalled')
+  assert.equal(meetingSeatStallReason({ waiting: true, lost: false, blockReason: 'Its prompt box may hold text.' }), 'Its prompt box may hold text.')
+  assert.equal(meetingSeatStallReason({ waiting: true, lost: false, blockReason: null }), 'It did not take the message.')
+  assert.match(meetingSeatStallReason({ waiting: false, lost: true, blockReason: null })!, /typed into it, and its session never recorded it/)
+  assert.equal(meetingSeatStallReason({ waiting: true, lost: true, blockReason: 'It is waiting for an approval.' }), 'It is waiting for an approval.')
 })

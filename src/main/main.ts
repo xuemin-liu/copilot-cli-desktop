@@ -181,7 +181,7 @@ import {
   type TempReviewerSeat,
 } from './pr-temp-reviewers.js'
 import {
-  MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
+  MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingSeatStallReason, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
   type MeetingReviewerGroup, type MeetingReviewerSeat,
 } from './meeting-reviewers.js'
 import { buildOtherCliLaunchArgs, helpListsFlag, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -2276,6 +2276,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
       sessionLastOutputAt.delete(id)
       meetingHub.leave(id)
       meetingOutbox.forget(id)
+      onMeetingCopilotSeatSwitched(id)
     }
     tabsState = setTabSessionId(tabsState, id, sessionId)
     const tab = tabsState.tabs.find((candidate) => candidate.id === id)
@@ -5013,6 +5014,18 @@ function reapMeetingReviewers(): void {
   }
 }
 
+/** A joined Copilot seat's tab changed to another conversation, which took it out of the meeting: its seat says so. */
+function onMeetingCopilotSeatSwitched(tabId: string): void {
+  const found = meetingReviewers.seatByTabId(tabId)
+  if (!found || found.group.stage === 'ended' || found.seat.cli !== 'copilot' || found.seat.lifecycle !== 'joined') return
+  const { group, seat } = found
+  if (!meetingReviewers.seatExited(seat, seat.generation, 'Its tab changed to another conversation, so it left the meeting. Retry starts a new session, or Dismiss.')) return
+  void releaseMeetingReviewerSeat(seat, 'This reviewer\'s tab changed to another conversation.', { keepTab: true }).then(() => {
+    settleMeetingReviewerGate(group)
+    broadcastState()
+  })
+}
+
 /** A hidden reviewer's process ended. Its seat leaves the meeting; its tab stays for the person to look at until the run ends. */
 function onMeetingReviewerExit(tabId: string, status: 'completed' | 'crashed'): void {
   const found = meetingReviewers.seatByTabId(tabId)
@@ -5325,8 +5338,10 @@ function stopMeetingCopilotWatch(generation: string): void {
 
 /**
  * A hidden Copilot reviewer gets its messages typed into its prompt, and nobody is looking at that tab. A message that
- * cannot be typed for this long (a dialog, an approval, a session that changed) would hold every round to its timeout,
- * so the seat leaves the meeting with the reason, for every delivery and not only the first. The tab stays for Peek.
+ * has not reached it for this long would hold its round: one that cannot be typed (a dialog, an approval, a session
+ * that changed) holds it to its timeout, and one that was typed and never recorded holds it until the person settles
+ * the handoff. So the seat leaves the meeting with the reason, for every delivery and not only the first. The tab stays
+ * for Peek. This asks what the hub asks before it counts a reviewer as not asked.
  */
 function watchMeetingCopilotDeliveries(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, tabId: string): void {
   const generation = seat.generation
@@ -5335,12 +5350,16 @@ function watchMeetingCopilotDeliveries(group: MeetingReviewerGroup, seat: Meetin
   stopMeetingCopilotWatch(generation)
   const timer = setInterval(() => {
     if (seat.generation !== generation || seat.lifecycle !== 'joined' || seat.tabId !== tabId || group.stage === 'ended') { stopMeetingCopilotWatch(generation); return }
-    if (!meetingOutbox.undelivered(tabId, group.meetingId)) { since = null; return }
+    const why = meetingSeatStallReason({
+      waiting: meetingOutbox.undelivered(tabId, group.meetingId),
+      lost: lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === group.meetingId),
+      blockReason: meetingBlockReason(tabId),
+    })
+    if (why === null) { since = null; return }
     since ??= Date.now()
     if (Date.now() - since < limit) return
     stopMeetingCopilotWatch(generation)
-    const why = meetingBlockReason(tabId) ?? 'It did not take the message.'
-    if (!meetingReviewers.seatExited(seat, generation, `A meeting message could not be typed into it for ${Math.max(1, Math.round(limit / 60_000))} minute(s): ${why} Look at its tab with Peek, then Retry or Dismiss.`)) return
+    if (!meetingReviewers.seatExited(seat, generation, `A meeting message did not reach it for ${Math.max(1, Math.round(limit / 60_000))} minute(s): ${why} Look at its tab with Peek, then Retry or Dismiss.`)) return
     void releaseMeetingReviewerSeat(seat, 'A meeting message could not reach this reviewer.', { keepTab: true }).then(() => broadcastState())
   }, Math.min(5_000, Math.max(250, Math.floor(limit / 4))))
   timer.unref?.()
@@ -5443,19 +5462,34 @@ async function joinMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeting
   const joinMs = meetingSeatJoinMs()
   const deadline = Date.now() + joinMs
   const minutes = Math.max(1, Math.round(joinMs / 60_000))
-  let primed = false
+  // The conversation the first prompt went to, and how many desktop prompts its reader had recorded before it.
+  let primed: { sessionId: string; promptsBefore: number } | null = null
   for (;;) {
     if (cancelled()) return
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || managedTabs.get(tabId)?.session !== session || tab.status === 'crashed' || tab.status === 'completed') return
+    const reader = meetingReader(tabId)
     if (!primed) {
-      if (tab.lastSessionId && meetingPromptSettled(tabId) && sendSessionTask(tabId, meetingCopilotPrimer({ meetingId: group.meetingId, checkout: area.checkout, commit: group.commit }), false).result === 'sent') primed = true
-    } else if (meetingBlockReason(tabId) === null) {
+      if (tab.lastSessionId && meetingPromptSettled(tabId)) {
+        const text = meetingCopilotPrimer({ meetingId: group.meetingId, checkout: area.checkout, commit: group.commit })
+        const promptsBefore = reader.desktopPromptCount
+        // The desktop's own turn: a prompt the person did not type authorizes nothing (starting a meeting, for one).
+        reader.expectDesktopPrompt(text)
+        if (sendSessionTask(tabId, text, false).result === 'sent') primed = { sessionId: tab.lastSessionId, promptsBefore }
+        else reader.cancelExpectedDesktopPrompt()
+      }
+    } else if (tab.lastSessionId !== primed.sessionId) {
+      // Someone chose another conversation in this tab (Peek): the meeting's messages would go to that one.
+      reader.cancelExpectedDesktopPrompt()
+      throw new Error('Its tab changed to another conversation before it joined. Retry starts a new session, or Dismiss.')
+    } else if (reader.desktopPromptCount > primed.promptsBefore && meetingBlockReason(tabId) === null) {
+      // That session recorded the first prompt as the desktop's, and would take a message now.
       break
     }
     if (Date.now() >= deadline) {
+      if (primed) reader.cancelExpectedDesktopPrompt()
       throw new Error(primed
-        ? `It was not ready for meeting messages within ${minutes} minute(s): ${meetingBlockReason(tabId) ?? 'unknown'} Look at its tab with Peek, then Retry or Dismiss.`
+        ? `It was not ready for meeting messages within ${minutes} minute(s): ${meetingBlockReason(tabId) ?? (reader.desktopPromptCount > primed.promptsBefore ? 'unknown' : 'Its session did not record its first prompt.')} Look at its tab with Peek, then Retry or Dismiss.`
         : `Its session did not reach a prompt within ${minutes} minute(s). Look at its tab with Peek, then Retry or Dismiss.`)
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250))
@@ -6284,8 +6318,11 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         meetingHub.end(tabId)
         scheduleMeetingPump(0)
         return { ok: true, message: 'The meeting is closed.' }
-      case 'status':
-        return { ok: true, message: meetingStatus(tabId) }
+      case 'status': {
+        const hosted = meetingHub.meetingOf(tabId)
+        const reviewers = hosted ? meetingReviewers.statusText(hosted.id) : ''
+        return { ok: true, message: reviewers ? `${meetingStatus(tabId)}\n${reviewers}` : meetingStatus(tabId) }
+      }
     }
   } catch (error) {
     if (error instanceof MeetingError) return { ok: false, message: error.message }
