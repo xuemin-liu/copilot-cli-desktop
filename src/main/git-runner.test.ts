@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
-import { GitRunner, gitSucceeded, resolveGitExecutable } from './git-runner.js'
+import { GitRunner, GitUnavailableError, gitSucceeded, resolveGitExecutable } from './git-runner.js'
 import { statusArgs } from './git-commands.js'
 import { parseStatusV2 } from './git-parse.js'
 import { spawn } from 'node:child_process'
@@ -263,4 +263,43 @@ test('a listener that throws never breaks the command it watches', { skip }, asy
   const result = await fixture.runner.run({ cwd: fixture.root, args: ['--version'], onOutput: () => { throw new Error('listener bug') } })
   assert.equal(result.exitCode, 0)
   assert.match(result.stdout.toString(), /^git version/)
+})
+
+test('a working folder that is gone is named as such, not reported as a missing git', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('plain')
+  const gone = join(repo, '..', 'removed-worktree')
+  await assert.rejects(fixture.runner.run({ cwd: gone, args: statusArgs() }), (error: Error) => {
+    assert.match(error.message, /removed-worktree no longer exists/)
+    assert.doesNotMatch(error.message, /git was not found/)
+    assert.equal(error instanceof GitUnavailableError, false, 'git itself is there')
+    return true
+  })
+  // A path that is a file now (a stale worktree path) fails the spawn the same way.
+  const file = join(repo, '..', 'worktree-that-is-a-file')
+  writeFileSync(file, 'not a folder')
+  await assert.rejects(fixture.runner.run({ cwd: file, args: statusArgs() }), (error: Error) => {
+    assert.match(error.message, /worktree-that-is-a-file no longer exists/)
+    assert.equal(error instanceof GitUnavailableError, false)
+    return true
+  })
+})
+
+test('a spawn that throws is read like one that reports its failure through the child', async () => {
+  // Outside Windows Node throws ENOTDIR from spawn itself for a working path that is a file, before there is a child.
+  const directory = join(tmpdir(), `git-runner-spawn-${createHash('sha256').update(String(process.hrtime.bigint())).digest('hex').slice(0, 12)}`)
+  mkdirSync(directory, { recursive: true })
+  const file = join(directory, 'worktree-that-is-a-file')
+  writeFileSync(file, 'not a folder')
+  const throwing = (code: string) => new GitRunner({
+    gitPath: resolve('/', 'git.exe'), hooksDirectory: join(directory, 'hooks'), trackProcess: null,
+    spawn: () => { throw Object.assign(new Error(`spawn ${code}`), { code }) },
+  })
+  await assert.rejects(throwing('ENOTDIR').run({ cwd: file, args: statusArgs() }), /worktree-that-is-a-file no longer exists/)
+  await assert.rejects(throwing('ENOENT').run({ cwd: join(directory, 'gone'), args: statusArgs() }), /gone no longer exists/)
+  // A folder that is there: a missing executable keeps its own error, and anything else is passed on as it came.
+  await assert.rejects(throwing('ENOENT').run({ cwd: directory, args: statusArgs() }), (error: Error) => error instanceof GitUnavailableError && /git was not found/.test(error.message))
+  await assert.rejects(throwing('ENOTDIR').run({ cwd: directory, args: statusArgs() }), (error: Error) => !(error instanceof GitUnavailableError) && error.message === 'spawn ENOTDIR')
+  await assert.rejects(throwing('EACCES').run({ cwd: file, args: statusArgs() }), (error: Error) => error.message === 'spawn EACCES')
 })

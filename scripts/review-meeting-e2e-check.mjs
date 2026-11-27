@@ -279,7 +279,8 @@ class AgyStub {
     assert.match((await outsider('meeting_next', { wait_seconds: 1 })).text, /^Nothing yet/, 'the round is held while the hidden reviewer is still starting')
     const groupA = await until('the run to appear', () => groupOf(meetingA))
     assert.equal(groupA.prLabel, `Meeting ${meetingA}`)
-    assert.equal(consents.length, 1)
+    // The start answers before the question is put: the run asks once its commit is known.
+    await until('the person to be asked', async () => consents.length === 1)
     assert.equal(consents[0].defaultId, 0, 'the default answer is to decline')
     assert.equal(consents[0].buttons[0], 'Cancel')
     assert.match(consents[0].detail, /Reviewers: Antigravity CLI\./)
