@@ -757,6 +757,8 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true })
     writeFileSync(join(repo, '.claude', 'settings.json'), '{}\n')
     writeFileSync(join(repo, '.claude', 'hooks', 'run.sh'), '#!/bin/sh\n')
+    // A name Git would quote without -z: still matched.
+    writeFileSync(join(repo, '.claude', 'hooks', 'ü.sh'), '#!/bin/sh\n')
     mkdirSync(join(repo, '.codex'), { recursive: true })
     writeFileSync(join(repo, '.codex', 'hooks.json'), '{}\n')
     mkdirSync(join(repo, '.github', 'hooks'), { recursive: true })
@@ -781,6 +783,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
       '.agents/hooks.json',
       '.agents/plugins/demo/mcp_config.json',
       '.claude/hooks/run.sh',
+      '.claude/hooks/ü.sh',
       '.claude/settings.json',
       '.codex/hooks.json',
       '.gemini/config/mcp_config.json',

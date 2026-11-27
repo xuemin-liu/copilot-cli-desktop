@@ -5119,10 +5119,10 @@ function onMeetingReviewerExit(tabId: string, status: 'completed' | 'crashed'): 
   })
 }
 
-async function askMeetingReviewerConsent(meetingId: string, detail: string, stillWanted: () => boolean): Promise<boolean> {
-  // Turned off in Settings: reviewers of the person's own project start without the question, and without waiting
-  // behind another question still open.
-  if (!desktopConfig.reviewerStartPrompt) return stillWanted()
+async function askMeetingReviewerConsent(meetingId: string, ask: boolean, detail: string, stillWanted: () => boolean): Promise<boolean> {
+  // Turned off in Settings when the run was made: reviewers of the person's own project start without the question,
+  // and without waiting behind another question still open.
+  if (!ask) return stillWanted()
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -5202,7 +5202,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
   if (clis.length > MAX_MEETING_PARTICIPANTS) return refuse(`a meeting takes at most ${MAX_MEETING_PARTICIPANTS} reviewers.`)
   let group: MeetingReviewerGroup
   try {
-    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, clis })
+    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, clis, ask: desktopConfig.reviewerStartPrompt })
   } catch (error) {
     if (error instanceof MeetingReviewerError) return refuse(error.message)
     meetingHub.release(meetingId)
@@ -5215,7 +5215,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
     meetingHub.release(meetingId)
     void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
   })
-  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. ${desktopConfig.reviewerStartPrompt ? 'The person is being asked to allow them. ' : ''}Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. ${group.ask ? 'The person is being asked to allow them. ' : ''}Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
 }
 
 async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
@@ -5227,7 +5227,7 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
   // Read once: what the person is asked about is what every launch of this run gets, a Retry included.
   const allowAll = desktopConfig.reviewerAllowAll
   const clis = [...group.seats.keys()]
-  const approved = await askMeetingReviewerConsent(group.meetingId, meetingReviewerConsentDetail({ clis, allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
+  const approved = await askMeetingReviewerConsent(group.meetingId, group.ask, meetingReviewerConsentDetail({ clis, allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
   if (over()) return
   if (!approved) {
     meetingReviewers.end(group.id, 'stopped', `You declined hidden reviewers for meeting ${group.meetingId}. Reviewers can still join with "join meeting ${group.meetingId}".`)
@@ -5765,7 +5765,8 @@ async function advanceGroupTempReviewers(
     const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
-    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
+    // A scan that could not read the round's changes cannot show that no CLI/MCP configuration changed.
+    const requiresConsent = !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     if (requiresConsent && group.stage === 'active') {
       group.stage = 'starting'
     }
@@ -5803,7 +5804,10 @@ async function advanceGroupTempReviewers(
             activeClis,
             true,
             desktopConfig.reviewerAllowAll,
-            [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`],
+            [
+              ...(configInspection.complete ? [] : [`Could not read which files round ${targetRound} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load.`]),
+              ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
+            ],
           )
           if (!approved) {
             if (group.stage !== 'ended') {

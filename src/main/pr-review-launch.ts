@@ -411,13 +411,21 @@ export async function inspectReviewCommitAgentConfigs(
   const root = resolve(project)
   await ensureOriginBranchCommit(runner, root, [], origin, head)
   await ensureOriginBranchCommit(runner, root, [], origin, base)
-  // A failed read (no merge base in a shallow clone, say) is recorded, not taken as "no configs".
+  // A failed or cut-off read (no merge base in a shallow clone, say, or a huge tree) is recorded, not taken as "no
+  // configs". `-z` gives raw paths: without it Git quotes unusual names, and a quoted name would not match.
   let complete = true
-  const failed = (): string => { complete = false; return '' }
-  const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(failed)
-  const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(failed)
+  const paths = async (args: readonly string[]): Promise<string> => {
+    const result = await runner.run({ cwd: root, args, kind: 'read', disableHooks: true, timeoutMs: 10 * 60_000, maxStdoutBytes: 16_000_000 }).catch(() => null)
+    if (!result || result.exitCode !== 0 || result.timedOut || result.cancelled || result.stdoutTruncated) {
+      complete = false
+      return ''
+    }
+    return result.stdout.toString('utf8')
+  }
+  const diffPaths = await paths(['diff', '-z', '--name-only', `${base}...${head}`])
+  const treePaths = await paths(['ls-tree', '-r', '-z', '--name-only', head])
   const filterConfigs = (raw: string): string[] =>
-    [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && isRepoAgentExecConfigPath(line)))]
+    [...new Set(raw.split('\0').filter((path) => path.length > 0 && isRepoAgentExecConfigPath(path)))]
   return {
     modifiedAgentConfigs: filterConfigs(diffPaths),
     presentAgentConfigs: filterConfigs(treePaths),
