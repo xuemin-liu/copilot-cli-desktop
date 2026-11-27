@@ -134,3 +134,7 @@ One pull request each. Tests travel with the code they cover.
   So a hidden Copilot seat goes by the hub's rule for the other hidden seats: two rounds in a row without a reply take
   it out, each of those rounds running to its timeout. An ordinary Copilot tab is still the person's to judge. A seat is
   the conversation its launch started: a tab that changes to another one before the first prompt fails the seat.
+- Phase 3, built: the `review-meeting` skill is provisioned with the three pull request skills (the same list, the same
+  marker and backup rules), and `pr-poll.mjs --guide review-meeting` prints it for a CLI that did not find it. Settings
+  says "Reviewers" for the CLI list and "hidden reviewer sessions" for the permission switch, since both now serve
+  meetings too; messages that name those settings were changed with them.

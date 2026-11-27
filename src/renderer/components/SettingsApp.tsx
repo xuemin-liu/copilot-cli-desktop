@@ -399,8 +399,8 @@ function WorkspaceProfileEditor({
       </div>
       <div className="other-cli-settings">
         <div className="other-cli-heading">
-          <strong>Temporary PR reviewer CLIs</strong>
-          <span>Which CLIs start temporary reviewer sessions when <code>review-and-fix-pr</code> runs in this workspace.</span>
+          <strong>Hidden reviewer CLIs</strong>
+          <span>Which CLIs start hidden reviewer sessions when <code>review-and-fix-pr</code> or <code>review-meeting</code> runs in this workspace.</span>
         </div>
         <label className="settings-row">
           <input
@@ -408,10 +408,10 @@ function WorkspaceProfileEditor({
             checked={reviewerOverride === null}
             onChange={(event) => setReviewerOverride(event.target.checked ? null : [...defaultReviewerClis])}
           />
-          Use default PR reviewer CLIs ({defaultReviewerClis.map((cli) => sessionCliLabel(cli)).join(', ')})
+          Use default reviewer CLIs ({defaultReviewerClis.map((cli) => sessionCliLabel(cli)).join(', ')})
         </label>
         {reviewerOverride !== null && (
-          <div className="settings-form-grid" role="group" aria-label={`PR reviewer CLIs for ${profile.name}`}>
+          <div className="settings-form-grid" role="group" aria-label={`Reviewer CLIs for ${profile.name}`}>
             {SUPPORTED_REVIEWER_CLIS.map((cli) => {
               const checked = reviewerOverride.includes(cli)
               return (
@@ -1093,8 +1093,8 @@ export function SettingsApp(): JSX.Element | null {
       </section>
 
       <section>
-        <h2>Pull request reviewers</h2>
-        <div role="group" aria-label="Default PR reviewer CLIs">
+        <h2>Reviewers</h2>
+        <div role="group" aria-label="Default reviewer CLIs">
           {SUPPORTED_REVIEWER_CLIS.map((cli) => {
             const checked = snapshot.reviewerClis.includes(cli)
             return (
@@ -1121,12 +1121,14 @@ export function SettingsApp(): JSX.Element | null {
             checked={snapshot.reviewerAllowAll}
             onChange={(event) => updatePreference({ reviewerAllowAll: event.target.checked })}
           />
-          Allow all permissions in hidden PR reviewer sessions
+          Allow all permissions in hidden reviewer sessions
         </label>
         <p className="settings-disclaimer">
-          Default CLIs launched as hidden temporary PR reviewer sessions when <code>review-and-fix-pr</code> runs (each workspace
-          profile can override which CLIs run). Each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and
-          posts its comments and approvals directly onto the pull request. Keeping &ldquo;Allow all permissions&rdquo; enabled
+          Default CLIs launched as hidden reviewer sessions, for a pull request when <code>review-and-fix-pr</code> runs and for a
+          review meeting when <code>review-meeting</code> runs (each workspace profile can override which CLIs run). For a pull
+          request each reviewer runs <code>review-pr</code> in an isolated detached Git worktree and posts its comments and
+          approvals directly onto the pull request; for a meeting each joins the meeting from a detached checkout of the
+          project&rsquo;s last commit, and you are asked before they start. Keeping &ldquo;Allow all permissions&rdquo; enabled
           launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
           (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
           reviews do not stall on terminal prompts.

@@ -253,7 +253,7 @@ export function resolveCopilotReviewerPreset(
   if (reviewerAllowAll) return 'full-access'
   if (workspacePreset === 'read-only') {
     throw new Error(
-      `${workspaceName} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change the workspace permission preset, or remove Copilot CLI from Pull request reviewers.`,
+      `${workspaceName} uses the Restricted (read-only) Copilot permission preset, which disables shell tools needed to access the pull request host. Enable "Allow all permissions in hidden reviewer sessions" in Settings → Reviewers, change the workspace permission preset, or remove Copilot CLI from Reviewers.`,
     )
   }
   return workspacePreset
@@ -277,7 +277,7 @@ export function resolveOtherCliReviewerArgs(
   if (!reviewerAllowAll) {
     if (needsPullRequestHost && cli === 'codex' && savedConfig?.sandbox === 'read-only' && savedConfig?.approval !== 'allow-all') {
       throw new Error(
-        `${workspaceName} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden PR reviewer sessions" in Settings → Pull request reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Pull request reviewers.`,
+        `${workspaceName} configures Codex CLI sandbox as Read only, which blocks network access to the pull request host. Enable "Allow all permissions in hidden reviewer sessions" in Settings → Reviewers, change Codex settings in Workspace Settings, or remove Codex CLI from Reviewers.`,
       )
     }
     return { configForLaunch: savedConfig, allowAllArgs: [] }

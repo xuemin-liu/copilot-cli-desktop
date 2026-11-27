@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { SESSION_CLIS, type SessionCli } from './session-cli.js'
 
-export const PR_WORKFLOW_SKILL_NAMES = ['review-pr', 'fix-pr', 'review-and-fix-pr'] as const
+/** The skills the desktop installs for every CLI: the three pull request workflows, and the review meeting with hidden reviewers. */
+export const PR_WORKFLOW_SKILL_NAMES = ['review-pr', 'fix-pr', 'review-and-fix-pr', 'review-meeting'] as const
 export type PrWorkflowSkillName = (typeof PR_WORKFLOW_SKILL_NAMES)[number]
 
 export const MANAGED_SKILL_MARKER_FILE = '.copilot-desktop-managed.json'

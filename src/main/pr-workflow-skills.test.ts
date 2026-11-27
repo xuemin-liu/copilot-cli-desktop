@@ -211,3 +211,21 @@ test('allocates suffixed backup paths on repeated unmanaged replacements and sup
   assert.ok((await stat(join(hostHome, '.copilot', 'skills', 'review-and-fix-pr', 'SKILL.md'))).isFile())
   await assert.rejects(stat(join(hostHome, '.claude', 'skills')), { code: 'ENOENT' })
 })
+
+test('every bundled skill ships a SKILL.md named after it, and review-meeting names both channels to the desktop', async () => {
+  const skills = resolve('resources/pr-workflows/skills')
+  assert.deepEqual((await readdir(skills)).sort(), [...PR_WORKFLOW_SKILL_NAMES].sort(), 'the folder and the list of provisioned skills are the same')
+  for (const name of PR_WORKFLOW_SKILL_NAMES) {
+    const text = await readFile(join(skills, name, 'SKILL.md'), 'utf8')
+    assert.match(text, new RegExp(`^---\r?\nname: ${name}\r?\ndescription: .+\r?\nuser-invocable: true\r?\n---`), `${name} has the frontmatter a CLI needs to find it`)
+  }
+  const meeting = await readFile(join(skills, 'review-meeting', 'SKILL.md'), 'utf8')
+  // The tools for a session that has them, the helper for one that does not: each way to ask for hidden reviewers.
+  assert.match(meeting, /meeting_start\(\{[^)]*reviewers: true/)
+  assert.match(meeting, /start -Topic "<one line>" -File <that file> -Reviewers/)
+  assert.match(meeting, /COPILOT_DESKTOP_MEETING_HELPER/)
+  // What the host must not do, and what it must tell the person.
+  assert.match(meeting, /Never start reviewer CLIs yourself/)
+  assert.match(meeting, /Tell the person the meeting id at once/)
+  assert.match(meeting, /\*\*Peek\*\*, \*\*Retry\*\* and \*\*Dismiss\*\*/)
+})

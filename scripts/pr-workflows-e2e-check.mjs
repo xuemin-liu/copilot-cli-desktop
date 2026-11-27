@@ -448,7 +448,7 @@ class AgyStub {
       ['codex', join(process.env.CODEX_HOME, 'skills')],
       ['antigravity', join(process.env.ANTIGRAVITY_GEMINI_DIR, 'config', 'skills')],
     ]) {
-      for (const skillName of ['review-pr', 'fix-pr', 'review-and-fix-pr']) {
+      for (const skillName of ['review-pr', 'fix-pr', 'review-and-fix-pr', 'review-meeting']) {
         const skillMd = await readFile(join(skillsRoot, skillName, 'SKILL.md'), 'utf8')
         assert.match(skillMd, new RegExp(`^name: ${skillName}$`, 'm'), `${cliName} has ${skillName}`)
         assert.doesNotMatch(skillMd, /Legacy /, `${cliName} ${skillName} upgraded from legacy`)
