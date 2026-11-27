@@ -5880,8 +5880,14 @@ async function advanceGroupTempReviewers(
         const prWorkflows = bundledPrWorkflows()
         if (requiresConsent) {
           for (const seat of [...group.requiredSeats.values()]) {
-            // Behind any handover a newer round has started on this seat, and only while this round still owns it.
-            await withTempSeatArea(seat, async () => { if (!isStaleOrEnded()) await cleanupTempReviewerSeat(seat) })
+            // Behind any handover a newer round has started on this seat, and only while this round still owns it: an
+            // earlier launch still setting up is cancelled and settled first, then its tab (if any) and area go.
+            await withTempSeatArea(seat, async () => {
+              if (isStaleOrEnded()) return
+              await settleTempSeatLaunch(seat)
+              if (isStaleOrEnded()) return
+              await cleanupTempReviewerSeat(seat)
+            })
           }
           if (isStaleOrEnded()) return
           const activeClis = [...group.requiredSeats.keys()]
@@ -5961,9 +5967,12 @@ async function advanceGroupTempReviewers(
           })
           if (!prepared || !profile) return
           const { reset, canReuseWorktree } = prepared
+          const launchedGeneration = reset.generation
           try {
             await launchTempReviewerSeat(group, reset, profile, { reuseArea: canReuseWorktree })
           } catch (error) {
+            // A launch a newer round superseded leaves that round's seat alone.
+            if (isStaleOrEnded() || reset.generation !== launchedGeneration) return
             tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
             broadcastState()
           }
