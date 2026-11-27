@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, githubPullUrlKey, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -4635,7 +4635,14 @@ async function startTempReviewersFlow(options: {
         revisions.base = snapshot.base.toLowerCase()
       }
       const me = await api('user').catch(() => null) as { id?: unknown } | null
-      if (me && snapshot.author === me.id) {
+      // Reviewers get prUrl: it must name the pull request checked here, or the check says nothing about it.
+      const checkedUrl = `https://github.com/${ghRepo}/pull/${prNumber}`.toLowerCase()
+      const sameTarget = !prUrl || githubPullUrlKey(prUrl) === checkedUrl
+      if (!sameTarget) {
+        consentWarnings.push(
+          `The pull request link given (${prUrl}) is not ${checkedUrl}, the pull request checked on GitHub; reviewers are given that link.`,
+        )
+      } else if (me && snapshot.author === me.id) {
         verifiedOwnPull = true
       } else {
         consentWarnings.push(
@@ -5712,6 +5719,8 @@ async function advanceGroupTempReviewers(
   if (!runner) return { ok: false, message: 'Git is not available.' }
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
   if (!revisions.ok) return { ok: false, message: revisions.message }
+  // The new head could not be confirmed on GitHub: the round still runs, but only after the person is asked.
+  let unverifiedHead = false
   try {
     const ghRepo = githubRemoteRepository(group.origin)
     if (ghRepo && group.prNumber !== null && !process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE) {
@@ -5737,7 +5746,8 @@ async function advanceGroupTempReviewers(
           revisions.base = snapshot.base.toLowerCase()
         }
       } catch {
-        // Proceed to origin branch reachability check below if GitHub CLI read is transiently unavailable.
+        // GitHub CLI read transiently unavailable: the origin branch check below still applies, and the person is asked.
+        unverifiedHead = true
       }
     } else if (!ghRepo && (group.prNumber !== null || group.prUrl) && !process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE) {
       const preForge = await loadForgeEvidenceForGroup(group).catch(() => null)
@@ -5766,7 +5776,7 @@ async function advanceGroupTempReviewers(
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
     // A scan that could not read the round's changes cannot show that no CLI/MCP configuration changed.
-    const requiresConsent = !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
+    const requiresConsent = unverifiedHead || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     if (requiresConsent && group.stage === 'active') {
       group.stage = 'starting'
     }
@@ -5805,6 +5815,7 @@ async function advanceGroupTempReviewers(
             true,
             desktopConfig.reviewerAllowAll,
             [
+              ...(unverifiedHead ? [`Could not confirm on GitHub that ${revisions.head.slice(0, 12)} is the head of ${group.prLabel}; it is on a branch of origin.`] : []),
               ...(configInspection.complete ? [] : [`Could not read which files round ${targetRound} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load.`]),
               ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
             ],

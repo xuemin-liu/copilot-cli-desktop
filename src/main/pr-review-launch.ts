@@ -396,6 +396,11 @@ async function ensureOriginBranchCommit(
   }
 }
 
+/** A GitHub pull request link without its query, fragment, trailing slash or sub-page, lower-cased, to compare targets. */
+export function githubPullUrlKey(url: string): string {
+  return url.trim().toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\/(files|commits|checks)(\/.*)?$/, '')
+}
+
 /**
  * Verifies that `head` and `base` belong to `origin`'s own branches (never an external fork ref or unpushed local commit)
  * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs.

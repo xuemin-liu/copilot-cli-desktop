@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import {
+  githubPullUrlKey,
   inspectReviewCommitAgentConfigs,
   makeReviewerArea,
   planReviewerArea,
@@ -678,6 +679,16 @@ test('dismissing the last required seat ends the group as stopped, never approve
   assert.equal(groupEnded, true)
   assert.equal(group.stage, 'ended')
   assert.equal(group.outcome, 'stopped')
+})
+
+test('githubPullUrlKey names the same pull request only for the same repository and number', () => {
+  const checked = 'https://github.com/owner/repo/pull/12'
+  for (const same of ['https://github.com/Owner/Repo/pull/12', 'https://github.com/owner/repo/pull/12/', 'https://github.com/owner/repo/pull/12/files', 'https://github.com/owner/repo/pull/12#discussion_r1', 'https://github.com/owner/repo/pull/12?w=1']) {
+    assert.equal(githubPullUrlKey(same), checked, same)
+  }
+  for (const other of ['https://github.com/attacker/repo/pull/12', 'https://github.com/owner/repo/pull/120', 'https://ghe.example.com/owner/repo/pull/12', 'http://omaha:3001/owner/repo/pulls/12']) {
+    assert.notEqual(githubPullUrlKey(other), checked, other)
+  }
 })
 
 test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectReviewCommitAgentConfigs enforce same-repo origin branches and detect repo-local agent configs', async () => {
