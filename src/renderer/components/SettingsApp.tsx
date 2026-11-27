@@ -1142,10 +1142,12 @@ export function SettingsApp(): JSX.Element | null {
           Ask before starting hidden reviewers
         </label>
         <p className="settings-disclaimer">
-          On by default: each review meeting and pull request review asks you before its hidden reviewers start. Turned off, they
-          start as soon as your agent asks for them. The meeting tools need no sign-in, so a program on this computer could then
-          start reviewers too. You are still asked for a pull request not verified as opened by your GitHub account, and for one
-          that adds or changes repo-local CLI or MCP configuration.
+          Off by default: hidden reviewers start as soon as your agent asks for them. The meeting tools need no sign-in, so a
+          program on this computer could start reviewers too; turn this on to be asked before each review meeting and pull
+          request review starts its reviewers. Your own request in a Copilot session to review and fix your pull request
+          already counts as the answer when only Copilot reviewers run. You are always asked for a pull request not verified
+          as opened by your GitHub account, for one that adds or changes repo-local CLI or MCP configuration, and when those
+          changes could not be read.
         </p>
       </section>
 

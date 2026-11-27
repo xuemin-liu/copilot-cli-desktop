@@ -411,6 +411,7 @@ class AgyStub {
       activeProfileId: project.id,
       reviewerClis: ['antigravity'],
       reviewerAllowAll: true,
+      reviewerStartPrompt: true,
       closeBehavior: 'quit',
       trayEnabled: false,
       notifications: false,

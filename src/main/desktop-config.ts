@@ -51,7 +51,7 @@ export interface DesktopConfig {
   reviewerClis: ReviewerCli[]
   /** Launch hidden temporary PR reviewer sessions with allow-all flags so background reviews do not block on prompts. */
   reviewerAllowAll: boolean
-  /** Ask before hidden reviewers start for a meeting or a pull request. Off: they start at once, unless the pull request is not verified as the person's own or changes repo-local CLI/MCP configuration. */
+  /** Ask before hidden reviewers start for a meeting or a pull request. Off (the default): they start at once, unless the pull request is not verified as the person's own or changes repo-local CLI/MCP configuration. */
   reviewerStartPrompt: boolean
   provider: CopilotProviderConfig
 }
@@ -146,7 +146,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   turnCheckpoints: true,
   reviewerClis: [...DEFAULT_REVIEWER_CLIS],
   reviewerAllowAll: true,
-  reviewerStartPrompt: true,
+  reviewerStartPrompt: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -411,7 +411,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     turnCheckpoints: value.turnCheckpoints !== false,
     reviewerClis: normalizeReviewerClis(value.reviewerClis),
     reviewerAllowAll: value.reviewerAllowAll !== false,
-    reviewerStartPrompt: value.reviewerStartPrompt !== false,
+    reviewerStartPrompt: value.reviewerStartPrompt === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

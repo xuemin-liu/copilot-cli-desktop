@@ -214,7 +214,7 @@ class AgyStub {
     const project = createWorkspaceProfile(repo)
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), {
-      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['antigravity'], reviewerAllowAll: true,
+      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['antigravity'], reviewerAllowAll: true, reviewerStartPrompt: true,
       meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
     })
 

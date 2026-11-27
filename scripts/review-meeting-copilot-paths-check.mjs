@@ -4,7 +4,7 @@
 // Covered: a Copilot session hosts with `start -Reviewers` on the meeting helper (consent, the hidden seat, its review
 // delivered to the host, the helper's `status` listing the seats, `end`); a joined seat whose tab changes to another
 // conversation leaves the meeting with that reason; a seat that takes a message and never answers is taken out after
-// two rounds without a reply. With E2E_NO_PROMPT=1, "Ask before starting hidden reviewers" is off and case 4 checks
+// two rounds without a reply. With E2E_NO_PROMPT=1, "Ask before starting hidden reviewers" is left at its default (off) and case 4 checks
 // that the seat starts and joins without the question. Not covered: a conversation change while the first prompt's recipient is being verified.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
@@ -183,7 +183,7 @@ if (!process.versions.electron) {
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), {
       ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['copilot'], reviewerAllowAll: true,
-      reviewerStartPrompt: !noPrompt, meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
+      ...(noPrompt ? {} : { reviewerStartPrompt: true }), meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
       provider: { type: 'openai', baseUrl: process.env.E2E_MODEL_URL, model: 'ui-check-model', offline: true },
     })
 

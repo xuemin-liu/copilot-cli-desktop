@@ -406,18 +406,22 @@ export async function inspectReviewCommitAgentConfigs(
   origin: string,
   head: string,
   base: string,
-): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }> {
+): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; complete: boolean }> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
   const root = resolve(project)
   await ensureOriginBranchCommit(runner, root, [], origin, head)
   await ensureOriginBranchCommit(runner, root, [], origin, base)
-  const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(() => '')
-  const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(() => '')
+  // A failed read (no merge base in a shallow clone, say) is recorded, not taken as "no configs".
+  let complete = true
+  const failed = (): string => { complete = false; return '' }
+  const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(failed)
+  const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(failed)
   const filterConfigs = (raw: string): string[] =>
     [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && isRepoAgentExecConfigPath(line)))]
   return {
     modifiedAgentConfigs: filterConfigs(diffPaths),
     presentAgentConfigs: filterConfigs(treePaths),
+    complete,
   }
 }
 

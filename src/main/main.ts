@@ -4678,7 +4678,7 @@ async function startTempReviewersFlow(options: {
     }
   }
 
-  let configInspection: { modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }
+  let configInspection: { modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; complete: boolean }
   try {
     configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutRoot, origin, revisions.head, revisions.base)
   } catch (error) {
@@ -4687,6 +4687,11 @@ async function startTempReviewersFlow(options: {
   if (!verifiedOwnPull && consentWarnings.length === 0) {
     consentWarnings.push(
       `Confirm that you trust ${repository} ${prLabel} before starting unsandboxed CLI reviewer sessions inside its checkout.`,
+    )
+  }
+  if (!configInspection.complete) {
+    consentWarnings.push(
+      `Could not read which files ${repository} ${prLabel} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load on startup.`,
     )
   }
   if (configInspection.modifiedAgentConfigs.length > 0) {
@@ -4734,7 +4739,8 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      const untrusted = !verifiedOwnPull || configInspection.modifiedAgentConfigs.length > 0
+      // A scan that could not read the changes cannot show that no CLI/MCP configuration changed.
+      const untrusted = !verifiedOwnPull || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
       const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings, untrusted)
       if (!approved) {
         if (!isEnded()) {
@@ -5114,6 +5120,9 @@ function onMeetingReviewerExit(tabId: string, status: 'completed' | 'crashed'): 
 }
 
 async function askMeetingReviewerConsent(meetingId: string, detail: string, stillWanted: () => boolean): Promise<boolean> {
+  // Turned off in Settings: reviewers of the person's own project start without the question, and without waiting
+  // behind another question still open.
+  if (!desktopConfig.reviewerStartPrompt) return stillWanted()
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -5121,8 +5130,6 @@ async function askMeetingReviewerConsent(meetingId: string, detail: string, stil
   try {
     // It may have waited behind another question: a run whose meeting closed meanwhile asks nothing.
     if (!stillWanted()) return false
-    // Turned off in Settings: reviewers of the person's own project start without the question.
-    if (!desktopConfig.reviewerStartPrompt) return true
     const owner = mainWindow
     if (!owner || owner.isDestroyed()) return false
     if (!owner.isVisible()) owner.show()

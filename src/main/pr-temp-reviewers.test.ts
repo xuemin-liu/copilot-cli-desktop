@@ -733,7 +733,18 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     // Once pushed to a real repository branch on origin, prepareAgnosticReviewWorktree succeeds:
     execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
     const cleanInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head1Sha, baseSha)
-    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [] })
+    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [], complete: true })
+
+    // A pushed branch with no history in common with base: the diff cannot be read, so the scan says it is incomplete.
+    execFileSync(gitExe.path, ['checkout', '-q', '--orphan', 'unrelated'], { cwd: repo, env: gitEnv })
+    writeFileSync(join(repo, 'app.ts'), 'export const v = 9\n')
+    execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['commit', '-q', '-m', 'unrelated'], { cwd: repo, env: gitEnv })
+    const unrelatedSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'unrelated'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['checkout', '-q', '-f', 'feat/round-1'], { cwd: repo, env: gitEnv })
+    const unrelatedInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, unrelatedSha, baseSha)
+    assert.equal(unrelatedInspect.complete, false, 'a diff that could not be read is not a clean result')
 
     const area = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
     await prepareAgnosticReviewWorktree(runner, repo, upstream, area, head1Sha, baseSha, 12)
