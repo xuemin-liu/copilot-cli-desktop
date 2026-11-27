@@ -30,7 +30,7 @@ async function main() {
   }
 
   const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
-  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535 || typeof cfg.seatToken !== 'string' || !/^[a-f0-9]{64}$/.test(cfg.seatToken)) {
+  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535 || typeof cfg.seatId !== 'string' || !cfg.seatId || typeof cfg.seatToken !== 'string' || !/^[a-f0-9]{64}$/.test(cfg.seatToken)) {
     console.error('Invalid seat receipt configuration.')
     process.exitCode = 1
     return
@@ -39,6 +39,7 @@ async function main() {
   const payload = JSON.stringify({
     seatToken: cfg.seatToken,
     groupId: cfg.groupId,
+    seatId: cfg.seatId,
     cli: cfg.cli,
     generation: cfg.generation,
     round: cfg.round,

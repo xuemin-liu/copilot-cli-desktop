@@ -5,7 +5,8 @@ import { basename, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isSessionPermissionMode } from './permission-modes.js'
-import { isOtherCli, normalizeReviewerClis, DEFAULT_REVIEWER_CLIS, type OtherCli, type ReviewerCli } from './session-cli.js'
+import { isOtherCli, DEFAULT_REVIEWER_CLIS, type OtherCli } from './session-cli.js'
+import { normalizeReviewerEntries, type ReviewerEntry } from './reviewer-settings.js'
 import { normalizeOtherCliConfig, normalizePerCliConfig } from './agent-cli-settings.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
@@ -48,7 +49,7 @@ export interface DesktopConfig {
   /** Snapshot a session's working folder at each turn, in the app's own data folder. Turning it off deletes the snapshots. */
   turnCheckpoints: boolean
   /** Default CLIs launched as temporary PR reviewers when a workspace has no override of its own. */
-  reviewerClis: ReviewerCli[]
+  reviewerEntries: ReviewerEntry[]
   /** Launch hidden temporary PR reviewer sessions with allow-all flags so background reviews do not block on prompts. */
   reviewerAllowAll: boolean
   /** Ask before hidden reviewers start for a meeting or a pull request. Off (the default): they start at once, unless the pull request is not verified as the person's own, its repository has repo-local CLI/MCP configuration, or its changes could not be read. */
@@ -58,8 +59,15 @@ export interface DesktopConfig {
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerClis' | 'reviewerAllowAll' | 'reviewerStartPrompt'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerEntries' | 'reviewerAllowAll' | 'reviewerStartPrompt'
 >
+
+function sameReviewerEntries(left: readonly ReviewerEntry[], right: readonly ReviewerEntry[]): boolean {
+  return left.length === right.length && left.every((entry, index) => {
+    const other = right[index]!
+    return entry.id === other.id && entry.cli === other.cli && entry.model === other.model && entry.reasoningEffort === other.reasoningEffort
+  })
+}
 
 function samePrefValue(a: unknown, b: unknown): boolean {
   return Array.isArray(a) && Array.isArray(b)
@@ -78,6 +86,12 @@ export function preferenceRollback(
 ): Partial<DesktopPreferences> {
   const rollback: Partial<DesktopPreferences> = {}
   for (const key of Object.keys(before) as Array<keyof DesktopPreferences>) {
+    if (key === 'reviewerEntries') {
+      if (!sameReviewerEntries(before.reviewerEntries, applied.reviewerEntries) && sameReviewerEntries(current.reviewerEntries, applied.reviewerEntries)) {
+        rollback.reviewerEntries = before.reviewerEntries.map((entry) => ({ ...entry }))
+      }
+      continue
+    }
     if (!samePrefValue(before[key], applied[key]) && samePrefValue(current[key], applied[key])) {
       Object.assign(rollback, { [key]: Array.isArray(before[key]) ? [...before[key]] : before[key] })
     }
@@ -144,7 +158,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   desktopControl: false,
   openFilesOutsideWorkspace: false,
   turnCheckpoints: true,
-  reviewerClis: [...DEFAULT_REVIEWER_CLIS],
+  reviewerEntries: normalizeReviewerEntries(undefined, undefined, DEFAULT_REVIEWER_CLIS),
   reviewerAllowAll: true,
   reviewerStartPrompt: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
@@ -267,11 +281,9 @@ function otherCliProfileField(value: unknown): Pick<WorkspaceProfile, 'otherCli'
   return Object.keys(otherCli).length > 0 ? { otherCli } : {}
 }
 
-/** Omit the profile's reviewerClis override when unset or when no supported CLI remains in it. */
-function reviewerClisProfileField(value: unknown): Pick<WorkspaceProfile, 'reviewerClis'> {
-  if (!Array.isArray(value)) return {}
-  const normalized = normalizeReviewerClis(value, [])
-  return normalized.length > 0 ? { reviewerClis: normalized } : {}
+function reviewerEntriesProfileField(value: unknown, legacy: unknown): Pick<WorkspaceProfile, 'reviewerEntries'> {
+  const entries = normalizeReviewerEntries(value, legacy, [])
+  return entries.length > 0 ? { reviewerEntries: entries } : {}
 }
 
 /** A restored non-Copilot tab keeps its CLI and, when it had a saved permission/model snapshot, that snapshot. */
@@ -369,7 +381,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
         defaultResumeMode,
         launch: normalizeSessionLaunchConfig(profile.launch),
         ...otherCliProfileField(profile.otherCli),
-        ...reviewerClisProfileField(profile.reviewerClis),
+        ...reviewerEntriesProfileField(profile.reviewerEntries, profile.reviewerClis),
         tabs: readRestoredTabs(profile.tabs),
         ...(profile.general === true ? { general: true as const } : {}),
       })
@@ -409,7 +421,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     desktopControl: value.desktopControl === true,
     openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
     turnCheckpoints: value.turnCheckpoints !== false,
-    reviewerClis: normalizeReviewerClis(value.reviewerClis),
+    reviewerEntries: normalizeReviewerEntries(value.reviewerEntries, value.reviewerClis, DEFAULT_REVIEWER_CLIS),
     reviewerAllowAll: value.reviewerAllowAll !== false,
     reviewerStartPrompt: value.reviewerStartPrompt === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),

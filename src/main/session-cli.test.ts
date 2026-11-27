@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DEFAULT_REVIEWER_CLIS, normalizeReviewerClis, otherCliLaunchKey, validateReviewerClis } from './session-cli.js'
+import { DEFAULT_REVIEWER_CLIS, normalizeReviewerClis, otherCliLaunchKey } from './session-cli.js'
 
 test('the launch key changes when a tab restarts as another version, so the sidebar reads the fresh lookup', () => {
   const before = otherCliLaunchKey([{ cli: 'claude', cliVersion: '2.1.0' }, { cli: 'claude', cliVersion: '2.1.0' }])
@@ -17,7 +17,7 @@ test('the launch key ignores Copilot tabs and tab order, and is empty without an
   )
 })
 
-test('reviewer CLI normalization preserves canonical order, deduplicates, and rejects invalid UI submissions', () => {
+test('legacy reviewer CLI normalization preserves canonical order and deduplicates', () => {
   assert.deepEqual(normalizeReviewerClis(undefined), DEFAULT_REVIEWER_CLIS)
   assert.deepEqual(normalizeReviewerClis([]), DEFAULT_REVIEWER_CLIS)
   assert.deepEqual(normalizeReviewerClis(['unknown-cli', 42]), DEFAULT_REVIEWER_CLIS)
@@ -25,10 +25,4 @@ test('reviewer CLI normalization preserves canonical order, deduplicates, and re
     normalizeReviewerClis(['antigravity', 'codex', 'claude', 'codex', 'copilot']),
     ['copilot', 'claude', 'codex', 'antigravity'],
   )
-
-  assert.equal(validateReviewerClis(undefined, true), undefined)
-  assert.throws(() => validateReviewerClis(undefined, false), /Invalid PR reviewer CLIs/)
-  assert.throws(() => validateReviewerClis([]), /at least one/)
-  assert.throws(() => validateReviewerClis(['unknown-cli']), /Unsupported PR reviewer CLI/)
-  assert.deepEqual(validateReviewerClis(['antigravity', 'codex', 'claude']), ['claude', 'codex', 'antigravity'])
 })

@@ -9,8 +9,7 @@ export const OTHER_CLIS = ['claude', 'codex', 'antigravity'] as const
 export const SESSION_CLIS = ['copilot', ...OTHER_CLIS] as const
 
 /**
- * CLIs supported as hidden temporary PR reviewers (`review-pr` running directly against the remote PR in an isolated
- * detached Git worktree): Copilot CLI, Claude Code, Codex CLI, and Antigravity CLI.
+ * CLIs supported by hidden temporary PR reviews and review meetings.
  */
 export const SUPPORTED_REVIEWER_CLIS = ['copilot', 'claude', 'codex', 'antigravity'] as const
 export type ReviewerCli = typeof SUPPORTED_REVIEWER_CLIS[number]
@@ -32,22 +31,6 @@ export function normalizeReviewerClis(
   const wanted = new Set<ReviewerCli>()
   for (const item of value) if (isReviewerCli(item)) wanted.add(item)
   if (wanted.size === 0) return [...fallback]
-  return SUPPORTED_REVIEWER_CLIS.filter((cli) => wanted.has(cli))
-}
-
-/**
- * Validate a reviewer CLI list submitted from Settings: rejects non-arrays, unknown CLIs, or an empty selection
- * so a save never silently drops a user choice. `undefined` / `null` means "clear workspace override (inherit global)".
- */
-export function validateReviewerClis(value: unknown, allowInherit = false): ReviewerCli[] | undefined {
-  if (allowInherit && (value === undefined || value === null)) return undefined
-  if (!Array.isArray(value)) throw new Error('Invalid PR reviewer CLIs')
-  const wanted = new Set<ReviewerCli>()
-  for (const item of value) {
-    if (!isReviewerCli(item)) throw new Error(`Unsupported PR reviewer CLI "${String(item)}"`)
-    wanted.add(item)
-  }
-  if (wanted.size === 0) throw new Error('Choose at least one CLI to act as a PR reviewer')
   return SUPPORTED_REVIEWER_CLIS.filter((cli) => wanted.has(cli))
 }
 

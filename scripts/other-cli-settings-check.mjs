@@ -146,7 +146,7 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}`)
     }
     await suntil('document.querySelector(".other-cli-settings")', 'per-CLI settings')
-    await suntil('document.querySelector(\'option[value="local-test-model"]\')', 'Copilot model from the configured provider')
+    await suntil('document.querySelector(\'.settings-card > .settings-form-grid option[value="local-test-model"]\')', 'workspace Copilot model from the configured provider')
     const selectOption = (selector, evaluate = sui) => evaluate(`(() => {
       const option = document.querySelector(${JSON.stringify(selector)})
       const select = option.closest('select')
@@ -179,12 +179,15 @@ if (!process.versions.electron) {
     await selectOption(`${copilotGrid} option[value="--custom-model"]`)
     await setInput(`${copilotGrid} input[maxlength="200"]`, 'custom-review-model')
     await saveLaunch('custom-review-model', 'high')
-    await selectOption('option[value="local-test-model"]')
+    await selectOption(`${copilotGrid} option[value="local-test-model"]`)
     await saveLaunch('local-test-model', 'high')
+    const providerRevision = await sui('window.copilotDesktopSettings.get().then(settings => settings.copilotModelCatalogRevision)')
     await setInput('input[placeholder="Model or deployment identifier"]', 'replacement-test-model')
     await clickButton('Save provider')
     await suntil('document.querySelector(\'option[value="replacement-test-model"]\')', 'updated Copilot provider model')
-    assert.equal(await sui('document.querySelector(\'option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
+    assert.ok(await sui('window.copilotDesktopSettings.get().then(settings => settings.copilotModelCatalogRevision)') > providerRevision,
+      'saving the provider invalidates catalogs that concurrent reviewer saves may have prefetched')
+    assert.equal(await sui('document.querySelector(\'.settings-card > .settings-form-grid option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
     assert.equal(await sui('document.querySelectorAll(".other-cli-tab").length'), 3)
     await sui('document.querySelectorAll(".other-cli-tab")[1].click()')
     await suntil('document.querySelectorAll(".other-cli-settings select").length === 4', 'Codex approval, sandbox, model and effort')
@@ -205,6 +208,7 @@ if (!process.versions.electron) {
 
     // Exercise the built renderer with a fixed Auto catalog independent of any installed account's model policies.
     const fixtureState = await sui('window.copilotDesktopSettings.get()')
+    fixtureState.reviewerEntries = [{ id: 'fixture-reviewer', cli: 'copilot', reasoningEffort: 'high' }]
     const fixturePreload = join(directory, 'fixture-settings-preload.cjs')
     await writeFile(fixturePreload, `
       const { contextBridge } = require('electron')
@@ -289,8 +293,21 @@ if (!process.versions.electron) {
     const displayedEffort = await fixtureUi(`[...document.querySelectorAll(${JSON.stringify(copilotGrid + ' > label')})]
       .find(label => label.firstChild.textContent.trim() === 'Reasoning effort').querySelector('select').value`)
     assert.equal(displayedEffort, '', 'the saved effort is reflected despite the unrelated edit')
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    await fixtureUi(`[...document.querySelectorAll('label.settings-row')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
+    const reviewerList = '.settings-card .reviewer-settings-list'
+    await selectOption(`${reviewerList} option[value="high"]`, fixtureUi)
+    await setInput(customInput, 'auto', fixtureUi)
+    assert.match(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]').textContent`), /auto does not support high reasoning effort/)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    assert.equal(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]') === null`), true)
+    await fixtureUi(`[...document.querySelectorAll('label.settings-row')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
+    await setInput(customInput, 'auto', fixtureUi)
+    assert.match(await fixtureUi("document.querySelector('.settings-card .reviewer-settings-error').textContent"), /Desktop reviewer 1 \(Copilot CLI\). auto does not support high/)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    assert.equal(await fixtureUi("document.querySelector('.settings-card .reviewer-settings-error') === null"), true)
     fixtureSettings.destroy()
-    console.log('OK: custom model typing preserves effort until the completed model is saved')
+    console.log('OK: custom model typing preserves effort and workspace model changes flag incompatible reviewer overrides')
 
     app.exit(0)
   }

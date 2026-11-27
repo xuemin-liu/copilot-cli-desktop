@@ -210,11 +210,13 @@ class AgyStub {
     // Uncommitted work the reviewers' checkouts must not contain.
     await writeFile(join(repo, 'service.ts'), 'export const version = 2 // not committed\n')
 
-    const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
+    const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, readDesktopConfig, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const project = createWorkspaceProfile(repo)
     project.defaultResumeMode = 'new'
-    await writeDesktopConfig(join(userData, 'desktop.json'), {
-      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['antigravity'], reviewerAllowAll: true, reviewerStartPrompt: true,
+    project.otherCli = { antigravity: { model: 'workspace-model' } }
+    const configPath = join(userData, 'desktop.json')
+    await writeDesktopConfig(configPath, {
+      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerEntries: [{ id: 'antigravity', cli: 'antigravity' }], reviewerAllowAll: true, reviewerStartPrompt: true,
       meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
     })
 
@@ -271,7 +273,7 @@ class AgyStub {
     assert.equal(started.isError, false, started.text)
     const meetingA = meetingIdOf(started.text)
     assert.ok(meetingA, started.text)
-    assert.match(started.text, /Hidden reviewer sessions for meeting [0-9A-Z]{4}: Antigravity CLI\./)
+    assert.match(started.text, /Hidden reviewer sessions for meeting [0-9A-Z]{4}: Antigravity CLI \(workspace-model\)\./)
     assert.match(started.text, /Round 1 opens when each has joined or failed/)
     const outsider = await client('codex-cli')
     const joined = await outsider('meeting_join', { meeting: meetingA })
@@ -283,7 +285,7 @@ class AgyStub {
     await until('the person to be asked', async () => consents.length === 1)
     assert.equal(consents[0].defaultId, 0, 'the default answer is to decline')
     assert.equal(consents[0].buttons[0], 'Cancel')
-    assert.match(consents[0].detail, /Reviewers: Antigravity CLI\./)
+    assert.match(consents[0].detail, /Reviewers: Antigravity CLI \(workspace-model\)\./)
     assert.match(consents[0].detail, new RegExp(`at commit ${head.slice(0, 12)}`))
     assert.match(consents[0].detail, /not a sandbox/)
     assert.match((await host('meeting_status')).text, /Hidden reviewers are starting; round 1 opens when each has joined or failed/)
@@ -306,7 +308,7 @@ class AgyStub {
     const digest = await nextMessage(host)
     assert.match(digest, /Stub review: the plan holds\./)
     assert.match(digest, /Outside review: fine\./)
-    assert.match((await host('meeting_status')).text, /- Antigravity CLI: in the meeting/)
+    assert.match((await host('meeting_status')).text, /- Antigravity CLI \(workspace-model\): in the meeting/)
 
     // 2. A hidden voter whose session ends during the vote: the others cannot agree for it.
     await writeFile(behaviorFile, JSON.stringify({ mode: 'exit-on-vote' }))
@@ -326,7 +328,7 @@ class AgyStub {
     assert.doesNotMatch(back, /is closed/)
     const afterVote = await until('the seat to show as left', async () => { const group = await groupOf(meetingA); return group?.seats[0].verdict === 'incomplete' ? group : null })
     assert.equal(afterVote.seats[0].needsAttention, true)
-    assert.match((await host('meeting_status')).text, /- Antigravity CLI: left/)
+    assert.match((await host('meeting_status')).text, /- Antigravity CLI \(workspace-model\): left/)
 
     // 3. The host ends the meeting: the hidden tab, the checkout and the reservation go with it.
     await host('meeting_end')
@@ -410,7 +412,7 @@ class AgyStub {
     const gone = await until('the seat to show as left', async () => { const group = await groupOf(meetingH); return group?.seats[0].verdict === 'incomplete' ? group : null }, 30_000)
     assert.match(gone.seats[0].error, /It left the meeting/)
     assert.ok(gone.seats[0].tabId, 'its tab stays, since its session is still running')
-    assert.match((await hostH('meeting_status')).text, /- Antigravity CLI: left/)
+    assert.match((await hostH('meeting_status')).text, /- Antigravity CLI \(workspace-model\): left/)
     assert.match(await nextMessage(hostH), /Stub review: looks fine\./, 'its one review reached the host')
     await writeFile(behaviorFile, JSON.stringify({ mode: 'review' }))
     await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(gone.id)}, 'retry', 'antigravity')`)
@@ -438,7 +440,81 @@ class AgyStub {
     await hostI('meeting_end')
     await until('everything to be closed', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0, 30_000)
 
-    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF, meetingH, meetingI] }, null, 2))
+    // 11. Use the Settings renderer to save two rows for the same CLI, with one model inherited from the workspace.
+    await ui('window.copilotDesktop.openSettings()')
+    const settings = await until('Settings to open', () => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('settings.html')))
+    const sui = (code) => settings.webContents.executeJavaScript(code)
+    const list = 'section > .reviewer-settings-list'
+    const clickSetting = (name, scope = 'document') => sui(`[...${scope}.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(name)}).click()`)
+    const choose = (selector, value) => sui(`(() => {
+      const select = document.querySelector(${JSON.stringify(selector)})
+      select.value = ${JSON.stringify(value)}
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })()`)
+    await until('reviewer settings to render', () => sui(`Boolean(document.querySelector('${list}'))`))
+    await clickSetting('Add reviewer', `document.querySelector('${list}').parentElement`)
+    await choose(`${list} li:nth-child(2) select`, 'antigravity')
+    await choose(`${list} li:nth-child(2) label:nth-of-type(2) select`, '--custom-model')
+    await sui(`(() => {
+      const input = document.querySelector('${list} li:nth-child(2) input')
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'custom-reviewer-model')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })()`)
+    await clickSetting('Add reviewer', `document.querySelector('${list}').parentElement`)
+    await choose(`${list} li:nth-child(3) label:nth-of-type(3) select`, 'high')
+    await clickSetting('Save reviewers')
+    await until('the reasoning override to persist', async () => (await readDesktopConfig(configPath)).reviewerEntries[2]?.reasoningEffort === 'high')
+    await until('reviewer save to finish', () => sui(`![...document.querySelectorAll('button')].some((button) => button.textContent === 'Save reviewers')`))
+    await clickSetting('Remove reviewer', `document.querySelector('${list} li:nth-child(3)')`)
+    await clickSetting('Save reviewers')
+    const saved = await until('both reviewer rows to be persisted', async () => {
+      const config = await readDesktopConfig(configPath)
+      return config.reviewerEntries.length === 2 ? config.reviewerEntries : null
+    })
+    assert.deepEqual(saved.map(({ cli, model }) => [cli, model]), [['antigravity', undefined], ['antigravity', 'custom-reviewer-model']])
+    await until('the saved list to reach Settings', () => sui(`![...document.querySelectorAll('button')].some((button) => button.textContent === 'Save reviewers')`))
+
+    // Set a workspace override and return to the Desktop list through the same form.
+    const workspaceList = 'label.settings-row'
+    const toggleInheritance = () => sui(`[...document.querySelectorAll('${workspaceList}')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
+    await toggleInheritance()
+    await until('the workspace to show two reviewer rows', () => sui(`document.querySelectorAll('.settings-card .reviewer-settings-list li').length === 2`))
+    await clickSetting('Save profile')
+    await until('the workspace override to persist', async () => (await readDesktopConfig(configPath)).profiles[0].reviewerEntries?.length === 2)
+    await until('profile save to finish', () => sui(`[...document.querySelectorAll('button')].some(button => button.textContent === 'Save profile' && !button.disabled)`))
+    await toggleInheritance()
+    await until('the workspace to use the Desktop list', () => sui(`!document.querySelector('.settings-card .reviewer-settings-list')`))
+    await clickSetting('Save profile')
+    await until('the workspace override to clear', async () => !(await readDesktopConfig(configPath)).profiles[0].reviewerEntries)
+    settings.close()
+
+    const hostJ = await client('claude-code')
+    const startJ = await hostJ('meeting_start', { topic: 'same CLI', post: 'Plan J.', folder: repo, reviewers: true })
+    const meetingJ = meetingIdOf(startJ.text)
+    assert.ok(meetingJ, startJ.text)
+    const pair = await until('both Antigravity reviewers to join', async () => {
+      const group = await groupOf(meetingJ)
+      return group?.seats.length === 2 && group.seats.every((seat) => seat.verdict === 'reviewing') ? group : null
+    }, 30_000)
+    assert.deepEqual(pair.seats.map((seat) => seat.id), saved.map((row) => row.id))
+    assert.equal(new Set(pair.seats.map((seat) => seat.label)).size, 2)
+    const pairTabs = (await getState()).tabs.filter((tab) => tab.tempReviewer?.groupId === pair.id)
+    const pairDumps = (await dumps()).filter((dump) => pairTabs.some((tab) => tab.processId === dump.pid))
+    assert.equal(new Set(pairDumps.map((dump) => dump.cwd)).size, 2)
+    assert.deepEqual(pairDumps.map(({ args }) => args[args.indexOf('--model') + 1]).sort(), ['custom-reviewer-model', 'workspace-model'])
+    assert.equal(worktrees(), 3)
+    const [firstSeat, secondSeat] = pair.seats
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(pair.id)}, 'retry', ${JSON.stringify(firstSeat.id)})`)
+    await until('one reviewer to retry independently', async () => {
+      const group = await groupOf(meetingJ)
+      return group?.seats[0].verdict === 'reviewing' && group.seats[0].tabId !== firstSeat.tabId && group.seats[1].tabId === secondSeat.tabId
+    })
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(pair.id)}, 'dismiss', ${JSON.stringify(firstSeat.id)})`)
+    assert.deepEqual((await groupOf(meetingJ)).seats.map((seat) => seat.id), [secondSeat.id])
+    await hostJ('meeting_end')
+    await until('both reviewers to clean up', async () => !(await getState()).tabs.some((tab) => tab.tempReviewer) && worktrees() === 1 && await leftovers() === 0)
+
+    await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, meetings: [meetingA, meetingB, meetingC, meetingD, meetingE, meetingF, meetingH, meetingI, meetingJ] }, null, 2))
     app.exit(0)
   }
 }

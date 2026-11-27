@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
-import { sessionCliLabel, type ReviewerCli } from '../../main/session-cli.js'
 import type { TempReviewerGroupView, TempReviewerSeatVerdict } from '../../main/types.js'
 
 export interface ReviewerBarProps {
@@ -55,7 +54,7 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
   const runAction = (
     groupId: string,
     action: 'stop' | 'retry' | 'dismiss' | 'dismiss-ended',
-    payload?: ReviewerCli,
+    payload?: string,
   ): void => {
     setBusyGroupId(groupId)
     void window.copilotDesktop.tempReviewerAction(groupId, action, payload)
@@ -111,11 +110,11 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                 const canDismiss = !ended
                 return (
                   <li
-                    key={seat.cli}
+                    key={seat.id}
                     className={`reviewer-seat reviewer-seat-${seat.verdict}${seat.needsAttention ? ' reviewer-seat-attention' : ''}`}
                     title={seat.error ?? undefined}
                   >
-                    <span className="reviewer-seat-name">{sessionCliLabel(seat.cli)}</span>
+                    <span className="reviewer-seat-name">{seat.label}</span>
                     <span className="reviewer-seat-verdict">
                       {seat.needsAttention && seat.verdict === 'reviewing' ? 'needs approval' : verdictLabel[seat.verdict]}
                     </span>
@@ -134,7 +133,7 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                         type="button"
                         className="meeting-bar-button"
                         disabled={busy}
-                        onClick={() => runAction(group.id, 'retry', seat.cli)}
+                        onClick={() => runAction(group.id, 'retry', seat.id)}
                       >
                         Retry
                       </button>
@@ -144,8 +143,8 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
                         type="button"
                         className="meeting-bar-button"
                         disabled={busy}
-                        title={`Remove ${sessionCliLabel(seat.cli)} from required reviewers for this run`}
-                        onClick={() => runAction(group.id, 'dismiss', seat.cli)}
+                        title={`Remove ${seat.label} from required reviewers for this run`}
+                        onClick={() => runAction(group.id, 'dismiss', seat.id)}
                       >
                         Dismiss
                       </button>
@@ -179,8 +178,8 @@ export function ReviewerBar({ groups, activeTabId, activeProfileId = null, peekT
               <span className="meeting-bar-note reviewer-bar-notice" role="status">{group.notice}</span>
             )}
             {group.seats.filter((s) => s.error && !ended).map((seat) => (
-              <span key={`${seat.cli}-err`} className="meeting-bar-note meeting-bar-quiet" role="status">
-                {sessionCliLabel(seat.cli)}: {seat.error}
+              <span key={`${seat.id}-err`} className="meeting-bar-note meeting-bar-quiet" role="status">
+                {seat.label}: {seat.error}
               </span>
             ))}
           </section>

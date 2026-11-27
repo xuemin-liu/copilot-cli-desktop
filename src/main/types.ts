@@ -5,6 +5,7 @@ import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import type { MeetingView } from './meeting.js'
+import type { ReviewerEntry } from './reviewer-settings.js'
 import type { OtherCli, ReviewerCli } from './session-cli.js'
 import type { IncompatibleField, OtherCliConfig, PerCliConfig } from './agent-cli-settings.js'
 
@@ -60,8 +61,8 @@ export interface WorkspaceProfile {
   launch: SessionLaunchConfig
   /** Per-CLI permission/model settings for non-Copilot sessions. Absent = each other CLI uses its own defaults. */
   otherCli?: OtherCliConfig
-  /** Optional per-workspace override of allowed temporary PR reviewer CLIs; absent inherits the global setting. */
-  reviewerClis?: ReviewerCli[]
+  /** Optional per-workspace override of the hidden reviewer list; absent inherits the global setting. */
+  reviewerEntries?: ReviewerEntry[]
   tabs: RestoredTab[]
   /** For work with no project behind it, in a folder the desktop made. Saved. */
   general?: true
@@ -129,6 +130,7 @@ export interface DesktopSessionTab {
 }
 
 export interface TempReviewerTabInfo {
+  seatId: string
   groupId: string
   hostTabId: string | null
   cli: ReviewerCli
@@ -151,6 +153,9 @@ export type TempReviewerSeatVerdict =
   | 'stopped'
 
 export interface TempReviewerSeatView {
+  id: string
+  label: string
+  tag?: string
   cli: ReviewerCli
   tabId: string | null
   verdict: TempReviewerSeatVerdict
