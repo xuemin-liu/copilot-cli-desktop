@@ -6106,13 +6106,17 @@ async function advanceGroupTempReviewers(
                 const area = seat.area
                 if (!owned()) return 'stale'
                 if (!area || !seat.tabId) return 'relaunch'
+                // Its launch is still in flight: the relaunch path cancels it and waits for its cleanup first.
+                if (tempSeatLaunchesInFlight.has(seat)) return 'relaunch'
                 const refreshed = await refreshAgnosticReviewWorktree(runner, area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
                 if (!owned()) return 'stale'
                 if (!refreshed || seat.area !== area || !seat.tabId) return 'relaunch'
                 seat.checkedOut = refreshed
                 seat.checkedOutBase = revisions.base
-                const seatReceiptPath = await writeTempReviewerReceipt(group, seat, area.helper)
+                // A receipt that could not be written is this seat's problem, not the run's: start it again.
+                const seatReceiptPath = await writeTempReviewerReceipt(group, seat, area.helper).catch(() => null)
                 if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
+                if (!seatReceiptPath) return 'relaunch'
                 const seatStateDir = join(area.helper, 'pr-state')
                 // A brief that could not be written would leave the tab reading the previous round's: relaunch instead.
                 const briefWritten = await writeFile(join(area.helper, 'reviewer-brief.md'), buildReviewerBrief({
