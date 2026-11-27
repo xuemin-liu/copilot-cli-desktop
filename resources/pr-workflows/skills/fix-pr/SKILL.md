@@ -18,7 +18,7 @@ This workflow applies to **any remote Git repository and PR/MR host** (GitHub, s
    - **Bitbucket / Azure DevOps / other hosts**: matching CLI or REST API + `git credential fill`.
 3. If the user omitted the PR/MR number, resolve the open PR/MR for the current branch on that host. Inspect existing feedback immediately rather than waiting for a later poll.
 
-**Shell and state file**: the commands in this skill are written for a POSIX shell. In PowerShell write `$env:COPILOT_DESKTOP_PR_TOOLS` and `$env:COPILOT_DESKTOP_PR_STATE` (a bare `$COPILOT_DESKTOP_PR_TOOLS` is empty there), and keep the paths quoted. `$COPILOT_DESKTOP_PR_STATE` is a directory: `<state-file>` below is a file of your own inside it, one per PR and role, reused for this run and not shared with another session (for example `"$COPILOT_DESKTOP_PR_STATE/<host>-<owner>-<repo>-pr<number>-author.json"`).
+**Shell and state file**: the commands in this skill are written for a POSIX shell. In PowerShell write `$env:COPILOT_DESKTOP_PR_TOOLS` and `$env:COPILOT_DESKTOP_PR_STATE` (a bare `$COPILOT_DESKTOP_PR_TOOLS` is empty there), and keep the paths quoted. `$COPILOT_DESKTOP_PR_STATE` is a directory that the desktop's sessions share: `<state-file>` below is a file of your own inside it, named once when you start and reused for this run only (for example `"$COPILOT_DESKTOP_PR_STATE/<host>-<owner>-<repo>-pr<number>-author-<random>.json"`, with a random part of your own). Another session working on the same PR, in the same role or not, must not get the same file: it would move your watermark past feedback you have not handled.
 
 ## 2. Role boundaries
 

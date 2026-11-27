@@ -256,7 +256,7 @@ test('bundled skills name only helper flags, meeting tools and paths that exist'
       assert.ok(toolNames.has(tool), `${name} names ${tool}, which is not a copilot-meeting tool`)
     }
     // An installed skill is one SKILL.md in a CLI's skills folder, in any project: a path into this repository is not there.
-    assert.doesNotMatch(text, /resources[\/]pr-workflows/, `${name} points into this repository`)
+    assert.doesNotMatch(text, /resources[\\/]pr-workflows/, `${name} points into this repository`)
     // Inside a linked worktree .git is a file, so a worktree cannot be added under it.
     assert.doesNotMatch(text, /worktree add[^`\n]*\s\.git\//, `${name} adds a worktree under a plain .git path`)
   }
