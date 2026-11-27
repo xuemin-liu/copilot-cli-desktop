@@ -683,6 +683,8 @@ export interface TempReviewerGroup {
   stage: 'starting' | 'active' | 'ended'
   outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   notice: string | null
+  /** The start is still waiting on the person's answer: no round may launch seats before it. */
+  awaitingStartConsent: boolean
   /** Repo-local CLI/MCP configuration (path to Git object id) shown in a question the person approved for this run. */
   disclosedAgentConfigs: Map<string, string>
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
@@ -878,6 +880,7 @@ export class TempReviewerRegistry {
       outcome: null,
       notice: null,
       disclosedAgentConfigs: new Map(),
+      awaitingStartConsent: true,
       lastObservedHostSettledKey: null,
       requiredSeats,
       claimedEvidenceKeys: new Set<string>(),

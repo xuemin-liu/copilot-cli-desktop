@@ -4747,7 +4747,10 @@ async function startTempReviewersFlow(options: {
   broadcastState()
 
   void (async () => {
-    const isEnded = (): boolean => group.stage === 'ended'
+    // A forced round can replace this one while the person is being asked: the start then launches nothing, and the
+    // new round launches the seats at its own revision.
+    const startRound = group.round
+    const isEnded = (): boolean => group.stage === 'ended' || group.round !== startRound
     try {
       // Skipped only for the person's own pull request in a repository with no repo-local CLI/MCP configuration at all:
       // a scan that could not read the changes shows nothing, and an existing startup hook can run scripts anywhere in
@@ -4755,6 +4758,7 @@ async function startTempReviewersFlow(options: {
       const skipQuestion = !desktopConfig.reviewerStartPrompt && verifiedOwnPull && configInspection.complete
         && configInspection.modifiedAgentConfigs.length === 0 && configInspection.presentAgentConfigs.length === 0
       const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings, skipQuestion)
+        .finally(() => { group.awaitingStartConsent = false })
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -4774,7 +4778,8 @@ async function startTempReviewersFlow(options: {
           broadcastState()
         }
       }
-      if (group.stage === 'starting') {
+      // A round that replaced this one opens the run itself once its seats are up.
+      if (!isEnded() && group.stage === 'starting') {
         group.stage = 'active'
         tempReviewers.wakeAll()
         broadcastState()
@@ -5723,6 +5728,8 @@ async function advanceGroupTempReviewers(
   summary: string,
   options?: { force?: boolean },
 ): Promise<MeetingResponse> {
+  // Nothing launches before the person has answered the start's question, a forced round included.
+  if (group.awaitingStartConsent) return { ok: false, message: 'The person has not answered the question about these reviewers yet. Wait, then start the round again.' }
   const runner = await meetingGitRunner()
   if (!runner) return { ok: false, message: 'Git is not available.' }
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
