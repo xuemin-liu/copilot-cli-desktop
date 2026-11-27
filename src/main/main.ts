@@ -5885,6 +5885,8 @@ async function advanceGroupTempReviewers(
               ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
             ],
           )
+          // A newer round replaced this one while the question was open: its answer applies to nothing now.
+          if (isStaleOrEnded()) return
           if (!approved) {
             if (group.stage !== 'ended') {
               const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -5895,7 +5897,6 @@ async function advanceGroupTempReviewers(
           }
           // Only configuration this question named counts as shown to the person.
           discloseAgentConfigs(group, configInspection.presentAgentConfigObjects, [...unaskedConfigs, ...configInspection.modifiedAgentConfigs])
-          if (isStaleOrEnded()) return
         }
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
