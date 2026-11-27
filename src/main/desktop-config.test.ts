@@ -80,12 +80,14 @@ test('reviewerClis and reviewerAllowAll default cleanly and round-trip global an
     const config = structuredClone(DEFAULT_DESKTOP_CONFIG)
     config.reviewerClis = ['copilot', 'claude']
     config.reviewerAllowAll = false
+    config.reviewerStartPrompt = true
     const profile = activateWorkspaceProfile(config, 'C:\\work\\reviewers')
     profile.reviewerClis = ['codex']
     await writeDesktopConfig(filename, config)
     const loaded = await readDesktopConfig(filename)
     assert.deepEqual(loaded.reviewerClis, ['copilot', 'claude'])
     assert.equal(loaded.reviewerAllowAll, false)
+    assert.equal(loaded.reviewerStartPrompt, true)
     assert.deepEqual(loaded.profiles[0]?.reviewerClis, ['codex'])
   })
 })

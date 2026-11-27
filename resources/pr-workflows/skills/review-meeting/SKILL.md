@@ -28,7 +28,7 @@ Never start reviewer CLIs yourself, and never answer for a reviewer.
    - **Tools**: `meeting_start({ topic: "<one line>", post: "<the text>", folder: "<absolute project folder>", reviewers: true, changes: true if your uncommitted changes are part of it })`. `folder` is required for reviewers, and it must be the folder of a project the desktop has as a workspace, or one of its worktrees (a subfolder is refused).
    - **Helper**: write the text to a file, then `start -Topic "<one line>" -File <that file> -Reviewers`, adding `-Changes` to attach your uncommitted changes. This works from a session tab of a project workspace on this computer.
 3. Read the answer to the start. Tell the person the meeting id at once.
-   - If it says hidden reviewer sessions are being started, tell the person the desktop is asking them to allow them. The question names the reviewers, what they are given and what their permissions allow.
+   - If it says hidden reviewer sessions are being started, tell the person which reviewers are starting. Only if it also says the person is being asked to allow them, tell the person to answer the desktop's question; it names the reviewers, what they are given and what their permissions allow.
    - If it says hidden reviewers were not started, there is no question to answer: tell the person the reason it gives, and that reviewers can join with "join meeting <id>".
    - If they decline, the meeting stays open: tell them reviewers can still join with "join meeting <id>".
 4. Keep the seat key a tool answer gives you; it gets your host seat back after a desktop restart.
