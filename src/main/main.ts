@@ -2198,7 +2198,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (session.activity === 'idle') noteTurn((turns) => turns.idle(id))
     if (session.activity === 'idle') {
       const idleSeat = tempReviewers.seatByTabId(id)
-      if (idleSeat && idleSeat.group.stage !== 'ended' && idleSeat.seat.lifecycle === 'running') {
+      if (idleSeat && idleSeat.group.stage !== 'ended' && idleSeat.seat.lifecycle === 'running' && !tempSeatLaunchCancelled(idleSeat.seat)) {
         const expectedRound = idleSeat.group.round
         const expectedGeneration = idleSeat.seat.generation
         void reconcileTempReviewerSeatEvidence(idleSeat.group, idleSeat.seat, 'idle', { expectedRound, expectedGeneration })
@@ -2227,7 +2227,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
     const tempSeat = managedTabs.get(id)?.session === session ? tempReviewers.seatByTabId(id) : null
-    if (tempSeat && tempSeat.group.stage !== 'ended') {
+    // A launch whoever is taking the seat over has cancelled: what its tab does now is no verdict on the seat.
+    if (tempSeat && tempSeat.group.stage !== 'ended' && !tempSeatLaunchCancelled(tempSeat.seat)) {
       if (status === 'approval-needed') { tempSeat.seat.needsAttention = true; tempReviewers.wakeAll() }
       else if (status === 'running') { tempSeat.seat.needsAttention = false }
       else if (!shuttingDown() && (status === 'crashed' || status === 'completed') && (tempSeat.seat.lifecycle === 'starting' || tempSeat.seat.lifecycle === 'running')) {
@@ -4112,6 +4113,11 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
  * replaces the seat cancels it and waits for it first.
  */
 const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
+
+/** The seat's launch in flight was cancelled (by a round or a Retry taking it over) and has not finished yet. */
+function tempSeatLaunchCancelled(seat: TempReviewerSeat): boolean {
+  return tempSeatLaunchesInFlight.get(seat)?.cancel.cancelled === true
+}
 async function writeTempReviewerReceipt(group: TempReviewerGroup, seat: TempReviewerSeat, helper: string): Promise<string> {
   const port = await meetingControl.port()
   const seatToken = randomBytes(32).toString('hex')
