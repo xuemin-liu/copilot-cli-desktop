@@ -39,7 +39,7 @@ The first round opens only when each hidden reviewer has joined or failed to, so
 
 `meeting_status` (helper: `status`) lists the hidden reviewers: `starting`, `in the meeting`, `failed`, `left`, `stopped`, each with its reason.
 
-- A seat that failed or left is the person's to deal with: tell them plainly which reviewer and why, and that the bar above the terminal has **Peek**, **Retry** and **Dismiss** for it. Do not wait for it; go on with the reviewers who are in.
+- A seat that failed or left is the person's to deal with: tell them plainly which reviewer and why, and that the bar above the terminal has **Peek**, **Retry** and **Dismiss** for it. A seat that failed before its session started (its CLI is not installed, for one) has no terminal to Peek at: give the reason, and point to Retry or Dismiss. Do not wait for it; go on with the reviewers who are in.
 - If no reviewer joined (the person declined, or every seat failed), no replies will come: the meeting waits for a reviewer. When a wait for replies reports that nobody has joined, or no replies arrive for several minutes, look at the status. Seats still `starting`, or a question the person has not answered, mean wait; when every seat is settled and none is in the meeting, say so. If the run is still open (seats `failed` or `left`), ask the person whether to Retry a seat in the bar or have agents join by id. If the status says the hidden reviewers are closed (the person declined or stopped them), there is no Retry: agents can join by id, or you end the meeting and start a new one with reviewers. With the helper, run `status` when the person asks where the meeting stands, as nothing arrives by itself in that case.
 - A reviewer started again joins from your next round, not the one under way.
 

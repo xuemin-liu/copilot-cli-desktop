@@ -376,7 +376,8 @@ desktop starts one hidden session for each CLI chosen under **Settings → Revie
   at a prompt waits there until you look at it with Peek.
 - **Votes.** A proposal to close is agreed by the reviewers it was put to. One who leaves during the vote counts as not
   having agreed, and the proposal goes back to the host; one who joins during it waits for the next round.
-- **When the meeting closes**, however it closes, the hidden sessions and their checkouts are closed with it. They do
+- **When the meeting closes**, however it closes, the hidden sessions are closed with it and their checkouts are
+  removed. A checkout a reviewer changed (edited or new files) is kept on disk instead of being deleted. They do
   not survive a restart of the desktop: the meeting comes back without them. Hidden reviewers are started only with a
   new meeting, so reviewers can join the restored one by its id, or the host ends it and starts a new meeting with
   hidden reviewers.
