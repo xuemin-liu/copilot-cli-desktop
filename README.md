@@ -361,8 +361,9 @@ desktop starts one hidden session for each CLI chosen under **Settings → Revie
 - **You are asked first**, once per meeting, and the default answer is no. The question names the reviewers, the commit
   they get, that later rounds and attachments are covered, and what their permissions allow. Decline, and the meeting
   stays open for reviewers who join by id.
-- **Round 1 waits** until each hidden reviewer has joined or failed to (four minutes at most), so a fast reviewer does
-  not answer alone.
+- **Round 1 waits** until each hidden reviewer has joined or failed to, so a fast reviewer does not answer alone. Each
+  reviewer has four minutes from its own start to join; your answer to the question and the preparation of the
+  checkouts come before that.
 - **The bar above the terminal** shows each seat: joining, in the meeting, failed or left, with **Peek** to look at its
   terminal, **Retry** to start it again (it joins from the next round), **Dismiss**, and **Stop** for all of them. A
   seat that fails says why.
@@ -376,7 +377,9 @@ desktop starts one hidden session for each CLI chosen under **Settings → Revie
 - **Votes.** A proposal to close is agreed by the reviewers it was put to. One who leaves during the vote counts as not
   having agreed, and the proposal goes back to the host; one who joins during it waits for the next round.
 - **When the meeting closes**, however it closes, the hidden sessions and their checkouts are closed with it. They do
-  not survive a restart of the desktop: the meeting comes back without them, and the host can ask for reviewers again.
+  not survive a restart of the desktop: the meeting comes back without them. Hidden reviewers are started only with a
+  new meeting, so reviewers can join the restored one by its id, or the host ends it and starts a new meeting with
+  hidden reviewers.
 - A workspace runs one set of hidden reviewers at a time, for a meeting or for a pull request.
 - Claude Code shows its work in a hidden tab only in a project it already trusts, and Antigravity CLI's print mode is
   silent until it finishes: a blank Peek for those two is not a stuck reviewer. Check its seat in the bar.

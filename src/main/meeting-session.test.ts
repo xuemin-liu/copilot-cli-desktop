@@ -8,6 +8,7 @@ import test from 'node:test'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest } from './meeting-session.js'
 import { shareablePatch } from './meeting-messages.js'
 import { supportsTaskReporting } from './workflow-capabilities.js'
+import { PR_WORKFLOW_SKILL_NAMES } from './pr-workflow-skills.js'
 
 function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
   return new Promise((resolvePost, reject) => {
@@ -264,7 +265,7 @@ test('ordinary local chats discover both packaged PR skills and preserve existin
     const env = await prepareMeetingSessionEnvironment(directory, control, {COPILOT_SKILLS_DIRS: 'existing'}, capability, {tools, state})
     assert.equal(env.COPILOT_SKILLS_DIRS, 'existing,' + join(tools, 'skills'))
     assert.equal(env.COPILOT_DESKTOP_PR_STATE, state)
-    for (const name of ['fix-pr', 'review-pr', 'review-and-fix-pr']) {
+    for (const name of PR_WORKFLOW_SKILL_NAMES) {
       const guide = await readFile(join(tools, 'skills', name, 'SKILL.md'), 'utf8')
       assert.match(guide, new RegExp('name: ' + name))
       assert.equal(execFileSync(process.execPath, [join(tools, 'pr-poll.mjs'), '--guide', name], {encoding: 'utf8'}), guide)

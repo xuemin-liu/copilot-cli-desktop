@@ -6,7 +6,7 @@ user-invocable: true
 
 # Review and Fix Pull Request (`review-and-fix-pr`)
 
-Orchestrate temporary hidden PR reviewer sessions (configured in **Desktop Settings → General → Reviewers** or overridden per workspace) while **this foreground session runs `fix-pr` directly on the PR**.
+Orchestrate temporary hidden PR reviewer sessions (configured in **Desktop Settings → Reviewers** or overridden per workspace) while **this foreground session runs `fix-pr` directly on the PR**.
 
 - **Each hidden reviewer session** (`Copilot CLI`, `Claude Code`, `Codex CLI`, `Antigravity CLI`) runs in its own isolated detached `git worktree` and executes the **`review-pr`** workflow **directly against the PR on its remote repository host** (GitHub, self-hosted Gitea/Forgejo, GitLab, Bitbucket, Azure DevOps, etc.), posting its inline findings, review summaries, and `Approved at <full-head-sha>` approvals (tagged with `[<CLI Label>]`) **directly onto the PR** (never a local-only review).
 - **This foreground session** executes the **`fix-pr`** workflow **directly against that same PR on its repository host**, reading the comments and reviews posted on the PR, pushing fixes to the PR branch, posting `🤖 `-prefixed replies on the PR threads, and closing the hidden reviewer sessions once every active reviewer CLI has approved the current `head` SHA on the PR.
