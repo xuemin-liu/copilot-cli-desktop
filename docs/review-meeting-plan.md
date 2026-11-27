@@ -124,3 +124,7 @@ One pull request each. Tests travel with the code they cover.
   joins it once the delivery pump would accept a message. Starting does not wait for that join, so the other seats are
   not held up. A message that cannot be typed into it for three minutes takes the seat out of the meeting with the
   reason; its tab stays for Peek. A Copilot host asks for reviewers with `start -Reviewers` on the meeting helper.
+- Phase 3, built: the `review-meeting` skill is provisioned with the three pull request skills (the same list, the same
+  marker and backup rules), and `pr-poll.mjs --guide review-meeting` prints it for a CLI that did not find it. Settings
+  says "Reviewers" for the CLI list and "hidden reviewer sessions" for the permission switch, since both now serve
+  meetings too; messages that name those settings were changed with them.
