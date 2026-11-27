@@ -124,6 +124,16 @@ One pull request each. Tests travel with the code they cover.
   joins it once the delivery pump would accept a message. Starting does not wait for that join, so the other seats are
   not held up. A message that cannot be typed into it for three minutes takes the seat out of the meeting with the
   reason; its tab stays for Peek. A Copilot host asks for reviewers with `start -Reviewers` on the meeting helper.
+- Phase 2, review round 1: the delivery deadline of a Copilot seat asks what the hub asks, so a message that was typed
+  and never recorded takes the seat out too; the first prompt is marked as the desktop's turn (it authorizes nothing),
+  and the seat joins only when the conversation it was typed into has recorded it; a tab that changes conversation
+  fails or leaves its seat with that reason; the consent names Copilot's model provider; the helper's `status` lists the
+  hidden reviewers.
+- Phase 2, review round 2: a Copilot seat that took a message and never ends that turn (a permission prompt with
+  allow-all off) is not covered by the delivery deadline, which does not count a message waiting behind a running turn.
+  So a hidden Copilot seat goes by the hub's rule for the other hidden seats: two rounds in a row without a reply take
+  it out, each of those rounds running to its timeout. An ordinary Copilot tab is still the person's to judge. A seat is
+  the conversation its launch started: a tab that changes to another one before the first prompt fails the seat.
 - Phase 3, built: the `review-meeting` skill is provisioned with the three pull request skills (the same list, the same
   marker and backup rules), and `pr-poll.mjs --guide review-meeting` prints it for a CLI that did not find it. Settings
   says "Reviewers" for the CLI list and "hidden reviewer sessions" for the permission switch, since both now serve

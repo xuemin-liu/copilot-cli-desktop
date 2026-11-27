@@ -228,7 +228,7 @@ if (!process.versions.electron) {
     await hostB('meeting_round', { post: 'Plan v2.' })
     await nextMessage(outsiderB)
     const lost = await until('the seat to be taken out', async () => { const group = await groupOf(meetingB); return group?.seats[0].verdict === 'incomplete' ? group : null }, 60_000)
-    assert.match(lost.seats[0].error, /could not be typed into it/)
+    assert.match(lost.seats[0].error, /did not reach it for/)
     assert.match(lost.seats[0].error, /prompt box may hold text/)
     assert.equal(lost.seats[0].needsAttention, true)
     assert.ok(lost.seats[0].tabId, 'its tab stays for the person to look at')

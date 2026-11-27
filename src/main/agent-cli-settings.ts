@@ -35,22 +35,28 @@ export interface PermissionSelector {
 export interface AgentCliSettingsDescriptor {
   cli: OtherCli
   selectors: readonly PermissionSelector[]
-  supportsModel: boolean
-  modelLabel: string
-  modelPlaceholder: string
   /** Shown instead of permission controls when a CLI exposes none (Antigravity in v1). */
   permissionNote?: string
 }
 
 const MODEL_FIELD = 'model'
 const MAX_MODEL_LENGTH = 200
+const EFFORT_FIELD = 'reasoningEffort'
+
+const effortLevels: Readonly<Record<OtherCli, readonly string[]>> = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+  codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  // Antigravity's model catalog already encodes the effort in each model ID.
+  antigravity: [],
+}
+
+export function otherCliReasoningEfforts(cli: OtherCli): readonly string[] {
+  return effortLevels[cli]
+}
 
 export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescriptor>> = {
   claude: {
     cli: 'claude',
-    supportsModel: true,
-    modelLabel: 'Model',
-    modelPlaceholder: 'Claude default (e.g. claude-sonnet-5)',
     selectors: [{
       key: 'approval',
       label: 'Approval mode',
@@ -65,9 +71,6 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
   },
   codex: {
     cli: 'codex',
-    supportsModel: true,
-    modelLabel: 'Model',
-    modelPlaceholder: 'Codex default (e.g. gpt-5-codex)',
     // Approval and sandbox are independent unless approval is "allow-all", which bypasses both approvals and sandbox.
     selectors: [
       {
@@ -94,9 +97,6 @@ export const AGENT_CLI_SETTINGS: Readonly<Record<OtherCli, AgentCliSettingsDescr
   },
   antigravity: {
     cli: 'antigravity',
-    supportsModel: true,
-    modelLabel: 'Model',
-    modelPlaceholder: 'Antigravity default',
     selectors: [{
       key: 'approval',
       label: 'Approval mode',
@@ -143,10 +143,10 @@ export function normalizePerCliConfig(cli: OtherCli, value: unknown): PerCliConf
     const raw = record[selector.key]
     if (typeof raw === 'string' && LEVEL_ID.test(raw)) result[selector.key] = raw
   }
-  if (descriptor.supportsModel) {
-    const model = boundedModel(record[MODEL_FIELD])
-    if (model) result[MODEL_FIELD] = model
-  }
+  const model = boundedModel(record[MODEL_FIELD])
+  if (model) result[MODEL_FIELD] = model
+  const effort = record[EFFORT_FIELD]
+  if (effortLevels[cli].length && typeof effort === 'string' && LEVEL_ID.test(effort)) result[EFFORT_FIELD] = effort
   return result
 }
 
@@ -182,10 +182,15 @@ export function validateOtherCliConfig(value: unknown, previous: OtherCliConfig 
     for (const [key, raw] of Object.entries(perCliValue as Record<string, unknown>)) {
       if (raw === '' || raw === undefined || raw === null) continue
       if (typeof raw !== 'string') throw new Error(`Invalid ${cli} ${key}`)
-      if (key === MODEL_FIELD && descriptor.supportsModel) {
+      if (key === MODEL_FIELD) {
         const model = boundedModel(raw)
         if (!model || model !== raw.trim()) throw new Error(`The ${cli} model "${raw}" is not a usable model name`)
         perCli[MODEL_FIELD] = model
+        continue
+      }
+      if (key === EFFORT_FIELD && effortLevels[cli].length) {
+        if (!effortLevels[cli].includes(raw) && previous?.[cli]?.[key] !== raw) throw new Error(`${cli} does not support reasoning effort "${raw}"`)
+        perCli[key] = raw
         continue
       }
       const selector = descriptor.selectors.find((candidate) => candidate.key === key)
@@ -208,7 +213,11 @@ export interface IncompatibleField {
 
 function fieldFlags(cli: OtherCli, key: string, value: string): { label: string; flags: string[] } | { label: string; unknown: true } {
   const descriptor = AGENT_CLI_SETTINGS[cli]
-  if (key === MODEL_FIELD) return { label: descriptor.modelLabel, flags: ['--model'] }
+  if (key === MODEL_FIELD) return { label: 'Model', flags: ['--model'] }
+  if (key === EFFORT_FIELD) {
+    const label = 'Reasoning effort'
+    return effortLevels[cli].includes(value) ? { label, flags: [cli === 'codex' ? '--config' : '--effort'] } : { label, unknown: true }
+  }
   const selector = descriptor.selectors.find((candidate) => candidate.key === key)
   if (!selector) return { label: key, unknown: true }
   const level = knownLevel(selector, value)
@@ -263,9 +272,13 @@ export function buildOtherCliLaunchArgs(cli: OtherCli, config: PerCliConfig | un
     if (!level) throw new Error(`${cli} does not support ${selector.key} "${value}"`)
     args.push(...level.args)
   }
-  if (descriptor.supportsModel) {
-    const model = boundedModel(config[MODEL_FIELD])
-    if (model) args.push('--model', model)
+  const model = boundedModel(config[MODEL_FIELD])
+  if (model) args.push('--model', model)
+  const effort = config[EFFORT_FIELD]
+  if (effort) {
+    if (!effortLevels[cli].includes(effort)) throw new Error(`${cli} does not support reasoning effort "${effort}"`)
+    if (cli === 'codex') args.push('--config', `model_reasoning_effort="${effort}"`)
+    else args.push('--effort', effort)
   }
   return args
 }
@@ -277,8 +290,15 @@ export function buildOtherCliLaunchArgs(cli: OtherCli, config: PerCliConfig | un
 export function otherCliModelsOnly(config: OtherCliConfig): OtherCliConfig {
   const result: OtherCliConfig = {}
   for (const cli of OTHER_CLIS) {
-    const model = config[cli]?.[MODEL_FIELD]
-    if (model) result[cli] = { [MODEL_FIELD]: model }
+    const selection = otherCliModelSelection(config[cli])
+    if (selection) result[cli] = selection
   }
   return result
+}
+
+export function otherCliModelSelection(config: PerCliConfig | undefined): PerCliConfig | undefined {
+  const model = config?.[MODEL_FIELD]
+  const effort = config?.[EFFORT_FIELD]
+  if (!model && !effort) return undefined
+  return { ...(model ? { [MODEL_FIELD]: model } : {}), ...(effort ? { [EFFORT_FIELD]: effort } : {}) }
 }

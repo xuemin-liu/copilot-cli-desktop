@@ -142,9 +142,10 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { AntigravitySessionDiscovery, CodexSessionDiscovery, agentCliHelp, codexAcceptsMcpOverride, antigravityDataRoot, antigravitySessionStored, claudeProjectTrusted, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { createOtherCliCache } from './agent-cli-cache.js'
+import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { OTHER_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
+import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, validateReviewerClis, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
 import {
@@ -181,7 +182,7 @@ import {
   type TempReviewerSeat,
 } from './pr-temp-reviewers.js'
 import {
-  MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
+  MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingSeatStallReason, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
   type MeetingReviewerGroup, type MeetingReviewerSeat,
 } from './meeting-reviewers.js'
 import { buildOtherCliLaunchArgs, helpListsFlag, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
@@ -2276,6 +2277,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
       sessionLastOutputAt.delete(id)
       meetingHub.leave(id)
       meetingOutbox.forget(id)
+      onMeetingCopilotSeatSwitched(id)
     }
     tabsState = setTabSessionId(tabsState, id, sessionId)
     const tab = tabsState.tabs.find((candidate) => candidate.id === id)
@@ -2569,6 +2571,43 @@ async function startSessionTab(
 }
 
 const otherCliResolution = createOtherCliCache((cli, fresh) => resolveAgentCli(cli, { fresh }))
+
+const modelCatalogs = new Map<SessionCli, { providerKey: string; promise: Promise<CliModelOption[]> }>()
+let copilotModelCatalogRevision = 0
+
+function invalidateCopilotModelCatalog(): void {
+  modelCatalogs.delete('copilot')
+  copilotModelCatalogRevision++
+}
+
+function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOption[]> {
+  const provider = desktopConfig.provider
+  const providerKey = cli === 'copilot' ? JSON.stringify(provider) : ''
+  const cached = modelCatalogs.get(cli)
+  if (!reload && cached?.providerKey === providerKey) return cached.promise
+  const entry = {
+    providerKey,
+    promise: load().catch(() => []).then((models) => {
+      if (models.length === 0 && modelCatalogs.get(cli) === entry) modelCatalogs.delete(cli)
+      return models
+    }),
+  }
+  modelCatalogs.set(cli, entry)
+  return entry.promise
+
+  async function load(): Promise<CliModelOption[]> {
+    const models = cli === 'copilot'
+      ? await loadCopilot()
+      : await readOtherCliModelCatalog(await otherCliResolution(cli, reload))
+    return [...new Map(models.map((model) => [model.id, model])).values()]
+  }
+
+  async function loadCopilot(): Promise<CliModelOption[]> {
+    const resolution = (!reload && state.resolution) || (await probeCopilotResolution()).resolution
+    const inherited = { ...process.env, ...await credentialStore?.resolveEnvironment() }
+    return readCopilotModelCatalog(resolution, { ...inherited, ...providerEnvironment(provider, inherited) })
+  }
+}
 
 /** The CLIs a new session tab can run, for the new-session dialog. */
 async function listSessionClis(): Promise<SessionCliChoice[]> {
@@ -3537,8 +3576,13 @@ const meetingHub = new MeetingHub(meetingRoot, {
   },
   folderExists: (id) => existsSync(join(meetingRoot(), id)),
   // An outside agent that stopped polling would hold every round to its timeout; a Copilot tab is the person's to judge.
-  dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId),
-  dropped: (tabId, message) => { guestMailbox.close(tabId, message); onMeetingReviewerSeatGone(tabId, 'The meeting took it out after two rounds without a reply.') },
+  // A hidden Copilot reviewer is not: nobody is looking at its tab, so it goes by the rule for the other hidden seats.
+  dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId) || meetingCopilotSeatOf(tabId) !== null,
+  dropped: (tabId, message) => {
+    if (!GUEST_ID_PATTERN.test(tabId)) { onMeetingCopilotSeatSilent(tabId); return }
+    guestMailbox.close(tabId, message)
+    onMeetingReviewerSeatGone(tabId, 'The meeting took it out after two rounds without a reply.')
+  },
   // A message typed and never confirmed has not asked that session anything either, as far as anyone can tell.
   undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId) || lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === meetingId),
   turnFailed: (meetingId, tabId, error, retrying) => {
@@ -4938,9 +4982,9 @@ async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string
   stopMeetingCopilotWatch(seat.generation)
   const guestSeatId = seat.guestSeatId
   seat.guestSeatId = null
-  // A Copilot seat is in the meeting as its tab. When the tab stays for the person to look at, it leaves here; a tab
-  // that is closed leaves with its close.
-  if (!guestSeatId && seat.cli === 'copilot' && seat.tabId && options.keepTab) forgetMeetingSession(seat.tabId)
+  // A Copilot seat is in the meeting as its tab. It leaves here, before anything is awaited, whether its tab stays for
+  // the person to look at or is closed next: a round or a vote opened during that close must not count it.
+  if (!guestSeatId && seat.cli === 'copilot' && seat.tabId) forgetMeetingSession(seat.tabId)
   if (guestSeatId) {
     guestMailbox.close(guestSeatId, why)
     // The hub counts a voter who leaves mid-vote as one who did not agree.
@@ -5011,6 +5055,43 @@ function reapMeetingReviewers(): void {
     revokeMeetingReviewerSeats(seats, 'The meeting is closed.')
     void teardownMeetingReviewerSeats(seats, 'The meeting is closed.')
   }
+}
+
+/** The hidden Copilot seat that is in a meeting as this tab, if it is one. */
+function meetingCopilotSeatOf(tabId: string): { group: MeetingReviewerGroup; seat: MeetingReviewerSeat } | null {
+  const found = meetingReviewers.seatByTabId(tabId)
+  return found && found.group.stage !== 'ended' && found.seat.cli === 'copilot' && found.seat.lifecycle === 'joined' ? found : null
+}
+
+/** The meeting took a hidden Copilot seat out after two rounds without a reply (a turn that never ended, for one). */
+function onMeetingCopilotSeatSilent(tabId: string): void {
+  const found = meetingCopilotSeatOf(tabId)
+  if (!found) return
+  const { group, seat } = found
+  if (!meetingReviewers.seatExited(seat, seat.generation, `The meeting took it out after two rounds without a reply${meetingBlockReason(tabId) ? `: ${meetingBlockReason(tabId)}` : '.'} Look at its tab with Peek, then Retry or Dismiss.`)) return
+  void releaseMeetingReviewerSeat(seat, 'This reviewer did not reply for two rounds.', { keepTab: true }).then(() => {
+    settleMeetingReviewerGate(group)
+    broadcastState()
+  })
+}
+
+/**
+ * A hidden Copilot seat's tab changed to another conversation (someone chose one in Peek). The seat is the conversation
+ * the desktop started for it and no other: one still starting fails, and one in the meeting has left it.
+ */
+function onMeetingCopilotSeatSwitched(tabId: string): void {
+  const found = meetingReviewers.seatByTabId(tabId)
+  if (!found || found.group.stage === 'ended' || found.seat.cli !== 'copilot') return
+  const { group, seat } = found
+  const changed = seat.lifecycle === 'starting'
+    ? meetingReviewers.failSeat(seat, seat.generation, 'Its tab changed to another conversation before it joined. Retry starts a new session, or Dismiss.')
+    : seat.lifecycle === 'joined' && meetingReviewers.seatExited(seat, seat.generation, 'Its tab changed to another conversation, so it left the meeting. Retry starts a new session, or Dismiss.')
+  if (!changed) return
+  meetingReaders.get(tabId)?.cancelExpectedDesktopPrompt()
+  void releaseMeetingReviewerSeat(seat, 'This reviewer\'s tab changed to another conversation.', { keepTab: true }).then(() => {
+    settleMeetingReviewerGate(group)
+    broadcastState()
+  })
 }
 
 /** A hidden reviewer's process ended. Its seat leaves the meeting; its tab stays for the person to look at until the run ends. */
@@ -5121,7 +5202,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
     meetingHub.release(meetingId)
     void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
   })
-  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; meeting_status shows the seats.`
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${clis.map((cli) => sessionCliLabel(cli)).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
 }
 
 async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
@@ -5325,8 +5406,10 @@ function stopMeetingCopilotWatch(generation: string): void {
 
 /**
  * A hidden Copilot reviewer gets its messages typed into its prompt, and nobody is looking at that tab. A message that
- * cannot be typed for this long (a dialog, an approval, a session that changed) would hold every round to its timeout,
- * so the seat leaves the meeting with the reason, for every delivery and not only the first. The tab stays for Peek.
+ * has not reached it for this long would hold its round: one that cannot be typed (a dialog, an approval, a session
+ * that changed) holds it to its timeout, and one that was typed and never recorded holds it until the person settles
+ * the handoff. So the seat leaves the meeting with the reason, for every delivery and not only the first. The tab stays
+ * for Peek. This asks what the hub asks before it counts a reviewer as not asked.
  */
 function watchMeetingCopilotDeliveries(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, tabId: string): void {
   const generation = seat.generation
@@ -5335,12 +5418,16 @@ function watchMeetingCopilotDeliveries(group: MeetingReviewerGroup, seat: Meetin
   stopMeetingCopilotWatch(generation)
   const timer = setInterval(() => {
     if (seat.generation !== generation || seat.lifecycle !== 'joined' || seat.tabId !== tabId || group.stage === 'ended') { stopMeetingCopilotWatch(generation); return }
-    if (!meetingOutbox.undelivered(tabId, group.meetingId)) { since = null; return }
+    const why = meetingSeatStallReason({
+      waiting: meetingOutbox.undelivered(tabId, group.meetingId),
+      lost: lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === group.meetingId),
+      blockReason: meetingBlockReason(tabId),
+    })
+    if (why === null) { since = null; return }
     since ??= Date.now()
     if (Date.now() - since < limit) return
     stopMeetingCopilotWatch(generation)
-    const why = meetingBlockReason(tabId) ?? 'It did not take the message.'
-    if (!meetingReviewers.seatExited(seat, generation, `A meeting message could not be typed into it for ${Math.max(1, Math.round(limit / 60_000))} minute(s): ${why} Look at its tab with Peek, then Retry or Dismiss.`)) return
+    if (!meetingReviewers.seatExited(seat, generation, `A meeting message did not reach it for ${Math.max(1, Math.round(limit / 60_000))} minute(s): ${why} Look at its tab with Peek, then Retry or Dismiss.`)) return
     void releaseMeetingReviewerSeat(seat, 'A meeting message could not reach this reviewer.', { keepTab: true }).then(() => broadcastState())
   }, Math.min(5_000, Math.max(250, Math.floor(limit / 4))))
   timer.unref?.()
@@ -5428,7 +5515,7 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeti
     await session.start()
   })
   if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
-  void joinMeetingCopilotSeat(group, seat, id, session, area, cancelled).catch(async (error) => {
+  void joinMeetingCopilotSeat(group, seat, id, session, area, deterministicSessionId, cancelled).catch(async (error) => {
     if (meetingReviewers.failSeat(seat, generation, error instanceof Error ? error.message : String(error))) {
       await releaseMeetingReviewerSeat(seat, 'This reviewer could not join the meeting.', { keepTab: true })
     }
@@ -5438,24 +5525,56 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeti
 }
 
 /** The first prompt, then the join, each as soon as the session can take it and both within the seat's join bound. */
-async function joinMeetingCopilotSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, tabId: string, session: PtySession, area: ReviewerArea, cancelled: () => boolean): Promise<void> {
+async function joinMeetingCopilotSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, tabId: string, session: PtySession, area: ReviewerArea, launchSessionId: string | null, cancelled: () => boolean): Promise<void> {
   const generation = seat.generation
   const joinMs = meetingSeatJoinMs()
   const deadline = Date.now() + joinMs
   const minutes = Math.max(1, Math.round(joinMs / 60_000))
-  let primed = false
+  // The conversation the first prompt went to, and how many desktop prompts its reader had recorded before it.
+  let primed: { sessionId: string; promptsBefore: number } | null = null
   for (;;) {
     if (cancelled()) return
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || managedTabs.get(tabId)?.session !== session || tab.status === 'crashed' || tab.status === 'completed') return
+    const reader = meetingReader(tabId)
     if (!primed) {
-      if (tab.lastSessionId && meetingPromptSettled(tabId) && sendSessionTask(tabId, meetingCopilotPrimer({ meetingId: group.meetingId, checkout: area.checkout, commit: group.commit }), false).result === 'sent') primed = true
-    } else if (meetingBlockReason(tabId) === null) {
+      // The conversation this launch was started with, when the CLI takes an id for it: no other one is primed. (A
+      // change the tab has published already failed the seat; this is the one it has not published yet.)
+      if (launchSessionId !== null && ((tab.lastSessionId !== null && tab.lastSessionId !== launchSessionId) || (session.lastSessionId !== null && session.lastSessionId !== launchSessionId))) {
+        throw new Error('Its tab changed to another conversation before it joined. Retry starts a new session, or Dismiss.')
+      }
+      if (tab.lastSessionId && sameSessionRecipient(tabId, session, tab.lastSessionId) && meetingPromptSettled(tabId)) {
+        const text = meetingCopilotPrimer({ meetingId: group.meetingId, checkout: area.checkout, commit: group.commit })
+        const promptsBefore = reader.desktopPromptCount
+        const sessionId = tab.lastSessionId
+        // The ids the tab and the terminal hold are cached: a conversation chosen in the CLI a moment ago may not have
+        // reached them. So the recipient is read afresh, as the meeting's own deliveries do, and that reading stops
+        // holding with any input, output or binding change before the paste.
+        const verified = await session.prepareMeetingDelivery(sessionId)
+        if (cancelled()) return
+        const sameRecipient = (): boolean => managedTabs.get(tabId)?.session === session && tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId === sessionId
+        // The desktop's own turn: a prompt the person did not type authorizes nothing (starting a meeting, for one).
+        reader.expectDesktopPrompt(text)
+        const sent = sendSessionTask(tabId, text, false, {
+          beforePaste: () => sameRecipient() && verified(),
+          beforeEnter: () => sameRecipient() && session.sessionBindingReady && session.lastSessionId === sessionId && !cancelled(),
+          aborted: () => { reader.cancelExpectedDesktopPrompt(); primed = null },
+        })
+        if (sent.result === 'sent') primed = { sessionId, promptsBefore }
+        else reader.cancelExpectedDesktopPrompt()
+      }
+    } else if (tab.lastSessionId !== primed.sessionId) {
+      // Someone chose another conversation in this tab (Peek): the meeting's messages would go to that one.
+      reader.cancelExpectedDesktopPrompt()
+      throw new Error('Its tab changed to another conversation before it joined. Retry starts a new session, or Dismiss.')
+    } else if (reader.desktopPromptCount > primed.promptsBefore && meetingBlockReason(tabId) === null) {
+      // That session recorded the first prompt as the desktop's, and would take a message now.
       break
     }
     if (Date.now() >= deadline) {
+      if (primed) reader.cancelExpectedDesktopPrompt()
       throw new Error(primed
-        ? `It was not ready for meeting messages within ${minutes} minute(s): ${meetingBlockReason(tabId) ?? 'unknown'} Look at its tab with Peek, then Retry or Dismiss.`
+        ? `It was not ready for meeting messages within ${minutes} minute(s): ${meetingBlockReason(tabId) ?? (reader.desktopPromptCount > primed.promptsBefore ? 'unknown' : 'Its session did not record its first prompt.')} Look at its tab with Peek, then Retry or Dismiss.`
         : `Its session did not reach a prompt within ${minutes} minute(s). Look at its tab with Peek, then Retry or Dismiss.`)
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250))
@@ -6284,8 +6403,11 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         meetingHub.end(tabId)
         scheduleMeetingPump(0)
         return { ok: true, message: 'The meeting is closed.' }
-      case 'status':
-        return { ok: true, message: meetingStatus(tabId) }
+      case 'status': {
+        const hosted = meetingHub.meetingOf(tabId)
+        const reviewers = hosted ? meetingReviewers.statusText(hosted.id) : ''
+        return { ok: true, message: reviewers ? `${meetingStatus(tabId)}\n${reviewers}` : meetingStatus(tabId) }
+      }
     }
   } catch (error) {
     if (error instanceof MeetingError) return { ok: false, message: error.message }
@@ -7351,6 +7473,7 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(restoreAllWorkspaces = false): Promise<DesktopState> {
   const probe = await probeCopilotResolution()
+  if (state.resolution && !sameCopilotResolution(state.resolution, probe.resolution)) invalidateCopilotModelCatalog()
   state.resolution = probe.resolution
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
@@ -7402,6 +7525,7 @@ async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
     return false
   }
   state.resolution = next
+  invalidateCopilotModelCatalog()
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
   broadcastState()
@@ -7502,6 +7626,7 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
         : await updateCopilotCli(current!)
     } finally { copilotBeingReplaced = false }
     await bestEffortUsage(usageService?.collect())
+    invalidateCopilotModelCatalog()
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -7880,6 +8005,7 @@ interface DesktopSettingsSnapshot extends DesktopPreferences {
   rollbackVersion: string | null
   access: Awaited<ReturnType<typeof readAccessStatus>>
   provider: CopilotProviderConfig
+  copilotModelCatalogRevision: number
   cliVersion: string | null
   cliCapabilities: CopilotCapabilities
   cliMaintenance: CopilotMaintenanceState
@@ -7940,6 +8066,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     rollbackVersion: desktopConfig.rollbackVersion,
     access,
     provider: { ...desktopConfig.provider },
+    copilotModelCatalogRevision,
     cliVersion: state.resolution?.version ?? null,
     cliCapabilities: { ...copilotCapabilities },
     cliMaintenance: { ...copilotMaintenance },
@@ -7972,6 +8099,7 @@ function broadcastCopilotSettingsState(): void {
       cliVersion: state.resolution?.version ?? null,
       cliCapabilities: { ...copilotCapabilities },
       cliMaintenance: { ...copilotMaintenance },
+      copilotModelCatalogRevision,
     })
   }
 }
@@ -9070,6 +9198,11 @@ ipcMain.handle('desktop-settings:get', (event) => {
   assertTrustedSettingsSender(event, true)
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:model-catalog', (event, cli: unknown, reload: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (!isReviewerCli(cli) || typeof reload !== 'boolean') throw new Error('Invalid model catalog request')
+  return getModelCatalog(cli, reload)
+})
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
   assertTrustedSettingsSender(event)
   if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
@@ -9369,6 +9502,7 @@ ipcMain.handle('desktop-settings:save-credential', async (event, name: unknown, 
   if (!isCredentialName(name) || typeof secret !== 'string') throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.saveCredential(name as CredentialName, secret)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown) => {
@@ -9376,6 +9510,7 @@ ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown
   if (!isCredentialName(name)) throw new Error('Invalid protected credential')
   if (!credentialStore) throw new Error('Protected credential storage is not initialized')
   await credentialStore.deleteCredential(name as CredentialName)
+  invalidateCopilotModelCatalog()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:install-copilot', async (event) => {
@@ -9732,6 +9867,9 @@ if (!app.requestSingleInstanceLock()) {
     updateTrayVisibility()
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    if (!packageSmokeTest) {
+      for (const cli of SESSION_CLIS) void getModelCatalog(cli)
+    }
     if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)
