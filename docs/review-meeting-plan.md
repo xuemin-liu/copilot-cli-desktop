@@ -1,7 +1,9 @@
 # Plan: review meetings with hidden reviewer sessions
 
-Status: agreed in review meeting X4QX (one reviewer, source read only, nothing run). No phase is built yet. Phase 5
-is deferred.
+Status: agreed in review meeting X4QX (one reviewer, source read only, nothing run). Phases 1 to 3 are built and
+released in v0.1.151. Phase 4 was run with three of the four CLIs (meeting 3N9F: Claude Code, Codex CLI, Antigravity
+CLI); a run with a hidden Copilot CLI reviewer is still to do, and so are the checks that meeting agreed (see the
+revision notes). Phase 5 is deferred.
 
 Today a review meeting gets its reviewers one at a time: the person tells another agent "join meeting K7QF", or adds
 a tab from the desktop. This plan adds a bundled skill, `review-meeting`, that works like `review-and-fix-pr`: the
@@ -89,7 +91,8 @@ One pull request each. Tests travel with the code they cover.
 2. **Copilot seats**: direct join after delivery readiness, a deadline on every delivery, with stub checks.
 3. **The skill**: `SKILL.md`, the provisioning lists, settings wording, documentation, package checks. Only after
    every CLI the settings offer can join.
-4. **A real four-CLI meeting**, run by hand and recorded here.
+4. **A real four-CLI meeting**, run by hand and recorded here. Run so far with three CLIs (meeting 3N9F); a run that
+   includes Copilot CLI as a hidden reviewer is still pending.
 5. **Later, separately**: restricted meeting profiles, one CLI at a time, entered only where a launch that never
    prompts, cannot write, and can still call the meeting tools has been demonstrated in a pseudo-terminal.
 
