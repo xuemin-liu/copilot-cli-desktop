@@ -9555,7 +9555,9 @@ ipcMain.handle('desktop-settings:update-provider', async (event, provider: unkno
     offline: value.offline,
   }
   validateProviderConfig(next)
+  const providerChanged = JSON.stringify(desktopConfig.provider) !== JSON.stringify(next)
   desktopConfig.provider = next
+  if (providerChanged) invalidateCopilotModelCatalog()
   await persistConfig()
   return settingsSnapshot()
 })

@@ -181,9 +181,12 @@ if (!process.versions.electron) {
     await saveLaunch('custom-review-model', 'high')
     await selectOption(`${copilotGrid} option[value="local-test-model"]`)
     await saveLaunch('local-test-model', 'high')
+    const providerRevision = await sui('window.copilotDesktopSettings.get().then(settings => settings.copilotModelCatalogRevision)')
     await setInput('input[placeholder="Model or deployment identifier"]', 'replacement-test-model')
     await clickButton('Save provider')
     await suntil('document.querySelector(\'option[value="replacement-test-model"]\')', 'updated Copilot provider model')
+    assert.ok(await sui('window.copilotDesktopSettings.get().then(settings => settings.copilotModelCatalogRevision)') > providerRevision,
+      'saving the provider invalidates catalogs that concurrent reviewer saves may have prefetched')
     assert.equal(await sui('document.querySelector(\'.settings-card > .settings-form-grid option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
     assert.equal(await sui('document.querySelectorAll(".other-cli-tab").length'), 3)
     await sui('document.querySelectorAll(".other-cli-tab")[1].click()')
