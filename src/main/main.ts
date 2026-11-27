@@ -5918,10 +5918,11 @@ async function advanceGroupTempReviewers(
           discloseAgentConfigs(group, configInspection.presentAgentConfigObjects, [...unaskedConfigs, ...configInspection.modifiedAgentConfigs])
         }
 
-        const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
-          // A newer round may take the seat over during any wait below: after each one, this round stops before it
-          // cancels or closes anything that round started.
+        const relaunchSeatAtNewHead = async (seat: TempReviewerSeat, expectedGeneration?: string): Promise<void> => {
+          // A newer round (or a manual Retry, which moves the generation on) may take the seat over during any wait
+          // below: after each one, this round stops before it cancels or closes anything they started.
           const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.cli) !== seat
+            || (expectedGeneration !== undefined && seat.generation !== expectedGeneration)
           // The teardown and handover of the seat's area run one at a time per seat (another round's cleanup included);
           // the launch itself runs after, guarded by its cancel token.
           const prepared = await withTempSeatArea(seat, async (): Promise<{ reset: TempReviewerSeat; canReuseWorktree: boolean } | null> => {
@@ -6032,7 +6033,7 @@ async function advanceGroupTempReviewers(
                 )
                 return sent.result === 'sent' ? 'done' : 'relaunch'
               })
-              if (outcome === 'relaunch') await relaunchSeatAtNewHead(seat)
+              if (outcome === 'relaunch') await relaunchSeatAtNewHead(seat, refreshGeneration)
             } else {
               await relaunchSeatAtNewHead(seat)
             }
@@ -8787,6 +8788,10 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (!isReviewerCli(payload)) throw new Error('Invalid reviewer CLI')
     const previous = group.requiredSeats.get(payload)
     if (!previous) throw new Error('That reviewer seat is not in this group')
+    // A round still starting its seats (its confirmation perhaps still open) launches them itself: a Retry now would
+    // start a reviewer on a revision nobody has confirmed yet.
+    if (group.stage === 'starting' || group.awaitingStartConsent) throw new Error('This run is still starting its reviewers. Retry once it has.')
+    const retryRound = group.round
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
     // The slot limit is shared with meetings: a seat that still has its tab keeps that slot through the retry, and one
@@ -8796,10 +8801,14 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     }
     // In the seat's queue, like a round's handover: an earlier launch is cancelled and settled, and a refresh in
     // progress finishes, before the area goes and the generation moves on.
+    // A round that began while this Retry waited owns the seat now: it relaunches it at its own revision.
+    const overtaken = (): boolean => group.stage === 'ended' || group.stage === 'starting' || group.round !== retryRound
     const reset = await withTempSeatArea(previous, async () => {
+      if (overtaken()) return null
       await settleTempSeatLaunch(previous)
+      if (overtaken()) return null
       await cleanupTempReviewerSeat(previous)
-      if (group.stage === 'ended') return null
+      if (overtaken()) return null
       return tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     })
     if (!reset) {
