@@ -35,6 +35,8 @@ import {
   reviewerHelperDirAccess,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
+  discloseAgentConfigs,
+  undisclosedAgentConfigs,
 } from './pr-temp-reviewers.js'
 
 const HEAD = 'a'.repeat(40)
@@ -679,6 +681,20 @@ test('dismissing the last required seat ends the group as stopped, never approve
   assert.equal(groupEnded, true)
   assert.equal(group.stage, 'ended')
   assert.equal(group.outcome, 'stopped')
+})
+
+test('a run started without the question discloses configuration only by naming it in an approved question', () => {
+  const asked = { startedWithoutQuestion: false, disclosedAgentConfigs: new Set<string>() }
+  assert.deepEqual(undisclosedAgentConfigs(asked, ['.mcp.json']), [], 'a run that asked at start was shown the tree')
+  const quiet = { startedWithoutQuestion: true, disclosedAgentConfigs: new Set<string>() }
+  assert.deepEqual(undisclosedAgentConfigs(quiet, []), [])
+  // A verification-only question at a round with no configuration discloses nothing.
+  discloseAgentConfigs(quiet, undisclosedAgentConfigs(quiet, []))
+  // Configuration then arrives through the base, present in the tree but not in base...head: still asked.
+  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json']), ['.github/hooks/pre.json'])
+  discloseAgentConfigs(quiet, ['.github/hooks/pre.json'])
+  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json']), [], 'shown and approved')
+  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json', '.mcp.json']), ['.mcp.json'], 'a new file is asked about')
 })
 
 test('githubPullUrlKey names the same pull request only for the same repository and number', () => {

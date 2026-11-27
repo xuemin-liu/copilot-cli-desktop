@@ -377,6 +377,20 @@ export function reviewerHelperDirAccess(
  * receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at the latest by the
  * round timer.
  */
+/**
+ * For a run started without the question: the repo-local CLI/MCP configuration in a round's tree that the person has not
+ * been shown yet. It can arrive through a moved base without being in `base...head`. Empty for a run that asked at start.
+ */
+export function undisclosedAgentConfigs(group: Pick<TempReviewerGroup, 'startedWithoutQuestion' | 'disclosedAgentConfigs'>, present: readonly string[]): string[] {
+  if (!group.startedWithoutQuestion) return []
+  return present.filter((path) => !group.disclosedAgentConfigs.has(path))
+}
+
+/** The person approved a question that named these paths. Only configuration shown counts as disclosed. */
+export function discloseAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, shown: readonly string[]): void {
+  for (const path of shown) group.disclosedAgentConfigs.add(path)
+}
+
 export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
   return reviewerAllowAll && (cli !== 'claude' || !claudeTrustsProject)
 }
@@ -668,6 +682,8 @@ export interface TempReviewerGroup {
   notice: string | null
   /** The person was not asked before this run's reviewers started (Settings turned the question off). */
   startedWithoutQuestion: boolean
+  /** Repo-local CLI/MCP configuration named in a question the person approved during such a run. */
+  disclosedAgentConfigs: Set<string>
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
   lastObservedHostSettledKey: string | null
   /** Active required seats; only explicit user Dismiss removes a CLI from this map. */
@@ -861,6 +877,7 @@ export class TempReviewerRegistry {
       outcome: null,
       notice: null,
       startedWithoutQuestion: false,
+      disclosedAgentConfigs: new Set(),
       lastObservedHostSettledKey: null,
       requiredSeats,
       claimedEvidenceKeys: new Set<string>(),

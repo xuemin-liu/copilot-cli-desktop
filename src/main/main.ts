@@ -180,6 +180,8 @@ import {
   TempReviewerRegistry,
   type TempReviewerGroup,
   type TempReviewerSeat,
+  undisclosedAgentConfigs,
+  discloseAgentConfigs,
 } from './pr-temp-reviewers.js'
 import {
   MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingSeatStallReason, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
@@ -5780,9 +5782,9 @@ async function advanceGroupTempReviewers(
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
     // A scan that could not read the round's changes cannot show that no CLI/MCP configuration changed.
-    // A run started without the question asks once configuration appears at all (through a moved base, say).
-    const unaskedConfigs = group.startedWithoutQuestion && configInspection.presentAgentConfigs.length > 0
-    const requiresConsent = unverifiedHead || unaskedConfigs || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
+    // A run started without the question asks once configuration it has not shown appears (through a moved base, say).
+    const unaskedConfigs = undisclosedAgentConfigs(group, configInspection.presentAgentConfigs)
+    const requiresConsent = unverifiedHead || unaskedConfigs.length > 0 || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     if (requiresConsent && group.stage === 'active') {
       group.stage = 'starting'
     }
@@ -5822,7 +5824,7 @@ async function advanceGroupTempReviewers(
             desktopConfig.reviewerAllowAll,
             [
               ...(unverifiedHead ? [`Could not confirm on GitHub that ${revisions.head.slice(0, 12)} is the head of ${group.prLabel}; it is on a branch of origin.`] : []),
-              ...(unaskedConfigs && configInspection.modifiedAgentConfigs.length === 0 ? [`Warning: the repository at round ${targetRound} contains repo-local CLI/MCP configuration (${configInspection.presentAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
+              ...(unaskedConfigs.length > 0 ? [`Warning: the repository at round ${targetRound} contains repo-local CLI/MCP configuration (${unaskedConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
               ...(configInspection.complete ? [] : [`Could not read which files round ${targetRound} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load.`]),
               ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
             ],
@@ -5835,8 +5837,8 @@ async function advanceGroupTempReviewers(
             }
             return
           }
-          // The person has now been asked about this run, configuration included.
-          group.startedWithoutQuestion = false
+          // Only configuration this question named counts as shown to the person.
+          discloseAgentConfigs(group, [...unaskedConfigs, ...configInspection.modifiedAgentConfigs])
           if (isStaleOrEnded()) return
         }
 
