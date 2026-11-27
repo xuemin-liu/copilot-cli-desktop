@@ -147,15 +147,15 @@ if (!process.versions.electron) {
     }
     await suntil('document.querySelector(".other-cli-settings")', 'per-CLI settings')
     await suntil('document.querySelector(\'option[value="local-test-model"]\')', 'Copilot model from the configured provider')
-    const selectOption = (selector) => sui(`(() => {
+    const selectOption = (selector, evaluate = sui) => evaluate(`(() => {
       const option = document.querySelector(${JSON.stringify(selector)})
       const select = option.closest('select')
       if (select.disabled) throw new Error('Picker is disabled')
       select.value = option.value
       select.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
-    const clickButton = (label) => sui(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`)
-    const setInput = (selector, value) => sui(`(() => {
+    const clickButton = (label, evaluate = sui) => evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    const setInput = (selector, value, evaluate = sui) => evaluate(`(() => {
       const input = document.querySelector(${JSON.stringify(selector)})
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)})
       input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -202,6 +202,58 @@ if (!process.versions.electron) {
     await delay(150)
     await writeFile(join(out, 'settings.png'), (await settings.webContents.capturePage()).toPNG())
     console.log('OK: settings editor renders; malformed values fail the save; empty values clear')
+
+    // Exercise the built renderer with a fixed Auto catalog independent of any installed account's model policies.
+    const fixtureState = await sui('window.copilotDesktopSettings.get()')
+    const fixturePreload = join(directory, 'fixture-settings-preload.cjs')
+    await writeFile(fixturePreload, `
+      const { contextBridge } = require('electron')
+      const state = ${JSON.stringify(fixtureState)}
+      const unsubscribe = () => () => {}
+      let saved
+      contextBridge.exposeInMainWorld('copilotDesktopSettings', {
+        get: async () => state,
+        getModelCatalog: async (cli) => cli === 'copilot' ? [{id: 'auto', label: 'Auto', efforts: []}] : [],
+        onUpdateStateChanged: unsubscribe, onPreferencesChanged: unsubscribe, onCopilotStateChanged: unsubscribe,
+        onMigrationProgress: unsubscribe,
+        migrationStatus: async () => ({ recoveryIssues: [], recoveryJournals: [], backups: [], warnings: [], lastImport: null, busy: false, progress: null }),
+        usageReport: async () => { throw new Error('Usage is unavailable in this fixture') },
+        updateWorkspaceProfile: async (_id, _name, _permission, _resume, launch) => { saved = launch; return state },
+        lastSavedLaunch: () => saved,
+      })
+    `, 'utf8')
+    const fixtureSettings = new BrowserWindow({ show: false, webPreferences: { preload: fixturePreload } })
+    fixtureSettings.webContents.on('preload-error', (_event, _path, error) => console.error(error))
+    const fixtureUi = async (code) => {
+      const result = await fixtureSettings.webContents.executeJavaScript(`(() => {
+        try { return { value: (${code}) } } catch (error) { return { error: String(error) } }
+      })()`)
+      if (result.error) throw new Error(`Settings fixture failed: ${result.error}\n${code}`)
+      return result.value
+    }
+    await fixtureSettings.loadFile(resolve('dist/src/renderer/settings.html'))
+    for (let attempt = 0; attempt < 100 && !await fixtureUi('Boolean(document.querySelector(\'option[value="auto"]\'))'); attempt++) await delay(50)
+    assert.ok(await fixtureUi('document.querySelector(\'option[value="auto"]\') !== null'), 'fixed Auto catalog reached the built renderer')
+    await selectOption(`${copilotGrid} option[value="high"]`, fixtureUi)
+    await selectOption(`${copilotGrid} option[value="--custom-model"]`, fixtureUi)
+    const customInput = `${copilotGrid} input[maxlength="200"]`
+    await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).focus()`)
+    await setInput(customInput, 'auto', fixtureUi)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).blur()`)
+    await clickButton('Save profile', fixtureUi)
+    const customLaunch = await fixtureUi('window.copilotDesktopSettings.lastSavedLaunch()')
+    assert.equal(customLaunch.model, 'auto-deployment')
+    assert.equal(customLaunch.reasoningEffort, 'high', 'typing through Auto must preserve effort for the completed custom model')
+    await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).focus()`)
+    await setInput(customInput, 'auto', fixtureUi)
+    await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).blur()`)
+    await clickButton('Save profile', fixtureUi)
+    const autoLaunch = await fixtureUi('window.copilotDesktopSettings.lastSavedLaunch()')
+    assert.equal(autoLaunch.model, 'auto')
+    assert.equal(autoLaunch.reasoningEffort, 'default', 'committing Auto clears an unsupported effort')
+    fixtureSettings.destroy()
+    console.log('OK: custom model typing preserves effort until the completed model is saved')
 
     app.exit(0)
   }

@@ -87,6 +87,17 @@ const effortLabels: Record<string, string> = {
 const COPILOT_EFFORTS = REASONING_EFFORTS.filter((effort) => effort !== 'default')
 const CUSTOM_MODEL = '--custom-model'
 
+function acceptsNewModelEffort(
+  catalog: CliModelOption[] | undefined,
+  choice: { model?: string; reasoningEffort?: string },
+  saved: { model?: string; reasoningEffort?: string } | undefined,
+): boolean {
+  const effort = choice.reasoningEffort
+  if (!effort || effort === 'default' || (choice.model === saved?.model && effort === saved?.reasoningEffort)) return true
+  const levels = catalog?.find((model) => model.id === choice.model?.trim())?.efforts
+  return levels === undefined || levels.includes(effort)
+}
+
 function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onChange }: {
   label: string
   catalog: CliModelOption[] | undefined
@@ -120,7 +131,12 @@ function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], onCh
     {custom && (
       <label>
         Custom model ID
-        <input type="text" value={model} maxLength={200} onChange={(event) => chooseModel(event.target.value)} />
+        <input
+          type="text"
+          value={model}
+          maxLength={200}
+          onChange={(event) => onChange(event.target.value, effort ?? '')}
+        />
       </label>
     )}
     {effort !== undefined && (
@@ -417,6 +433,18 @@ function WorkspaceProfileEditor({
           type="button"
           disabled={saving}
           onClick={() => {
+            const nextLaunch: SessionLaunchConfig = acceptsNewModelEffort(modelCatalogs.copilot, launch, profile.launch)
+              ? launch : { ...launch, reasoningEffort: 'default' }
+            const nextOtherCli = { ...otherCli }
+            for (const cli of OTHER_CLIS) {
+              const config = otherCli[cli]
+              if (config && !acceptsNewModelEffort(modelCatalogs[cli], config, profile.otherCli?.[cli])) {
+                const { reasoningEffort: _effort, ...remaining } = config
+                nextOtherCli[cli] = remaining
+              }
+            }
+            setLaunch(nextLaunch)
+            setOtherCli(nextOtherCli)
             setSaving(true)
             void onSave(
               window.copilotDesktopSettings.updateWorkspaceProfile(
@@ -424,8 +452,8 @@ function WorkspaceProfileEditor({
                 name,
                 permissionPreset,
                 defaultResumeMode,
-                launch,
-                Object.keys(otherCli).length > 0 ? otherCli : undefined,
+                nextLaunch,
+                Object.keys(nextOtherCli).length > 0 ? nextOtherCli : undefined,
                 reviewerOverride ?? undefined,
               ),
               `Saved profile "${name.trim() || profile.name}".`,
