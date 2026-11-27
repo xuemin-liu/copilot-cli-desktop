@@ -403,7 +403,8 @@ export function githubPullUrlKey(url: string): string {
 
 /**
  * Verifies that `head` and `base` belong to `origin`'s own branches (never an external fork ref or unpushed local commit)
- * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs.
+ * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs. `presentAgentConfigObjects`
+ * maps each config path in `head`'s tree to its Git object id, so a change to it can be told from the version shown.
  */
 export async function inspectReviewCommitAgentConfigs(
   runner: GitRunner,
@@ -411,7 +412,7 @@ export async function inspectReviewCommitAgentConfigs(
   origin: string,
   head: string,
   base: string,
-): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; complete: boolean }> {
+): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; presentAgentConfigObjects: Record<string, string>; complete: boolean }> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
   await ensureOriginBranchCommit(runner, resolve(project), [], origin, head)
   await ensureOriginBranchCommit(runner, resolve(project), [], origin, base)
@@ -431,12 +432,22 @@ export async function inspectReviewCommitAgentConfigs(
     return result.stdout.toString('utf8')
   }
   const diffPaths = await paths(['diff', '--no-relative', '-z', '--name-only', `${base}...${head}`])
-  const treePaths = await paths(['ls-tree', '--full-tree', '-r', '-z', '--name-only', head])
+  // Each entry is "<mode> <type> <object>\t<path>".
+  const tree = await paths(['ls-tree', '--full-tree', '-r', '-z', head])
   const filterConfigs = (raw: string): string[] =>
     [...new Set(raw.split('\0').filter((path) => path.length > 0 && isRepoAgentExecConfigPath(path)))]
+  const presentAgentConfigObjects: Record<string, string> = {}
+  for (const entry of tree.split('\0')) {
+    const tab = entry.indexOf('\t')
+    if (tab < 0) continue
+    const path = entry.slice(tab + 1)
+    const object = entry.slice(0, tab).split(' ')[2]
+    if (object && isRepoAgentExecConfigPath(path)) presentAgentConfigObjects[path] = object
+  }
   return {
     modifiedAgentConfigs: filterConfigs(diffPaths),
-    presentAgentConfigs: filterConfigs(treePaths),
+    presentAgentConfigs: Object.keys(presentAgentConfigObjects),
+    presentAgentConfigObjects,
     complete,
   }
 }

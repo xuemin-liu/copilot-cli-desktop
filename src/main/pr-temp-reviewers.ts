@@ -378,17 +378,20 @@ export function reviewerHelperDirAccess(
  * round timer.
  */
 /**
- * For a run started without the question: the repo-local CLI/MCP configuration in a round's tree that the person has not
- * been shown yet. It can arrive through a moved base without being in `base...head`. Empty for a run that asked at start.
+ * The repo-local CLI/MCP configuration in a round's tree (path to Git object id) that no question the person approved
+ * has shown in this version: new paths, and known paths whose content changed. Either can arrive through a moved base
+ * without being in `base...head`.
  */
-export function undisclosedAgentConfigs(group: Pick<TempReviewerGroup, 'startedWithoutQuestion' | 'disclosedAgentConfigs'>, present: readonly string[]): string[] {
-  if (!group.startedWithoutQuestion) return []
-  return present.filter((path) => !group.disclosedAgentConfigs.has(path))
+export function undisclosedAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, present: Readonly<Record<string, string>>): string[] {
+  return Object.entries(present).filter(([path, object]) => group.disclosedAgentConfigs.get(path) !== object).map(([path]) => path)
 }
 
-/** The person approved a question that named these paths. Only configuration shown counts as disclosed. */
-export function discloseAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, shown: readonly string[]): void {
-  for (const path of shown) group.disclosedAgentConfigs.add(path)
+/** The person approved a question that showed these paths: their versions in `present` count as disclosed. */
+export function discloseAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, present: Readonly<Record<string, string>>, shown: readonly string[]): void {
+  for (const path of shown) {
+    const object = present[path]
+    if (object) group.disclosedAgentConfigs.set(path, object)
+  }
 }
 
 export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
@@ -680,10 +683,8 @@ export interface TempReviewerGroup {
   stage: 'starting' | 'active' | 'ended'
   outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   notice: string | null
-  /** The person was not asked before this run's reviewers started (Settings turned the question off). */
-  startedWithoutQuestion: boolean
-  /** Repo-local CLI/MCP configuration named in a question the person approved during such a run. */
-  disclosedAgentConfigs: Set<string>
+  /** Repo-local CLI/MCP configuration (path to Git object id) shown in a question the person approved for this run. */
+  disclosedAgentConfigs: Map<string, string>
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
   lastObservedHostSettledKey: string | null
   /** Active required seats; only explicit user Dismiss removes a CLI from this map. */
@@ -876,8 +877,7 @@ export class TempReviewerRegistry {
       stage: 'starting',
       outcome: null,
       notice: null,
-      startedWithoutQuestion: false,
-      disclosedAgentConfigs: new Set(),
+      disclosedAgentConfigs: new Map(),
       lastObservedHostSettledKey: null,
       requiredSeats,
       claimedEvidenceKeys: new Set<string>(),

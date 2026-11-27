@@ -683,18 +683,27 @@ test('dismissing the last required seat ends the group as stopped, never approve
   assert.equal(group.outcome, 'stopped')
 })
 
-test('a run started without the question discloses configuration only by naming it in an approved question', () => {
-  const asked = { startedWithoutQuestion: false, disclosedAgentConfigs: new Set<string>() }
-  assert.deepEqual(undisclosedAgentConfigs(asked, ['.mcp.json']), [], 'a run that asked at start was shown the tree')
-  const quiet = { startedWithoutQuestion: true, disclosedAgentConfigs: new Set<string>() }
-  assert.deepEqual(undisclosedAgentConfigs(quiet, []), [])
+test('configuration counts as disclosed only in the version an approved question showed', () => {
+  // A start that asked about the tree it had.
+  const asked = { disclosedAgentConfigs: new Map<string, string>() }
+  discloseAgentConfigs(asked, { '.mcp.json': 'a1' }, ['.mcp.json'])
+  assert.deepEqual(undisclosedAgentConfigs(asked, { '.mcp.json': 'a1' }), [], 'shown at start')
+  // A base update changes the same file without touching base...head: asked again.
+  assert.deepEqual(undisclosedAgentConfigs(asked, { '.mcp.json': 'b2' }), ['.mcp.json'])
+  // A start without the question had no configuration to show.
+  const quiet = { disclosedAgentConfigs: new Map<string, string>() }
+  discloseAgentConfigs(quiet, {}, [])
   // A verification-only question at a round with no configuration discloses nothing.
-  discloseAgentConfigs(quiet, undisclosedAgentConfigs(quiet, []))
-  // Configuration then arrives through the base, present in the tree but not in base...head: still asked.
-  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json']), ['.github/hooks/pre.json'])
-  discloseAgentConfigs(quiet, ['.github/hooks/pre.json'])
-  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json']), [], 'shown and approved')
-  assert.deepEqual(undisclosedAgentConfigs(quiet, ['.github/hooks/pre.json', '.mcp.json']), ['.mcp.json'], 'a new file is asked about')
+  discloseAgentConfigs(quiet, {}, undisclosedAgentConfigs(quiet, {}))
+  // Configuration then arrives through the base: still asked.
+  const hook = { '.github/hooks/pre.json': 'c3' }
+  assert.deepEqual(undisclosedAgentConfigs(quiet, hook), ['.github/hooks/pre.json'])
+  discloseAgentConfigs(quiet, hook, ['.github/hooks/pre.json'])
+  assert.deepEqual(undisclosedAgentConfigs(quiet, hook), [], 'shown and approved')
+  assert.deepEqual(undisclosedAgentConfigs(quiet, { ...hook, '.mcp.json': 'd4' }), ['.mcp.json'], 'a new file is asked about')
+  // A path the question named but that is gone from the tree is not recorded.
+  discloseAgentConfigs(quiet, hook, ['.vscode/mcp.json'])
+  assert.equal(quiet.disclosedAgentConfigs.has('.vscode/mcp.json'), false)
 })
 
 test('githubPullUrlKey names the same pull request only for the same repository and number', () => {
@@ -760,7 +769,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     // Once pushed to a real repository branch on origin, prepareAgnosticReviewWorktree succeeds:
     execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
     const cleanInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head1Sha, baseSha)
-    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [], complete: true })
+    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [], presentAgentConfigObjects: {}, complete: true })
 
     // A pushed branch with no history in common with base: the diff cannot be read, so the scan says it is incomplete.
     execFileSync(gitExe.path, ['checkout', '-q', '--orphan', 'unrelated'], { cwd: repo, env: gitEnv })
@@ -822,6 +831,8 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     ]
     assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
     assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)
+    const mcpObject = execFileSync(gitExe.path, ['rev-parse', `${head2Sha}:.mcp.json`], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    assert.equal(configInspect.presentAgentConfigObjects['.mcp.json'], mcpObject, 'each config is recorded with its object id')
 
     // From a subfolder with diff.relative on, the whole repository is still scanned.
     execFileSync(gitExe.path, ['config', 'diff.relative', 'true'], { cwd: repo, env: gitEnv })
