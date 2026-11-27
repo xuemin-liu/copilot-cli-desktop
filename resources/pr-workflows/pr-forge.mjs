@@ -812,7 +812,10 @@ export function evaluateRevisionApprovals({
     const match = approvingItems.find((item) => {
       const key = `${item.kind}:${item.id}`
       if (usedKeys.has(key)) return false
-      if (item.body.split(/\r?\n/).some((line) => !line.trimStart().startsWith('>') && line.includes(tag))) return true
+      if (item.body.split(/\r?\n/).some((line) => {
+        const text = line.trim()
+        return requireExactReviewerTags ? text === tag : !text.startsWith('>') && text.includes(tag)
+      })) return true
       if (!requireExactReviewerTags && requiredTags.length === 1 && item.formal) return true
       return false
     })

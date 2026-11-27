@@ -145,7 +145,7 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { resolveReviewerEntries, validateReviewerEntries, type ResolvedReviewer } from './reviewer-settings.js'
+import { resolveReviewerEntries, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer } from './reviewer-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
@@ -4102,11 +4102,23 @@ async function launchTempReviewerSeat(
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
+  const expectedGeneration = seat.generation
+  const expectedRound = group.round
+  const isSeatCancelled = (): boolean => (
+    shuttingDown()
+    || group.stage === 'ended'
+    || !group.consentGranted
+    || group.round !== expectedRound
+    || group.requiredSeats.get(seat.id) !== seat
+    || seat.generation !== expectedGeneration
+    || seat.lifecycle === 'stopped'
+  )
+  if (isSeatCancelled()) throw new Error('Temporary review stopped')
   const runner = await meetingGitRunner()
   const store = reviewReservations()
   if (!runner) throw new Error('Git is not available')
   if (!store) throw new Error('Review reservations are unavailable')
-  const expectedGeneration = seat.generation
+  if (isSeatCancelled()) throw new Error('Temporary review stopped')
   const reusingExistingArea = Boolean(options?.reuseArea && seat.area && seat.launchId)
   const area = reusingExistingArea ? seat.area! : planReviewerArea(reviewerAreaBase())
   const launchId = reusingExistingArea ? seat.launchId : basename(area.root)
@@ -4170,14 +4182,6 @@ async function launchTempReviewerSeat(
       prUrl: group.prUrl,
     }
     const title = `Review ${group.prLabel} · ${seat.label}`
-
-    const isSeatCancelled = (): boolean => (
-      shuttingDown()
-      || group.stage === 'ended'
-      || group.requiredSeats.get(seat.id) !== seat
-      || seat.generation !== expectedGeneration
-      || seat.lifecycle === 'stopped'
-    )
 
     const allowAll = group.allowAll
 
@@ -4753,37 +4757,39 @@ async function startTempReviewersFlow(options: {
   const { group, hostKey } = created
   broadcastState()
 
+  const firstRound = group.round
   void (async () => {
-    const isEnded = (): boolean => group.stage === 'ended'
+    const isOver = (): boolean => group.stage === 'ended' || group.round !== firstRound
     try {
       const approved = await askTempReviewerConsent(repository, prLabel, reviewers, options.requireConsent, allowAll, consentWarnings)
       if (!approved) {
-        if (!isEnded()) {
+        if (!isOver()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
           await teardownTempReviewerSeats(seats)
           broadcastState()
         }
         return
       }
-      if (isEnded()) return
+      if (isOver()) return
       group.consentGranted = true
       for (const seat of [...group.requiredSeats.values()]) {
-        if (isEnded()) break
+        if (isOver()) break
         if (group.requiredSeats.get(seat.id) !== seat || seat.lifecycle !== 'starting') continue
         try {
           await launchTempReviewerSeat(group, seat, options.profile)
         } catch (error) {
+          if (isOver() || group.requiredSeats.get(seat.id) !== seat) continue
           tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
           broadcastState()
         }
       }
-      if (group.stage === 'starting') {
+      if (!isOver() && group.stage === 'starting') {
         group.stage = 'active'
         tempReviewers.wakeAll()
         broadcastState()
       }
     } catch (error) {
-      if (!isEnded()) {
+      if (!isOver()) {
         const seats = tempReviewers.endGroup(group.id, 'stopped', error instanceof Error ? error.message : 'Temporary PR reviewers failed to start.')
         await teardownTempReviewerSeats(seats)
         broadcastState()
@@ -5746,6 +5752,7 @@ async function advanceGroupTempReviewers(
   options?: { force?: boolean },
 ): Promise<MeetingResponse> {
   if (!group.consentGranted) return { ok: false, message: 'Answer the question about hidden reviewers first.' }
+  const previousRound = group.round
   const runner = await meetingGitRunner()
   if (!runner) return { ok: false, message: 'Git is not available.' }
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
@@ -5801,10 +5808,12 @@ async function advanceGroupTempReviewers(
       }
     }
     const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
+    if (!group.consentGranted || group.round !== previousRound) return { ok: false, message: 'The review round changed while preparing this revision.' }
+    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
-    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
-    if (requiresConsent && group.stage === 'active') {
+    if (requiresConsent) {
+      group.consentGranted = false
       group.stage = 'starting'
     }
     const plannedRelaunches = new Set<string>()
@@ -5852,6 +5861,7 @@ async function advanceGroupTempReviewers(
             return
           }
           if (isStaleOrEnded()) return
+          group.consentGranted = true
         }
 
         const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
@@ -7510,6 +7520,10 @@ async function updateWorkspaceProfile(
   // Check the submitted settings before changing anything, so a malformed value fails the save instead of being dropped.
   const validatedOtherCli = validateOtherCliConfig(otherCli, profile.otherCli)
   const validatedReviewerEntries = reviewerEntries === undefined ? profile.reviewerEntries : reviewerEntries === null ? undefined : validateReviewerEntries(reviewerEntries)
+  if (reviewerEntries !== undefined && validatedReviewerEntries) {
+    await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog)
+    assertWorkspaceListed(profile)
+  }
   profile.name = normalizedName
   profile.permissionPreset = permissionPreset
   profile.defaultResumeMode = defaultResumeMode
@@ -8693,6 +8707,7 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
     if (!group.consentGranted) throw new Error('Answer the question about hidden reviewers first.')
     const previous = group.requiredSeats.get(payload)
+    const retryRound = group.round
     if (!previous) throw new Error('That reviewer seat is not in this group')
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
@@ -8706,6 +8721,7 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
       broadcastState()
       return snapshot()
     }
+    if (!group.consentGranted || group.round !== retryRound) throw new Error('The review round changed while retrying this seat.')
     const reset = tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     broadcastState()
     try {
@@ -9290,6 +9306,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     throw new Error('Invalid desktop preferences')
   }
   const validatedReviewerEntries = 'reviewerEntries' in values ? validateReviewerEntries(values.reviewerEntries) : null
+  if (validatedReviewerEntries) await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog)
   if (
     ('closeBehavior' in values && !isCloseBehavior(values.closeBehavior))
     || ('trayEnabled' in values && typeof values.trayEnabled !== 'boolean')

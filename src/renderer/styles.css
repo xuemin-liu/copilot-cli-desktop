@@ -1290,6 +1290,11 @@ button:disabled {
   padding: 0 4px;
 }
 
+.reviewer-settings-error {
+  margin: 0;
+  color: #fda4af;
+}
+
 .reviewer-settings-remove {
   align-self: end;
 }

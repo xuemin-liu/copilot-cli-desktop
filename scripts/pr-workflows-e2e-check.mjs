@@ -25,6 +25,7 @@ function mcpPost(urlStr, body, sessionId) {
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
+          connection: 'close',
           ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
         },
       },
@@ -224,8 +225,13 @@ class AgyStub {
   const userData = join(directory, 'userdata')
   app.setPath('userData', userData)
 
-  // Auto-accept the temporary PR reviewer consent dialog in headless E2E verification.
-  dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
+  let grantRoundConsent
+  dialog.showMessageBox = async (...args) => {
+    if (args.at(-1)?.detail?.includes('round 3 adds or modifies repo-local')) {
+      return new Promise((accept) => { grantRoundConsent = () => accept({ response: 1, checkboxChecked: false }) })
+    }
+    return { response: 1, checkboxChecked: false }
+  }
 
   let giteaServer = null
   void run().catch(async (error) => {
@@ -701,6 +707,36 @@ class AgyStub {
 
     // Verify worktree was reused cleanly on Round 2 (same checkout path, updated to head2Sha)!
     assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath1, encoding: 'utf8' }).trim(), head2Sha, 'reused Round 1 worktree cleanly at head2Sha')
+
+    // A changed reviewer configuration needs fresh consent before any launch on the new head.
+    await mkdir(join(repo, '.claude'), { recursive: true })
+    await writeFile(join(repo, '.claude', 'settings.json'), '{}\n')
+    git('add', '.claude/settings.json')
+    git('commit', '-q', '-m', 'change local reviewer config for round 3')
+    const head3Sha = git('rev-parse', 'HEAD')
+    git('push', '-q', originBare, 'feat/gitea-pr-12:refs/heads/feat/gitea-pr-12')
+    git('update-ref', 'refs/remotes/origin/feat/gitea-pr-12', head3Sha)
+    giteaHead = head3Sha
+    const callReviewerTool = async (name, args) => {
+      const result = await mcpPost(mcpUrl, { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name, arguments: args } }, mcpSessionId)
+      return result.json.result
+    }
+    const advance = await callReviewerTool('pr_reviewers_round', { head: head3Sha, base: baseSha, summary: 'Update reviewer config.' })
+    assert.equal(advance.isError, undefined, advance.content[0].text)
+    for (let i = 0; i < 150 && !grantRoundConsent; i++) await delay(100)
+    assert.ok(grantRoundConsent, 'the new revision has its own consent dialog')
+    await assert.rejects(ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(groupId)}, 'retry', 'pr-first')`), /Answer the question about hidden reviewers/)
+    const blockedAdvance = await callReviewerTool('pr_reviewers_round', { head: head3Sha, base: baseSha, summary: 'Still waiting for consent.', force: true })
+    assert.equal(blockedAdvance.isError, true)
+    assert.match(blockedAdvance.content[0].text, /Answer the question about hidden reviewers/)
+    grantRoundConsent()
+    let round3Approved = false
+    for (let i = 0; i < 80 && !round3Approved; i++) {
+      const result = await callReviewerTool('pr_reviewers_wait', { wait_seconds: 3 })
+      const parsed = JSON.parse(result.content[0].text)
+      round3Approved = parsed.group.round === 3 && parsed.allApprovedCurrentHead
+    }
+    assert.equal(round3Approved, true, 'both seats can approve the configuration revision after consent')
 
     // 3d. Finish review group as 'approved' (passes live Gitea verification) and verify hidden tabs + detached worktree are cleaned up!
     const finishRes = await mcpPost(

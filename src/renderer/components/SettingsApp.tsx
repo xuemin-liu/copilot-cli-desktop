@@ -7,7 +7,7 @@ import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import { REASONING_EFFORTS, type SessionLaunchConfig } from '../../main/session-launch.js'
-import { MAX_REVIEWER_ENTRIES, reviewerEfforts, type ReviewerEntry } from '../../main/reviewer-settings.js'
+import { MAX_REVIEWER_ENTRIES, reviewerEfforts, reviewerModelEffortError, type ReviewerEntry } from '../../main/reviewer-settings.js'
 import type { CliModelOption } from '../../main/cli-model-catalog.js'
 import { AGENT_CLI_SETTINGS, otherCliReasoningEfforts, type OtherCliConfig } from '../../main/agent-cli-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli } from '../../main/session-cli.js'
@@ -174,6 +174,7 @@ function ReviewerEditor({ entries, catalogs, workspaceModels, disabled, onChange
     <ul className="reviewer-settings-list" aria-label="Reviewers">
       {entries.map(({ id, cli, model, reasoningEffort }, index) => {
         const efforts = reviewerEfforts(cli)
+        const effortError = reviewerModelEffortError(model, reasoningEffort, catalogs[cli])
         return (
           <li key={id}>
             <fieldset className="settings-form-grid" disabled={disabled}>
@@ -196,6 +197,7 @@ function ReviewerEditor({ entries, catalogs, workspaceModels, disabled, onChange
                   id, cli, ...(nextModel ? { model: nextModel } : {}), ...(effort ? { reasoningEffort: effort } : {}),
                 })}
               />
+              {effortError && <p className="settings-grid-wide reviewer-settings-error" role="alert">{effortError}</p>}
               <div className="reviewer-settings-remove">
                 <button type="button" disabled={entries.length <= 1} onClick={() => onChange(entries.filter((entry) => entry.id !== id))}>Remove reviewer</button>
               </div>

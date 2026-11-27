@@ -984,7 +984,10 @@ export function verifySeatOutcomeFromSnapshot(options: {
     receipt,
   } = options
 
-  const hasUnquotedTag = (body: string): boolean => body.split(/\r?\n/).some((line) => !line.trimStart().startsWith('>') && line.includes(tag))
+  const hasUnquotedTag = (body: string): boolean => body.split(/\r?\n/).some((line) => {
+    const text = line.trim()
+    return requireExactReviewerTags ? text === tag : !text.startsWith('>') && text.includes(tag)
+  })
   const isExpectedAccount = (item: ForgeEvidenceItem): boolean => {
     if (item.body.startsWith(marker)) return false
     if (snapshot.actorId === null && !snapshot.actorLogin) return true

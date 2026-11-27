@@ -22,9 +22,11 @@ export function reviewerEfforts(cli: ReviewerCli): readonly string[] {
 
 function validReviewerEntry(value: unknown): ReviewerEntry | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const { id, cli, model, reasoningEffort } = value as Partial<ReviewerEntry>
+  const { id, cli, model: rawModel, reasoningEffort } = value as Partial<ReviewerEntry>
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !isReviewerCli(cli)) return null
-  if (model !== undefined && (typeof model !== 'string' || !model || model !== model.trim() || model.length > 200 || /^-|[\x00-\x1f\x7f]/.test(model))) return null
+  if (rawModel !== undefined && (typeof rawModel !== 'string' || /[\x00-\x1f\x7f]/.test(rawModel))) return null
+  const model = rawModel?.trim() || undefined
+  if (model && (model.length > 200 || model.startsWith('-'))) return null
   const efforts = reviewerEfforts(cli)
   if (reasoningEffort !== undefined && (!efforts.length || (reasoningEffort !== 'default' && !efforts.includes(reasoningEffort)))) return null
   return { id, cli, ...(model === undefined ? {} : { model }), ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
@@ -56,6 +58,29 @@ export function validateReviewerEntries(value: unknown): ReviewerEntry[] {
   })
 }
 
+export function reviewerModelEffortError(
+  model: string | undefined,
+  effort: string | undefined,
+  catalog: readonly CliModelOption[] | undefined,
+): string | null {
+  if (!model || !effort || effort === 'default') return null
+  const supported = catalog?.find((option) => option.id === model.trim())?.efforts
+  return supported && !supported.includes(effort) ? `${model} does not support ${effort} reasoning effort.` : null
+}
+
+export async function validateReviewerModelOverrides(
+  entries: readonly ReviewerEntry[],
+  getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
+): Promise<void> {
+  const errors = await Promise.all(entries.map(async ({ cli, model, reasoningEffort }) => (
+    model && reasoningEffort && reasoningEffort !== 'default'
+      ? reviewerModelEffortError(model, reasoningEffort, await getCatalog(cli))
+      : null
+  )))
+  const invalid = errors.findIndex((error) => error !== null)
+  if (invalid !== -1) throw new Error(`Reviewer ${invalid + 1}: ${errors[invalid]}`)
+}
+
 export type ResolvedReviewer = { id: string; name: string; label: string } & (
   | { cli: 'copilot'; launch: SessionLaunchConfig; permissionPreset: PermissionPreset }
   | { cli: OtherCli; config: PerCliConfig }
@@ -82,9 +107,9 @@ export async function resolveReviewerEntries(
     let effort = entry.reasoningEffort ?? workspace?.reasoningEffort
     let inheritedEffortUnavailable = false
     if (model && effort && effort !== 'default') {
-      const supported = (await getCatalog(cli)).find((option) => option.id === model)?.efforts
-      if (supported && !supported.includes(effort)) {
-        if (entry.reasoningEffort) throw new Error(`${name}: ${model} does not support ${effort} reasoning effort. Edit this reviewer in Settings.`)
+      const error = reviewerModelEffortError(model, effort, await getCatalog(cli))
+      if (error) {
+        if (entry.reasoningEffort) throw new Error(`${name}: ${error} Edit this reviewer in Settings.`)
         effort = 'default'
         inheritedEffortUnavailable = true
       }
