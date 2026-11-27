@@ -8816,9 +8816,15 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
       return snapshot()
     }
     broadcastState()
+    const launchedGeneration = reset.generation
     try {
       await launchTempReviewerSeat(group, reset, profile)
     } catch (error) {
+      // A round that began during the launch cancelled it and owns the seat now: nothing failed that is this Retry's.
+      if (overtaken() || group.requiredSeats.get(payload) !== reset || reset.generation !== launchedGeneration) {
+        broadcastState()
+        return snapshot()
+      }
       tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
       broadcastState()
       throw error
