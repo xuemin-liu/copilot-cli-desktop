@@ -520,6 +520,26 @@ test('worktree timeout settings validate and persist, and new sessions and resta
   assert.equal(harness.spawns.at(-1)!.worktreeTimeoutMinutes, 25)
 }))
 
+test('resuming a stored session keeps its own model and effort; a new session gets the workspace default', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  capabilities.supportedOptions = [...capabilities.supportedOptions, '--model', '--effort']
+  profile.launch = { ...profile.launch, model: 'workspace-model', reasoningEffort: 'high' }
+  const path = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify({ type: 'session.start', data: { selectedModel: 'chosen-in-session' } }) + '\n')
+  profile.tabs = [{ title: 'Resumed', lastSessionId: SOURCE }]
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const tabId = (await harness.request('desktop:get-state')).activeTabId!
+  for (const spawn of [harness.spawns[0]!, (await harness.request('desktop:restart-tab', tabId), harness.spawns.at(-1)!)]) {
+    assert.ok(spawn.args.includes(`--resume=${SOURCE}`), spawn.args.join(' '))
+    assert.ok(!spawn.args.includes('--model') && !spawn.args.includes('--effort'), spawn.args.join(' '))
+  }
+  await harness.request('desktop:create-tab', 'new', profile.id)
+  const fresh = harness.spawns.at(-1)!.args
+  assert.deepEqual(fresh.slice(fresh.indexOf('--model'), fresh.indexOf('--model') + 4), ['--model', 'workspace-model', '--effort', 'high'])
+}))
+
 test('meeting start reads pending explicit requests after resume and repeated requests in the same tab', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
@@ -1806,7 +1826,8 @@ test('failed capability detection does not stop a running session during restart
   await fixture(async (harness, directory) => {
     const { profile, capabilities } = configure(harness, directory)
     const opened = await harness.createMain()
-    profile.launch.model = 'gpt-5.3-codex'
+    // A resume keeps the session's own model, so this needs a launch option a resume still passes.
+    profile.launch.mode = 'plan'
     capabilities.probeFailed = true
     await assert.rejects(async () => harness.request('desktop:restart-tab', opened.activeTabId), /Could not determine Copilot CLI capabilities/)
     assert.equal(harness.spawns.length, 1)

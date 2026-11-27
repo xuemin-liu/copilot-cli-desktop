@@ -81,11 +81,15 @@ export function normalizeSessionLaunchConfig(value: unknown): SessionLaunchConfi
   }
 }
 
+/**
+ * The workspace's model and effort are only where a session starts: Copilot stores the model and effort a session
+ * uses (including a later `/model` change) and restores them on `--resume`, so passing them again would reset it.
+ */
 export function buildSessionLaunchArgs(config: SessionLaunchConfig, freshSession: boolean): string[] {
   const normalized = normalizeSessionLaunchConfig(config)
   const args: string[] = []
-  if (normalized.model) args.push('--model', normalized.model)
-  if (normalized.reasoningEffort !== 'default') args.push('--effort', normalized.reasoningEffort)
+  if (normalized.model && freshSession) args.push('--model', normalized.model)
+  if (normalized.reasoningEffort !== 'default' && freshSession) args.push('--effort', normalized.reasoningEffort)
   if (normalized.contextTier !== 'default') args.push('--context', normalized.contextTier)
   if (normalized.agent) args.push('--agent', normalized.agent)
   if (normalized.mode === 'plan-autopilot') args.push('--plan', '--mode', 'autopilot')

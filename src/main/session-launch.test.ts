@@ -38,6 +38,12 @@ test('worktree launch is omitted for resume and remote-connect sessions', () => 
   assert.deepEqual(buildSessionLaunchArgs({ ...DEFAULT_SESSION_LAUNCH_CONFIG, worktree: true }, false), [])
 })
 
+test('a resumed session keeps its own model and effort instead of the workspace default', () => {
+  assert.deepEqual(buildSessionLaunchArgs({ ...DEFAULT_SESSION_LAUNCH_CONFIG, model: 'gpt-5.3-codex', reasoningEffort: 'high', contextTier: 'long_context' }, false), [
+    '--context', 'long_context',
+  ])
+})
+
 test('model and agent values that look like option flags are discarded', () => {
   const normalized = normalizeSessionLaunchConfig({
     ...DEFAULT_SESSION_LAUNCH_CONFIG,
