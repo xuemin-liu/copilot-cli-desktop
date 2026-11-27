@@ -152,6 +152,7 @@ if (!process.versions.electron) {
     const window = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().endsWith('index.html'))
     const current = await window?.webContents.executeJavaScript('window.copilotDesktop.getState()').catch(() => null)
     console.error('[paths] runs', JSON.stringify(current?.tempReviewerGroups ?? null))
+    console.error('[paths] deliveries', JSON.stringify((current?.workflowDeliveries ?? []).map((delivery) => ({ ...delivery, text: String(delivery.text).slice(0, 160) }))))
     for (const tab of current?.tabs ?? []) {
       const screen = await window.webContents.executeJavaScript(`window.copilotDesktop.getTabBacklog(${JSON.stringify(tab.id)})`).catch(() => '')
       const lines = String(screen).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007/g, '').split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean)
@@ -279,6 +280,7 @@ if (!process.versions.electron) {
     const hostEnded = await until('the host\'s run to end', async () => { const group = await groupOf(hosted.id); return group?.stage === 'ended' ? group : null }, 90_000)
     assert.equal(hostEnded.outcome, 'closed')
     await allClosed('the host\'s hidden tab and checkout to go')
+    assert.equal(consents, 1, 'the person was asked once for the whole run, start to teardown')
     meetings.push(hosted.id)
     }
 
@@ -293,7 +295,8 @@ if (!process.versions.electron) {
     await outsiderB('meeting_reply', { text: 'Round 1 fine.' })
     assert.match(await nextMessage(hostB, 120_000), new RegExp(REVIEW_MARK), 'the seat reviewed before its tab was switched')
     const seatTabB = liveB.seats[0].tabId
-        await type(seatTabB, `/resume ${process.env.E2E_OTHER_SESSION}`)
+        const seatSessionB = (await getState()).tabs.find((tab) => tab.id === seatTabB).lastSessionId
+    await type(seatTabB, `/resume ${process.env.E2E_OTHER_SESSION}`)
     await until('the other conversation on the seat\'s screen', async () => (await backlog(seatTabB)).includes('Save this disposable session.'), 60_000)
     // The next round must not be typed into that conversation. The desktop may learn of the change at once (the seat
     // leaves with that reason) or only find that it can no longer prove the recipient (the delivery deadline takes the
@@ -301,13 +304,34 @@ if (!process.versions.electron) {
     await hostB('meeting_round', { post: 'Plan v2 after the switch.' })
     await nextMessage(outsiderB)
     const switched = await until('the switched seat to leave', async () => { const group = await groupOf(meetingB); return group?.seats[0].verdict === 'incomplete' ? group : null }, 50_000)
-    assert.match(switched.seats[0].error, /changed to another conversation, so it left the meeting|did not reach it for/)
+    // A reason about who would receive the message: the switch itself, or a recipient the desktop can no longer prove.
+    // "It did not take the message" (typed, never recorded) would mean the round was put into some prompt.
+    assert.match(switched.seats[0].error, /changed to another conversation, so it left the meeting|did not reach it for \d+ minute\(s\): (Close the other running conversations|Its session is changing)/)
     assert.ok(switched.seats[0].tabId, 'its tab stays for the person to look at')
     console.log('[paths] the switched seat left with: ' + switched.seats[0].error)
     assert.match((await hostB('meeting_status')).text, /- Copilot CLI: left/)
     await outsiderB('meeting_reply', { text: 'Round 2 fine.' })
     assert.match(await nextMessage(hostB, 30_000), /Round 2 fine\./, 'the round finished without the seat that left, before its timeout')
     assert.equal(await modelSaw(/Plan v2 after the switch\./), null, 'no conversation was given the round after the switch')
+    // Nor was it typed: not on the tab's screen, not submitted in the delivery journal, not in either conversation's log.
+    const roundMark = new RegExp(`meeting ${meetingB} · round 2`)
+    assert.doesNotMatch(await backlog(seatTabB), roundMark, 'round 2 is not on the seat tab\'s screen')
+    assert.doesNotMatch(await backlog(seatTabB), /Plan v2 after the switch/)
+    const seatSessions = new Set([seatSessionB, process.env.E2E_OTHER_SESSION])
+    // The journal keeps a summary line of each message, not its text.
+    const journalRound = (round) => new RegExp(`^Meeting ${meetingB}, round ${round}, `)
+    // The journal does hold this seat's deliveries, by the same marks: round 1 is there, so its silence on round 2 means something.
+    assert.ok(((await getState()).workflowDeliveries ?? []).some((delivery) => delivery.scope === `meeting/${meetingB}` && delivery.sessionId === seatSessionB
+      && journalRound(1).test(delivery.text) && delivery.state === 'answered'), 'round 1 to the seat is in the delivery journal, answered')
+    const typed = ((await getState()).workflowDeliveries ?? []).filter((delivery) => delivery.scope === `meeting/${meetingB}` && seatSessions.has(delivery.sessionId)
+      && journalRound(2).test(delivery.text) && delivery.state !== 'queued' && delivery.state !== 'cancelled')
+    assert.deepEqual(typed.map((delivery) => `${delivery.sessionId} ${delivery.state}`), [], 'round 2 never entered submission for the seat or the other conversation')
+    for (const sessionId of seatSessions) {
+      const log = await readFile(join(process.env.COPILOT_HOME, 'session-state', sessionId, 'events.jsonl'), 'utf8').catch(() => '')
+      assert.ok(log.length > 0, `the log of conversation ${sessionId} was read`)
+      assert.doesNotMatch(log, roundMark, `round 2 is not in the log of conversation ${sessionId}`)
+      assert.doesNotMatch(log, /Plan v2 after the switch/)
+    }
     await hostB('meeting_end')
     await until('the second run to end', async () => (await groupOf(meetingB))?.stage === 'ended')
     await allClosed('the switched seat\'s tab and checkout to go')
