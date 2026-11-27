@@ -82,12 +82,28 @@ export function reviewerWorkspaceModels(
 
 export type ReviewerModelCatalogs = Partial<Record<ReviewerCli, readonly CliModelOption[]>>
 
+export function desktopReviewerWorkspaces(
+  profiles: readonly Pick<WorkspaceProfile, 'name' | 'launch' | 'otherCli' | 'reviewerEntries' | 'general'>[],
+): { name: string; models: Record<ReviewerCli, string> }[] {
+  return profiles.filter((profile) => !profile.general && !profile.reviewerEntries).map((profile) => ({
+    name: profile.name,
+    models: reviewerWorkspaceModels(profile.launch, profile.otherCli),
+  }))
+}
+
 export async function prefetchReviewerCatalogs(
   entries: readonly ReviewerEntry[],
   getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
-): Promise<void> {
-  const clis = new Set(entries.filter(({ reasoningEffort }) => reasoningEffort && reasoningEffort !== 'default').map(({ cli }) => cli))
-  await Promise.all([...clis].map((cli) => getCatalog(cli)))
+  workspaceModels: readonly Readonly<Record<ReviewerCli, string>>[],
+): Promise<ReviewerModelCatalogs> {
+  const clis = new Set<ReviewerCli>()
+  for (const { cli, model, reasoningEffort } of entries) {
+    if (reasoningEffort && reasoningEffort !== 'default' && (model || workspaceModels.some((models) => models[cli]?.trim()))) {
+      clis.add(cli)
+    }
+  }
+  const catalogs = await Promise.all([...clis].map(async (cli) => [cli, await getCatalog(cli)] as const))
+  return Object.fromEntries(catalogs)
 }
 
 export function validateReviewerModelOverrides(
@@ -109,10 +125,8 @@ export function validateDesktopReviewerModels(
 ): void {
   validateReviewerModelOverrides(entries, catalogs)
   if (!entries.some(({ model, reasoningEffort }) => !model && reasoningEffort && reasoningEffort !== 'default')) return
-  for (const profile of profiles) {
-    if (profile.general || profile.reviewerEntries) continue
-    const models = reviewerWorkspaceModels(profile.launch, profile.otherCli)
-    validateReviewerModelOverrides(entries, catalogs, models, `the Desktop list for workspace "${profile.name}"`)
+  for (const { name, models } of desktopReviewerWorkspaces(profiles)) {
+    validateReviewerModelOverrides(entries, catalogs, models, `the Desktop list for workspace "${name}"`)
   }
 }
 

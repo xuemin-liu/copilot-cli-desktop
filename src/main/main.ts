@@ -145,7 +145,11 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { prefetchReviewerCatalogs, resolveReviewerEntries, reviewerWorkspaceModels, validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer, type ReviewerModelCatalogs } from './reviewer-settings.js'
+import {
+  desktopReviewerWorkspaces, prefetchReviewerCatalogs, resolveReviewerEntries, reviewerWorkspaceModels,
+  validateDesktopReviewerModels, validateReviewerEntries, validateReviewerModelOverrides,
+  type ResolvedReviewer, type ReviewerEntry, type ReviewerModelCatalogs,
+} from './reviewer-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
@@ -2593,6 +2597,7 @@ function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOptio
   if (!reload && cached?.providerKey === providerKey) return cached.promise
   const entry: CachedModelCatalog = {
     providerKey,
+    ...(cached?.providerKey === providerKey && cached.models ? { models: cached.models } : {}),
     promise: load().catch(() => []).then((models) => {
       entry.models = models
       if (models.length === 0 && modelCatalogs.get(cli) === entry) modelCatalogs.delete(cli)
@@ -2616,9 +2621,16 @@ function getModelCatalog(cli: SessionCli, reload = false): Promise<CliModelOptio
   }
 }
 
-/** Read resolved catalogs without holding up later config writes. */
-function knownReviewerModelCatalogs(): ReviewerModelCatalogs {
-  const catalogs: ReviewerModelCatalogs = {}
+async function prefetchReviewerSettingsCatalogs(entries: readonly ReviewerEntry[], workspaceModels: readonly Readonly<Record<ReviewerCli, string>>[]) {
+  const revision = copilotModelCatalogRevision
+  const catalogs = await prefetchReviewerCatalogs(entries, getModelCatalog, workspaceModels)
+  return { catalogs, revision }
+}
+
+/** A refresh can be pending at write time. Prefer a resolved current catalog, falling back to this save's prefetch. */
+function knownReviewerModelCatalogs(prefetched: Awaited<ReturnType<typeof prefetchReviewerSettingsCatalogs>>): ReviewerModelCatalogs {
+  const catalogs = { ...prefetched.catalogs }
+  if (prefetched.revision !== copilotModelCatalogRevision) delete catalogs.copilot
   for (const [cli, entry] of modelCatalogs) {
     if (entry.models) catalogs[cli] = entry.models
   }
@@ -7539,13 +7551,13 @@ async function updateWorkspaceProfile(
   const workspaceModels = reviewerWorkspaceModels(validatedLaunch, validatedOtherCli)
   const workspaceReviewers = () => reviewerEntries === undefined ? profile.reviewerEntries : submittedReviewers
   const desktopReviewers = () => profile.general ? [] : desktopConfig.reviewerEntries
-  await prefetchReviewerCatalogs(workspaceReviewers() ?? desktopReviewers(), getModelCatalog)
+  const catalogs = await prefetchReviewerSettingsCatalogs(workspaceReviewers() ?? desktopReviewers(), [workspaceModels])
   await persistConfig(() => {
     assertWorkspaceListed(profile)
     const validatedReviewerEntries = workspaceReviewers()
     validateReviewerModelOverrides(
       validatedReviewerEntries ?? desktopReviewers(),
-      knownReviewerModelCatalogs(),
+      knownReviewerModelCatalogs(catalogs),
       workspaceModels,
       validatedReviewerEntries ? undefined : 'the Desktop list',
     )
@@ -9364,10 +9376,15 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let checkpointsTurnedOff = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
-  if (validatedReviewerEntries) await prefetchReviewerCatalogs(validatedReviewerEntries, getModelCatalog)
+  const catalogs = validatedReviewerEntries
+    ? await prefetchReviewerSettingsCatalogs(
+        validatedReviewerEntries,
+        desktopReviewerWorkspaces(desktopConfig.profiles).map(({ models }) => models),
+      )
+    : null
   await persistConfig(() => {
-    if (validatedReviewerEntries) {
-      validateDesktopReviewerModels(validatedReviewerEntries, desktopConfig.profiles, knownReviewerModelCatalogs())
+    if (validatedReviewerEntries && catalogs) {
+      validateDesktopReviewerModels(validatedReviewerEntries, desktopConfig.profiles, knownReviewerModelCatalogs(catalogs))
     }
     before = settingsPreferences()
     updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'

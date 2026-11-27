@@ -58,15 +58,25 @@ test('reviewer settings validate both the entry and roster without collapsing a 
   assert.throws(() => validateReviewerEntries(Array.from({ length: 9 }, (_, i) => ({ id: String(i), cli: 'copilot' }))), /between 1 and 8/)
 })
 
-test('model catalog prefetch reads each requested CLI once', async () => {
+test('model catalog prefetch reads each CLI with a model to check once', async () => {
   const calls: string[] = []
-  await prefetchReviewerCatalogs([
+  const entries: ReviewerEntry[] = [
     { id: 'one', cli: 'codex', model: 'full', reasoningEffort: 'high' },
     { id: 'two', cli: 'codex', reasoningEffort: 'low' },
     { id: 'three', cli: 'claude', reasoningEffort: 'default' },
     { id: 'four', cli: 'copilot', reasoningEffort: 'high' },
-  ], async (cli) => { calls.push(cli); return [] })
-  assert.deepEqual(calls, ['codex', 'copilot'])
+  ]
+  const resolve = async (cli: string) => {
+    calls.push(cli)
+    return [{ id: 'full', label: 'Full', efforts: ['low'] }]
+  }
+  const workspace = reviewerWorkspaceModels(DEFAULT_SESSION_LAUNCH_CONFIG, { codex: { model: 'full' } })
+  const catalogs = await prefetchReviewerCatalogs(entries, resolve, [workspace])
+  assert.deepEqual(calls, ['codex'], 'a second Codex row does not trigger a duplicate lookup and Copilot has no model')
+  assert.throws(() => validateReviewerModelOverrides(entries, catalogs, workspace), /full does not support high/)
+  const noModel = await prefetchReviewerCatalogs([entries[3]!], resolve, [workspace])
+  assert.deepEqual(noModel, {})
+  assert.deepEqual(calls, ['codex'], 'a model-less workspace never waits for a catalog probe')
 })
 
 test('catalog validation reports the incompatible reviewer before saving', () => {
