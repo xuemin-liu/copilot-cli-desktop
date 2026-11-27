@@ -5508,9 +5508,21 @@ async function joinMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Meeting
       if (tab.lastSessionId && sameSessionRecipient(tabId, session, tab.lastSessionId) && meetingPromptSettled(tabId)) {
         const text = meetingCopilotPrimer({ meetingId: group.meetingId, checkout: area.checkout, commit: group.commit })
         const promptsBefore = reader.desktopPromptCount
+        const sessionId = tab.lastSessionId
+        // The ids the tab and the terminal hold are cached: a conversation chosen in the CLI a moment ago may not have
+        // reached them. So the recipient is read afresh, as the meeting's own deliveries do, and that reading stops
+        // holding with any input, output or binding change before the paste.
+        const verified = await session.prepareMeetingDelivery(sessionId)
+        if (cancelled()) return
+        const sameRecipient = (): boolean => managedTabs.get(tabId)?.session === session && tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId === sessionId
         // The desktop's own turn: a prompt the person did not type authorizes nothing (starting a meeting, for one).
         reader.expectDesktopPrompt(text)
-        if (sendSessionTask(tabId, text, false).result === 'sent') primed = { sessionId: tab.lastSessionId, promptsBefore }
+        const sent = sendSessionTask(tabId, text, false, {
+          beforePaste: () => sameRecipient() && verified(),
+          beforeEnter: () => sameRecipient() && session.sessionBindingReady && session.lastSessionId === sessionId && !cancelled(),
+          aborted: () => { reader.cancelExpectedDesktopPrompt(); primed = null },
+        })
+        if (sent.result === 'sent') primed = { sessionId, promptsBefore }
         else reader.cancelExpectedDesktopPrompt()
       }
     } else if (tab.lastSessionId !== primed.sessionId) {
