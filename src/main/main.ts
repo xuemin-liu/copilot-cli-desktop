@@ -4145,6 +4145,11 @@ async function launchTempReviewerSeat(
   tempSeatLaunchesInFlight.set(seat, entry)
   try {
     await run
+  } catch (error) {
+    // Cancelled by whoever is taking the seat over (a round or a Retry): its own cleanup has run, and the seat is
+    // theirs to report on, so this is no failure.
+    if (cancel.cancelled) return
+    throw error
   } finally {
     if (tempSeatLaunchesInFlight.get(seat) === entry) tempSeatLaunchesInFlight.delete(seat)
   }
@@ -5931,6 +5936,8 @@ async function advanceGroupTempReviewers(
     const requiresConsent = unverifiedHead || unaskedConfigs.length > 0 || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
+    // Each seat's generation as this round found it: a same-round Retry that moves one on owns that seat from then.
+    const plannedGenerations = new Map([...group.requiredSeats.values()].map((seat) => [seat.id, seat.generation]))
     if (requiresConsent) {
       group.consentGranted = false
       group.stage = 'starting'
@@ -6054,7 +6061,7 @@ async function advanceGroupTempReviewers(
             await launchTempReviewerSeat(group, reset, profile, { reuseArea: canReuseWorktree })
           } catch (error) {
             // A launch a newer round superseded leaves that round's seat alone.
-            if (isStaleOrEnded() || reset.generation !== launchedGeneration) return
+            if (isStaleOrEnded() || group.requiredSeats.get(reset.id) !== reset || reset.generation !== launchedGeneration) return
             tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
             broadcastState()
           }
@@ -6064,7 +6071,7 @@ async function advanceGroupTempReviewers(
           if (isStaleOrEnded()) break
           if (!group.requiredSeats.has(seat.id)) continue
           if (plannedRelaunches.has(seat.id)) {
-            await relaunchSeatAtNewHead(seat)
+            await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
             continue
           }
           if (seat.cli === 'copilot' && seat.tabId && seat.area) {
@@ -6072,7 +6079,7 @@ async function advanceGroupTempReviewers(
             if (managed && managed.session.activity === 'idle' && meetingPromptSettled(seat.tabId)) {
               // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
               // and its area; a relaunch, if needed, runs after (it takes the queue itself).
-              const refreshGeneration = seat.generation
+              const refreshGeneration = plannedGenerations.get(seat.id) ?? seat.generation
               const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
                 // The generation too: a manual Retry moves it on and owns the seat from then.
                 const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.id) === seat && seat.generation === refreshGeneration
@@ -6118,7 +6125,7 @@ async function advanceGroupTempReviewers(
               })
               if (outcome === 'relaunch') await relaunchSeatAtNewHead(seat, refreshGeneration)
             } else {
-              await relaunchSeatAtNewHead(seat)
+              await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
             }
           }
         }
