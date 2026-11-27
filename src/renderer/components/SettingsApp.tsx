@@ -1146,8 +1146,8 @@ export function SettingsApp(): JSX.Element | null {
           program on this computer could start reviewers too; turn this on to be asked before each review meeting and pull
           request review starts its reviewers. Your own request in a Copilot session to review and fix your pull request
           already counts as the answer when only Copilot reviewers run. You are always asked for a pull request not verified
-          as opened by your GitHub account, for one that adds or changes repo-local CLI or MCP configuration, and when those
-          changes could not be read.
+          as opened by your GitHub account, for a repository that has repo-local CLI or MCP configuration (hooks among it),
+          and when the desktop could not read what the pull request changes.
         </p>
       </section>
 

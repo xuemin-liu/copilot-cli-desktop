@@ -42,8 +42,8 @@ the existing reviewer settings. The reviewers join, answer each round, and are c
    including reads and writes outside the launch directory. For a plan-only session it says what the desktop supplies
    and where the session starts.
    Later revision: this question is now asked only with Settings → Reviewers → "Ask before starting hidden reviewers"
-   turned on (off by default). Pull request reviewers always ask when the pull request is not verified as the person's own or changes
-   repo-local CLI/MCP configuration.
+   turned on (off by default). Pull request reviewers always ask when the pull request is not verified as the person's own, when its
+   repository has repo-local CLI/MCP configuration, or when its changes could not be read.
 4. **Seats.** A managed MCP reviewer (Claude Code, Codex CLI, Antigravity CLI) gets a guest seat the desktop makes
    and grants, and joins with that credential. The seat is tied to the launch generation and revoked on failure, exit,
    dismiss, retry and close. An ordinary join by id keeps its separate grant. Copilot joins directly, only after the

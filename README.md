@@ -363,8 +363,8 @@ desktop starts one hidden session for each CLI chosen under **Settings → Revie
   hidden reviewers** to be asked first, once per meeting, with no as the default answer. The question names the
   reviewers, the commit they get, that later rounds and attachments are covered, and what their permissions allow.
   Decline, and the meeting stays open for reviewers who join by id. For a pull request the question always comes when
-  the pull request is not verified as opened by your GitHub account, when it adds or changes repo-local CLI or MCP
-  configuration, or when the desktop could not read what it changes.
+  the pull request is not verified as opened by your GitHub account, when the repository has repo-local CLI or MCP
+  configuration (hooks among it), or when the desktop could not read what the pull request changes.
 - **Round 1 waits** until each hidden reviewer has joined or failed to, so a fast reviewer does not answer alone. Each
   reviewer has four minutes from its own start to join; your answer to the question and the preparation of the
   checkouts come before that.

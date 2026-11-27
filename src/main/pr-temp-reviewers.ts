@@ -666,6 +666,8 @@ export interface TempReviewerGroup {
   stage: 'starting' | 'active' | 'ended'
   outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   notice: string | null
+  /** The person was not asked before this run's reviewers started (Settings turned the question off). */
+  startedWithoutQuestion: boolean
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
   lastObservedHostSettledKey: string | null
   /** Active required seats; only explicit user Dismiss removes a CLI from this map. */
@@ -858,6 +860,7 @@ export class TempReviewerRegistry {
       stage: 'starting',
       outcome: null,
       notice: null,
+      startedWithoutQuestion: false,
       lastObservedHostSettledKey: null,
       requiredSeats,
       claimedEvidenceKeys: new Set<string>(),

@@ -807,6 +807,14 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
     assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)
 
+    // From a subfolder with diff.relative on, the whole repository is still scanned.
+    execFileSync(gitExe.path, ['config', 'diff.relative', 'true'], { cwd: repo, env: gitEnv })
+    const fromSubfolder = await inspectReviewCommitAgentConfigs(runner, join(repo, 'nested'), upstream, head2Sha, baseSha)
+    execFileSync(gitExe.path, ['config', '--unset', 'diff.relative'], { cwd: repo, env: gitEnv })
+    assert.equal(fromSubfolder.complete, true)
+    assert.deepEqual(fromSubfolder.modifiedAgentConfigs.sort(), expectedConfigs)
+    assert.deepEqual(fromSubfolder.presentAgentConfigs.sort(), expectedConfigs)
+
     const refreshed = await refreshAgnosticReviewWorktree(runner, area, upstream, head2Sha, baseSha, 12)
     assert.equal(refreshed, head2Sha)
     assert.equal(readFileSync(join(area.checkout, 'app.ts'), 'utf8'), 'export const v = 3\n')

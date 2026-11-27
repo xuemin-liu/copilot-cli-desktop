@@ -413,22 +413,25 @@ export async function inspectReviewCommitAgentConfigs(
   base: string,
 ): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; complete: boolean }> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
-  const root = resolve(project)
-  await ensureOriginBranchCommit(runner, root, [], origin, head)
-  await ensureOriginBranchCommit(runner, root, [], origin, base)
+  await ensureOriginBranchCommit(runner, resolve(project), [], origin, head)
+  await ensureOriginBranchCommit(runner, resolve(project), [], origin, base)
+  // The whole repository, whatever folder the session is in: from its top level, and with --no-relative and
+  // --full-tree so neither diff.relative nor the current folder narrows the lists.
+  const top = await git(runner, resolve(project), ['rev-parse', '--show-toplevel'], 'read').catch(() => '')
+  const root = top ? resolve(top) : resolve(project)
   // A failed or cut-off read (no merge base in a shallow clone, say, or a huge tree) is recorded, not taken as "no
   // configs". `-z` gives raw paths: without it Git quotes unusual names, and a quoted name would not match.
   let complete = true
   const paths = async (args: readonly string[]): Promise<string> => {
     const result = await runner.run({ cwd: root, args, kind: 'read', disableHooks: true, timeoutMs: 10 * 60_000, maxStdoutBytes: 16_000_000 }).catch(() => null)
-    if (!result || result.exitCode !== 0 || result.timedOut || result.cancelled || result.stdoutTruncated) {
+    if (!top || !result || result.exitCode !== 0 || result.timedOut || result.cancelled || result.stdoutTruncated) {
       complete = false
       return ''
     }
     return result.stdout.toString('utf8')
   }
-  const diffPaths = await paths(['diff', '-z', '--name-only', `${base}...${head}`])
-  const treePaths = await paths(['ls-tree', '-r', '-z', '--name-only', head])
+  const diffPaths = await paths(['diff', '--no-relative', '-z', '--name-only', `${base}...${head}`])
+  const treePaths = await paths(['ls-tree', '--full-tree', '-r', '-z', '--name-only', head])
   const filterConfigs = (raw: string): string[] =>
     [...new Set(raw.split('\0').filter((path) => path.length > 0 && isRepoAgentExecConfigPath(path)))]
   return {

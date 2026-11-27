@@ -4414,12 +4414,12 @@ async function askTempReviewerConsent(
   requireExplicitConsent: boolean,
   allowAll: boolean,
   warnings: readonly string[] = [],
-  // The pull request is not verified as the person's own, or it changes repo-local CLI/MCP configuration: always asked.
-  untrusted = true,
+  // Settings turned the question off and nothing about this pull request needs it: see startTempReviewersFlow.
+  skipQuestion = false,
 ): Promise<boolean> {
   const nonCopilotReviewers = clis.filter((cli) => cli !== 'copilot')
   if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && warnings.length === 0) return true
-  if (!untrusted && !desktopConfig.reviewerStartPrompt) return true
+  if (skipQuestion) return true
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -4705,7 +4705,7 @@ async function startTempReviewersFlow(options: {
     consentWarnings.push(
       `Warning: this pull request adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
     )
-  } else if (!verifiedOwnPull && configInspection.presentAgentConfigs.length > 0) {
+  } else if (configInspection.presentAgentConfigs.length > 0) {
     consentWarnings.push(
       `Warning: this repository contains repo-local CLI/MCP configuration (${configInspection.presentAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
     )
@@ -4746,9 +4746,13 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isEnded = (): boolean => group.stage === 'ended'
     try {
-      // A scan that could not read the changes cannot show that no CLI/MCP configuration changed.
-      const untrusted = !verifiedOwnPull || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
-      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings, untrusted)
+      // Skipped only for the person's own pull request in a repository with no repo-local CLI/MCP configuration at all:
+      // a scan that could not read the changes shows nothing, and an existing startup hook can run scripts anywhere in
+      // the repository, which no path check can clear.
+      const skipQuestion = !desktopConfig.reviewerStartPrompt && verifiedOwnPull && configInspection.complete
+        && configInspection.modifiedAgentConfigs.length === 0 && configInspection.presentAgentConfigs.length === 0
+      group.startedWithoutQuestion = skipQuestion
+      const approved = await askTempReviewerConsent(repository, prLabel, clis, options.requireConsent, allowAll, consentWarnings, skipQuestion)
       if (!approved) {
         if (!isEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -5776,7 +5780,9 @@ async function advanceGroupTempReviewers(
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
     // A scan that could not read the round's changes cannot show that no CLI/MCP configuration changed.
-    const requiresConsent = unverifiedHead || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
+    // A run started without the question asks once configuration appears at all (through a moved base, say).
+    const unaskedConfigs = group.startedWithoutQuestion && configInspection.presentAgentConfigs.length > 0
+    const requiresConsent = unverifiedHead || unaskedConfigs || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     if (requiresConsent && group.stage === 'active') {
       group.stage = 'starting'
     }
@@ -5816,6 +5822,7 @@ async function advanceGroupTempReviewers(
             desktopConfig.reviewerAllowAll,
             [
               ...(unverifiedHead ? [`Could not confirm on GitHub that ${revisions.head.slice(0, 12)} is the head of ${group.prLabel}; it is on a branch of origin.`] : []),
+              ...(unaskedConfigs && configInspection.modifiedAgentConfigs.length === 0 ? [`Warning: the repository at round ${targetRound} contains repo-local CLI/MCP configuration (${configInspection.presentAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
               ...(configInspection.complete ? [] : [`Could not read which files round ${targetRound} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load.`]),
               ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
             ],
@@ -5828,6 +5835,8 @@ async function advanceGroupTempReviewers(
             }
             return
           }
+          // The person has now been asked about this run, configuration included.
+          group.startedWithoutQuestion = false
           if (isStaleOrEnded()) return
         }
 

@@ -51,7 +51,7 @@ export interface DesktopConfig {
   reviewerClis: ReviewerCli[]
   /** Launch hidden temporary PR reviewer sessions with allow-all flags so background reviews do not block on prompts. */
   reviewerAllowAll: boolean
-  /** Ask before hidden reviewers start for a meeting or a pull request. Off (the default): they start at once, unless the pull request is not verified as the person's own or changes repo-local CLI/MCP configuration. */
+  /** Ask before hidden reviewers start for a meeting or a pull request. Off (the default): they start at once, unless the pull request is not verified as the person's own, its repository has repo-local CLI/MCP configuration, or its changes could not be read. */
   reviewerStartPrompt: boolean
   provider: CopilotProviderConfig
 }
