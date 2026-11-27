@@ -158,6 +158,18 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory() } catch { return false }
 }
 
+/**
+ * What a failed spawn means. It fails with ENOENT for a working folder that is gone as well as for a missing executable,
+ * and for one that is a file now with ENOENT on Windows and ENOTDIR elsewhere; saying git was not found for those sends
+ * the person looking for the wrong thing. Node reports some of these through the child's `error` event and throws others
+ * from `spawn` itself, so both go through here.
+ */
+function spawnFailure(error: unknown, cwd: string): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if ((code === 'ENOENT' || code === 'ENOTDIR') && !isDirectory(cwd)) return new Error(`The folder ${cwd} no longer exists`)
+  return code === 'ENOENT' ? new GitUnavailableError('git was not found') : error
+}
+
 export class GitRunner {
   private readonly options: GitRunnerOptions
   private hooksReady: Promise<void> | null = null
@@ -187,9 +199,16 @@ export class GitRunner {
     const started = Date.now()
 
     return new Promise<GitRunResult>((resolve, reject) => {
-      const child = spawnFn(this.options.gitPath, args, {
-        cwd: options.cwd, env, shell: false, windowsHide: true, detached: detachedGroup(), stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-      })
+      let child: ChildProcess
+      try {
+        child = spawnFn(this.options.gitPath, args, {
+          cwd: options.cwd, env, shell: false, windowsHide: true, detached: detachedGroup(), stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        })
+      } catch (error) {
+        // Thrown before there is a child to listen to (a working path that is a file, outside Windows).
+        reject(spawnFailure(error, options.cwd))
+        return
+      }
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
       let stdoutBytes = 0
@@ -241,13 +260,7 @@ export class GitRunner {
         clearTimeout(graceTimer)
         options.signal?.removeEventListener('abort', onAbort)
         lease?.release()
-        // A spawn fails with ENOENT for a working folder that is gone as well as for a missing executable, and for one
-        // that is a file now with ENOENT on Windows and ENOTDIR elsewhere; saying git was not found for those sends the
-        // person looking for the wrong thing.
-        const code = (error as NodeJS.ErrnoException).code
-        if ((code === 'ENOENT' || code === 'ENOTDIR') && !isDirectory(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
-        else if (code === 'ENOENT') reject(new GitUnavailableError('git was not found'))
-        else reject(error)
+        reject(spawnFailure(error, options.cwd))
       })
       const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
       const emit = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
