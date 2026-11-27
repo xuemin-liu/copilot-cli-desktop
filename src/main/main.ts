@@ -5990,8 +5990,10 @@ async function advanceGroupTempReviewers(
             if (managed && managed.session.activity === 'idle' && meetingPromptSettled(seat.tabId)) {
               // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
               // and its area; a relaunch, if needed, runs after (it takes the queue itself).
+              const refreshGeneration = seat.generation
               const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
-                const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.cli) === seat
+                // The generation too: a manual Retry moves it on and owns the seat from then.
+                const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.cli) === seat && seat.generation === refreshGeneration
                 const area = seat.area
                 if (!owned()) return 'stale'
                 if (!area || !seat.tabId) return 'relaunch'
@@ -8792,12 +8794,18 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (previous.tabId === null && previous.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
       throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
     }
-    await cleanupTempReviewerSeat(previous)
-    if (group.stage === 'ended') {
+    // In the seat's queue, like a round's handover: an earlier launch is cancelled and settled, and a refresh in
+    // progress finishes, before the area goes and the generation moves on.
+    const reset = await withTempSeatArea(previous, async () => {
+      await settleTempSeatLaunch(previous)
+      await cleanupTempReviewerSeat(previous)
+      if (group.stage === 'ended') return null
+      return tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
+    })
+    if (!reset) {
       broadcastState()
       return snapshot()
     }
-    const reset = tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     broadcastState()
     try {
       await launchTempReviewerSeat(group, reset, profile)
