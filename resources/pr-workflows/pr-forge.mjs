@@ -744,6 +744,7 @@ export function evaluateRevisionApprovals({
   actorId = null,
   actorLogin = null,
   requiredTags = [],
+  requireExactReviewerTags = requiredTags.length > 1,
   marker = '\u{1F916} ',
 }) {
   const allowedSet = allowedApproverLogins && allowedApproverLogins.length > 0
@@ -811,8 +812,8 @@ export function evaluateRevisionApprovals({
     const match = approvingItems.find((item) => {
       const key = `${item.kind}:${item.id}`
       if (usedKeys.has(key)) return false
-      if (item.body.includes(tag)) return true
-      if (requiredTags.length === 1 && item.formal) return true
+      if (item.body.split(/\r?\n/).some((line) => !line.trimStart().startsWith('>') && line.includes(tag))) return true
+      if (!requireExactReviewerTags && requiredTags.length === 1 && item.formal) return true
       return false
     })
     if (match) {

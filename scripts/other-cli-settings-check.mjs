@@ -146,7 +146,7 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}`)
     }
     await suntil('document.querySelector(".other-cli-settings")', 'per-CLI settings')
-    await suntil('document.querySelector(\'option[value="local-test-model"]\')', 'Copilot model from the configured provider')
+    await suntil('document.querySelector(\'.settings-card > .settings-form-grid option[value="local-test-model"]\')', 'workspace Copilot model from the configured provider')
     const selectOption = (selector, evaluate = sui) => evaluate(`(() => {
       const option = document.querySelector(${JSON.stringify(selector)})
       const select = option.closest('select')
@@ -179,12 +179,12 @@ if (!process.versions.electron) {
     await selectOption(`${copilotGrid} option[value="--custom-model"]`)
     await setInput(`${copilotGrid} input[maxlength="200"]`, 'custom-review-model')
     await saveLaunch('custom-review-model', 'high')
-    await selectOption('option[value="local-test-model"]')
+    await selectOption(`${copilotGrid} option[value="local-test-model"]`)
     await saveLaunch('local-test-model', 'high')
     await setInput('input[placeholder="Model or deployment identifier"]', 'replacement-test-model')
     await clickButton('Save provider')
     await suntil('document.querySelector(\'option[value="replacement-test-model"]\')', 'updated Copilot provider model')
-    assert.equal(await sui('document.querySelector(\'option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
+    assert.equal(await sui('document.querySelector(\'.settings-card > .settings-form-grid option[value="local-test-model"]\').textContent'), 'local-test-model (saved)')
     assert.equal(await sui('document.querySelectorAll(".other-cli-tab").length'), 3)
     await sui('document.querySelectorAll(".other-cli-tab")[1].click()')
     await suntil('document.querySelectorAll(".other-cli-settings select").length === 4', 'Codex approval, sandbox, model and effort')

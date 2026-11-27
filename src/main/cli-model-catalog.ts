@@ -65,7 +65,7 @@ export async function readCopilotModelCatalog(resolution: CopilotResolution, env
         const model = record(value)
         const policy = record(model.policy)
         if (policy.state === 'disabled') return []
-        return modelOption(model.id, model.name, list(model.supportedReasoningEfforts), efforts)
+        return modelOption(model.id, model.name, model.supportedReasoningEfforts, efforts)
       })
       const auto = list(record(result.auto).tiers).map(record).some((tier) => (
         tier.type === 'auto' && record(tier.status).enabled === true && record(tier.status).pickerVisible !== false
@@ -136,7 +136,7 @@ export async function readOtherCliModelCatalog(resolution: AgentCliResolution): 
           return list(record(response.response).models).flatMap((value) => {
             const model = record(value)
             if (model.value === 'default') return []
-            return modelOption(model.value, model.displayName, list(model.supportedEffortLevels), efforts)
+            return modelOption(model.value, model.displayName, model.supportedEffortLevels, efforts)
           })
         }
       })
@@ -164,7 +164,9 @@ export async function readOtherCliModelCatalog(resolution: AgentCliResolution): 
           for (const value of list(page.data)) {
             const model = record(value)
             if (model.hidden === true) continue
-            const levels = list(model.supportedReasoningEfforts).map((level) => record(level).reasoningEffort)
+            const levels = Array.isArray(model.supportedReasoningEfforts)
+              ? model.supportedReasoningEfforts.map((level) => record(level).reasoningEffort)
+              : undefined
             models.push(...modelOption(model.model ?? model.id, model.displayName, levels, efforts))
           }
           cursor = typeof page.nextCursor === 'string' && page.nextCursor ? page.nextCursor : undefined

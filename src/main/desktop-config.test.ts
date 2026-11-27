@@ -63,26 +63,27 @@ test('turn checkpoints are on by default and turn off only for an explicit false
   assert.equal(normalizeDesktopConfig(JSON.parse(JSON.stringify(normalizeDesktopConfig({ turnCheckpoints: false })))).turnCheckpoints, false, 'kept across a save and reload')
 })
 
-test('reviewerClis and reviewerAllowAll default cleanly and round-trip global and workspace overrides', async () => {
-  assert.deepEqual(DEFAULT_DESKTOP_CONFIG.reviewerClis, ['copilot'])
+test('reviewer entries migrate legacy CLIs and round-trip global and workspace overrides', async () => {
+  assert.deepEqual(DEFAULT_DESKTOP_CONFIG.reviewerEntries.map((entry) => entry.cli), ['copilot'])
   assert.equal(DEFAULT_DESKTOP_CONFIG.reviewerAllowAll, true)
-  assert.deepEqual(normalizeDesktopConfig({}).reviewerClis, ['copilot'])
+  assert.deepEqual(normalizeDesktopConfig({}).reviewerEntries.map((entry) => entry.cli), ['copilot'])
   assert.equal(normalizeDesktopConfig({}).reviewerAllowAll, true)
   for (const value of ['false', 0, null, {}]) assert.equal(normalizeDesktopConfig({ reviewerAllowAll: value }).reviewerAllowAll, true, String(value))
   assert.equal(normalizeDesktopConfig({ reviewerAllowAll: false }).reviewerAllowAll, false)
-  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity', 'codex', 'claude'] }).reviewerClis, ['claude', 'codex', 'antigravity'])
-  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['unknown-cli'] }).reviewerClis, ['copilot'])
+  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['antigravity', 'codex', 'claude'] }).reviewerEntries.map((entry) => entry.cli), ['claude', 'codex', 'antigravity'])
+  assert.deepEqual(normalizeDesktopConfig({ reviewerClis: ['unknown-cli'] }).reviewerEntries.map((entry) => entry.cli), ['copilot'])
   await withTempFile(async filename => {
     const config = structuredClone(DEFAULT_DESKTOP_CONFIG)
-    config.reviewerClis = ['copilot', 'claude']
+    config.reviewerEntries = [{ id: 'one', cli: 'codex', model: 'first', reasoningEffort: 'high' }, { id: 'two', cli: 'codex', model: 'second' }]
     config.reviewerAllowAll = false
     const profile = activateWorkspaceProfile(config, 'C:\\work\\reviewers')
-    profile.reviewerClis = ['codex']
+    profile.reviewerEntries = [{ id: 'workspace', cli: 'claude' }]
     await writeDesktopConfig(filename, config)
     const loaded = await readDesktopConfig(filename)
-    assert.deepEqual(loaded.reviewerClis, ['copilot', 'claude'])
+    assert.deepEqual(loaded.reviewerEntries, config.reviewerEntries)
     assert.equal(loaded.reviewerAllowAll, false)
-    assert.deepEqual(loaded.profiles[0]?.reviewerClis, ['codex'])
+    assert.deepEqual(loaded.profiles[0]?.reviewerEntries, profile.reviewerEntries)
+    assert.deepEqual(normalizeDesktopConfig({ profiles: [{ ...profile, reviewerEntries: undefined, reviewerClis: ['codex'] }] }).profiles[0]?.reviewerEntries, [{ id: 'legacy-codex', cli: 'codex' }])
   })
 })
 
@@ -453,7 +454,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     desktopControl: config.desktopControl,
     openFilesOutsideWorkspace: config.openFilesOutsideWorkspace,
     turnCheckpoints: config.turnCheckpoints,
-    reviewerClis: [...config.reviewerClis],
+    reviewerEntries: config.reviewerEntries.map((entry) => ({ ...entry })),
     reviewerAllowAll: config.reviewerAllowAll,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
@@ -463,6 +464,9 @@ test('a failed preference save restores the values it changed but not a newer ch
   // A newer save already changed close behavior again: leave that one alone.
   assert.deepEqual(preferenceRollback(before, applied, { ...applied, closeBehavior: 'quit' }), { trayEnabled: true })
   assert.deepEqual(preferenceRollback(before, before, before), {})
+  const appliedReviewers = { ...before, reviewerEntries: [{ id: 'new', cli: 'codex' as const }] }
+  assert.deepEqual(preferenceRollback(before, appliedReviewers, structuredClone(appliedReviewers)), { reviewerEntries: before.reviewerEntries })
+  assert.deepEqual(preferenceRollback(before, appliedReviewers, { ...appliedReviewers, reviewerEntries: [{ id: 'new', cli: 'codex', model: 'edited' }] }), {})
 })
 
 test('a save queued behind a failing one does not write the rejected preference', async () => {

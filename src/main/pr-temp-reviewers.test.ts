@@ -40,6 +40,18 @@ const HEAD = 'a'.repeat(40)
 const HEAD2 = 'c'.repeat(40)
 const BASE = 'b'.repeat(40)
 
+import { sessionCliLabel, type ReviewerCli } from './session-cli.js'
+import type { ResolvedReviewer } from './reviewer-settings.js'
+import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
+
+const resolvedReviewers = (clis: readonly ReviewerCli[]): ResolvedReviewer[] => clis.map((cli) => {
+  const name = sessionCliLabel(cli)
+  const identity = { id: cli, name, label: name }
+  return cli === 'copilot'
+    ? { ...identity, cli, launch: DEFAULT_SESSION_LAUNCH_CONFIG, permissionPreset: 'full-access' }
+    : { ...identity, cli, config: {} }
+})
+
 test('parseAnyPullRequestInput, repositoryLabelFromOrigin, and prReviewAndFixRequest work across Gitea, GitLab, GitHub, and plain numbers', () => {
   assert.deepEqual(
     parseAnyPullRequestInput('http://omaha:3001/daq/daq-service/pulls/12'),
@@ -126,7 +138,7 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
     ['antigravity', '[Antigravity CLI]'],
   ] as const) {
     const brief = buildReviewerBrief({
-      cli,
+      tag: '[' + sessionCliLabel(cli) + ']',
       repository: 'xuemin-liu/copilot-cli-desktop',
       prLabel: 'PR #322',
       prNumber: 322,
@@ -149,7 +161,7 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
       brief.includes(`pr-approve.mjs" "https://github.com/xuemin-liu/copilot-cli-desktop/pull/322" 322 ${HEAD} ${BASE}`),
       'passes full PR URL as first argument to pr-approve.mjs when available',
     )
-    assert.ok(brief.includes(`Approved at ${HEAD}\\n\\n${tag} ...\\n\\nReviewed base: ${BASE}`), 'documents pr-approve.mjs base-bound tagged format')
+    assert.ok(brief.includes(`\`${tag}\` on its own line, followed by your validation note`), 'documents pr-approve.mjs base-bound tagged format')
     assert.ok(brief.includes('pr-seat-receipt.mjs'), 'documents seat completion receipt helper')
     assert.ok(brief.includes('Prior Round Context'), 'includes prior round summary')
     assert.match(brief, /Do NOT start `pr-poll\.mjs --watch-head`/, 'managed single-round brief forbids background poll loop')
@@ -157,7 +169,7 @@ test('buildReviewerBrief instructs every reviewer CLI to run review-pr directly 
     assert.doesNotMatch(brief, /copilot-pr-reviewer|pr_review\(|pr-review -File/, 'never uses local review endpoints')
   }
   const giteaBrief = buildReviewerBrief({
-    cli: 'claude',
+    tag: '[Claude Code]',
     repository: 'omaha:3001/daq/daq-service',
     prLabel: 'PR #12',
     prNumber: 12,
@@ -283,8 +295,8 @@ test('resolveCopilotReviewerPreset and resolveOtherCliReviewerArgs apply verifie
     groupOf('starting', [seatOf('claude', 'running')]),
     groupOf('ended', [seatOf('claude', 'running')]),
   ] as Parameters<typeof interactiveSeatsToReconcile>[0]
-  assert.deepEqual(interactiveSeatsToReconcile(groups, true).map(({ seat }) => seat.cli), ['claude'])
-  assert.deepEqual(interactiveSeatsToReconcile(groups, false).map(({ seat }) => seat.cli), ['claude', 'codex', 'antigravity'])
+  assert.deepEqual(interactiveSeatsToReconcile(groups.map((group) => ({ ...group, allowAll: true }))).map(({ seat }) => seat.cli), ['claude'])
+  assert.deepEqual(interactiveSeatsToReconcile(groups.map((group) => ({ ...group, allowAll: false }))).map(({ seat }) => seat.cli), ['claude', 'codex', 'antigravity'])
 
   assert.deepEqual(
     buildOtherCliReviewerCliArgs('claude', {
@@ -400,7 +412,7 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
     prUrl: null,
     head: HEAD,
     base: BASE,
-    clis: ['copilot'],
+    reviewers: resolvedReviewers(['copilot']),    allowAll: true,
     origin: '',
   }), /remote Git origin/)
 
@@ -415,7 +427,7 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
     prUrl: null,
     head: HEAD,
     base: BASE,
-    clis: ['copilot'],
+    reviewers: resolvedReviewers(['copilot']),    allowAll: true,
     origin: 'http://omaha:3001/daq/daq-service.git',
   }), /local branch-only reviews are not supported/)
 
@@ -430,7 +442,7 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
     prUrl: 'http://omaha:3001/daq/daq-service/pulls/12',
     head: HEAD,
     base: BASE,
-    clis: ['copilot', 'claude'],
+    reviewers: resolvedReviewers(['copilot', 'claude']),    allowAll: true,
     origin: 'http://omaha:3001/daq/daq-service.git',
   })
   assert.equal(registry.authorizeHostKey(hostKey), group)
@@ -452,7 +464,7 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
     prUrl: 'http://omaha:3001/daq/daq-service/pulls/13',
     head: HEAD,
     base: BASE,
-    clis: ['copilot'],
+    reviewers: resolvedReviewers(['copilot']),    allowAll: true,
     origin: 'http://omaha:3001/daq/daq-service.git',
   }), /already running temporary reviewers/)
 
@@ -558,7 +570,7 @@ test('reconcileSeatWithEvidenceLoader refuses to overwrite timed-out or round-ad
     prUrl: 'https://github.com/owner/repo/pull/50',
     head: HEAD,
     base: BASE,
-    clis: ['claude', 'codex'],
+    reviewers: resolvedReviewers(['claude', 'codex']),    allowAll: true,
     origin: 'https://github.com/owner/repo.git',
   })
   group.stage = 'active'
@@ -670,7 +682,7 @@ test('dismissing the last required seat ends the group as stopped, never approve
     prUrl: 'https://github.com/owner/repo/pull/20',
     head: HEAD,
     base: BASE,
-    clis: ['claude'],
+    reviewers: resolvedReviewers(['claude']),    allowAll: true,
     origin: 'https://github.com/owner/repo.git',
   })
   group.stage = 'active'
@@ -800,7 +812,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
       prUrl: 'http://omaha:3001/daq/daq-service/pulls/12',
       head: head2Sha,
       base: baseSha,
-      clis: ['copilot'],
+      reviewers: resolvedReviewers(['copilot']),      allowAll: true,
       origin: upstream,
     })
     group.requiredSeats.get('copilot')!.area = area

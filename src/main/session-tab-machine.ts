@@ -4,12 +4,11 @@ import type { DesktopSessionTab, SessionLifecycleStatus, TempReviewerTabInfo } f
 import type { OtherCli } from './session-cli.js'
 import type { PerCliConfig } from './agent-cli-settings.js'
 
-import { DEFAULT_MAX_SESSION_TABS } from './session-tab-limit.js'
+import { DEFAULT_MAX_SESSION_TABS, MAX_TEMP_REVIEWER_TABS } from './session-tab-limit.js'
 
 /** The default limit; the app passes the one set in Settings. */
 export const MAX_SESSION_TABS = DEFAULT_MAX_SESSION_TABS
-/** Maximum concurrent hidden temporary PR reviewer tabs across active review runs. */
-export const MAX_TEMP_REVIEWER_TABS = 8
+export { MAX_TEMP_REVIEWER_TABS } from './session-tab-limit.js'
 
 export interface TabsState {
   tabs: DesktopSessionTab[]

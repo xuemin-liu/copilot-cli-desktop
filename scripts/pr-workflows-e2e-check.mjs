@@ -94,6 +94,9 @@ if (!process.versions.electron) {
         '  setInterval(() => {}, 10_000)',
         '} else {',
         '  const runOneShot = async () => {',
+        '    const prompt = args[args.indexOf("--print") + 1]',
+        '    const briefPath = /"([^"]+reviewer-brief[.]md)"/.exec(prompt)?.[1]',
+        '    const tag = readFileSync(briefPath, "utf8").match(/\\[Antigravity CLI[^\\]]*\\]/)[0]',
         '    if (behavior.holdMs) await new Promise((r) => setTimeout(r, behavior.holdMs))',
         '    if (behavior.mode === "silent") {',
         '      return',
@@ -102,18 +105,18 @@ if (!process.versions.electron) {
         '      const res = await fetch(`${behavior.giteaOrigin}/api/v1/repos/daq/daq-service/issues/12/comments`, {',
         '        method: "POST",',
         '        headers: { "content-type": "application/json", authorization: "token e2e-tok", connection: "close" },',
-        '        body: JSON.stringify({ body: "Blocking: [Antigravity CLI] bump version to 3 before merging." }),',
+        '        body: JSON.stringify({ body: `Blocking: bump version to 3 before merging.\\n${tag}` }),',
         '      })',
         '      const posted = await res.json()',
         '      if (process.env.COPILOT_DESKTOP_PR_TOOLS && process.env.COPILOT_DESKTOP_SEAT_RECEIPT) {',
-        '        execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "findings", "--id", String(posted.id)], { stdio: "inherit" })',
+        '        execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "findings", "--id", String(posted.id), "--kind-type", "issue"], { stdio: "inherit" })',
         '      }',
         '      return',
         '    }',
         '    if (behavior.mode === "approve" && behavior.giteaOrigin && process.env.COPILOT_DESKTOP_PR_TOOLS && process.env.COPILOT_DESKTOP_SEAT_RECEIPT) {',
         '      const cfg = JSON.parse(readFileSync(process.env.COPILOT_DESKTOP_SEAT_RECEIPT, "utf8"))',
         '      const notePath = join(dumpDir, `approve-note-${dumpPid}.md`)',
-        '      writeFileSync(notePath, "[Antigravity CLI] Verified round 2 fix and checks pass.\\n")',
+        '      writeFileSync(notePath, `${tag}\\nVerified round 2 fix and checks pass.\\n`)',
         '      const out = execFileSync(process.execPath, [',
         '        join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-approve.mjs"),',
         '        `${behavior.giteaOrigin}/daq/daq-service/pulls/12`,',
@@ -123,7 +126,7 @@ if (!process.versions.electron) {
         '        notePath,',
         '      ], { encoding: "utf8", env: { ...process.env, GITEA_TOKEN: "e2e-tok", GITEA_URL: behavior.giteaOrigin } })',
         '      const parsedApprove = JSON.parse(out)',
-        '      execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "approved", "--id", String(parsedApprove.id)], { stdio: "inherit" })',
+        '      execFileSync(process.execPath, [join(process.env.COPILOT_DESKTOP_PR_TOOLS, "pr-seat-receipt.mjs"), "--kind", "approved", "--id", String(parsedApprove.id), "--kind-type", parsedApprove.kind], { stdio: "inherit" })',
         '      return',
         '    }',
         '  }',
@@ -404,12 +407,14 @@ class AgyStub {
     const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const project = createWorkspaceProfile(repo)
     project.defaultResumeMode = 'new'
-    project.reviewerClis = ['antigravity']
+    project.reviewerEntries = [
+      { id: 'pr-first', cli: 'antigravity', model: 'review-model-one' },
+      { id: 'pr-second', cli: 'antigravity', model: 'review-model-two' },
+    ]
     await writeDesktopConfig(join(userData, 'desktop.json'), {
       ...DEFAULT_DESKTOP_CONFIG,
       profiles: [project],
       activeProfileId: project.id,
-      reviewerClis: ['antigravity'],
       reviewerAllowAll: true,
       closeBehavior: 'quit',
       trayEnabled: false,
@@ -545,7 +550,10 @@ class AgyStub {
     const groupId = startPayload.group.id
     assert.equal(startPayload.group.prNumber, 12)
     assert.equal(startPayload.group.base, baseSha, 'divergent origin/main resolves to target branch tip SHA, not merge-base')
-    assert.deepEqual(startPayload.expectedReviewerTags, ['[Antigravity CLI]'])
+    assert.equal(startPayload.requireExactReviewerTags, true)
+    assert.equal(startPayload.expectedReviewerTags.length, 2)
+    assert.match(startPayload.expectedReviewerTags[0], /^\[Antigravity CLI 1 r[0-9a-f]+\]$/)
+    assert.match(startPayload.expectedReviewerTags[1], /^\[Antigravity CLI 2 r[0-9a-f]+\]$/)
 
     let incompletePayload = null
     for (let i = 0; i < 80; i++) {
@@ -563,7 +571,7 @@ class AgyStub {
     }
     assert.ok(incompletePayload, 'silent exit 0 without PR post settled as incomplete')
     assert.equal(incompletePayload.allApprovedCurrentHead, false)
-    assert.equal(incompletePayload.group.seats[0].needsAttention, true)
+    assert.ok(incompletePayload.group.seats.every((seat) => seat.needsAttention && seat.verdict === 'incomplete'))
 
     // Refuses pr_reviewers_finish(outcome: 'approved') when seat is incomplete!
     const prematureFinish1 = await mcpPost(
@@ -573,9 +581,26 @@ class AgyStub {
     )
     assert.equal(prematureFinish1.json.result.isError, true, 'finish("approved") refused when seat is incomplete')
 
+    // Changing Settings after consent must not alter this run's model or permissions.
+    await ui('window.copilotDesktop.openSettings()')
+    let settings
+    for (let attempt = 0; attempt < 120 && !settings; attempt++) {
+      settings = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('settings.html'))
+      if (!settings) await delay(100)
+    }
+    assert.ok(settings)
+    await settings.webContents.executeJavaScript(`(async () => {
+      const api = window.copilotDesktopSettings
+      const saved = await api.updatePreferences({ reviewerAllowAll: false })
+      const profile = saved.profiles.find((candidate) => candidate.id === ${JSON.stringify(project.id)})
+      await api.updateWorkspaceProfile(profile.id, profile.name, profile.permissionPreset, profile.defaultResumeMode,
+        profile.launch, profile.otherCli, [{ id: 'changed', cli: 'antigravity', model: 'changed-model' }])
+    })()`)
+    settings.close()
+
     // 3b. Mode "findings" + holdMs 1500: Retry seat from UI; while running, verify pr_reviewers_round refuses premature advance; then verify 'findings' settles!
     await writeFile(behaviorFile, JSON.stringify({ mode: 'findings', giteaOrigin, holdMs: 1200 }))
-    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(groupId)}, 'retry', 'antigravity')`)
+    await ui(`window.copilotDesktop.tempReviewerAction(${JSON.stringify(groupId)}, 'retry', 'pr-first')`)
 
     let retryRunningTab = null
     for (let i = 0; i < 60; i++) {
@@ -592,6 +617,7 @@ class AgyStub {
     assert.ok(reviewerDump1, 'captured one-shot reviewer dump')
     assert.equal(reviewerDump1.isOneShot, true, 'reviewerAllowAll launched Antigravity with --print one-shot')
     assert.ok(reviewerDump1.args.includes('--dangerously-skip-permissions'))
+    assert.equal(reviewerDump1.args[reviewerDump1.args.indexOf('--model') + 1], 'review-model-one')
     assert.ok(reviewerDump1.seatReceipt && reviewerDump1.seatReceipt.endsWith('seat-receipt.json'))
     assert.equal(reviewerDump1.allowHttpOrigin, giteaOrigin.toLowerCase())
     const worktreePath1 = reviewerDump1.cwd
@@ -614,6 +640,7 @@ class AgyStub {
     }
     assert.ok(findingsPayload, 'Gitea findings + seat receipt settled seat as findings')
     assert.equal(findingsPayload.allApprovedCurrentHead, false)
+    assert.equal(findingsPayload.group.seats[1].verdict, 'incomplete', 'a sibling has its own verdict')
     assert.equal(giteaIssueComments.length, 1)
 
     // Refuses pr_reviewers_finish(outcome: 'approved') when seat posted findings!
@@ -669,8 +696,8 @@ class AgyStub {
       await delay(100)
     }
     assert.ok(approvedPayload, 'Round 2 Gitea approval via pr-approve.mjs settled allApprovedCurrentHead === true')
-    assert.equal(approvedPayload.group.seats[0].verdict, 'approved')
-    assert.equal(approvedPayload.group.seats[0].checkedOut, head2Sha)
+    assert.deepEqual(approvedPayload.expectedReviewerTags, startPayload.expectedReviewerTags, 'tags survive retry and round advance')
+    assert.ok(approvedPayload.group.seats.every((seat) => seat.verdict === 'approved' && seat.checkedOut === head2Sha))
 
     // Verify worktree was reused cleanly on Round 2 (same checkout path, updated to head2Sha)!
     assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath1, encoding: 'utf8' }).trim(), head2Sha, 'reused Round 1 worktree cleanly at head2Sha')

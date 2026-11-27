@@ -53,7 +53,8 @@ test('Claude returns model effort choices in the initialize response', async () 
         request_id: request.request_id, subtype: 'success', response: { models: [
           {value: 'default', displayName: 'Default'},
           {value: 'sonnet', displayName: 'Sonnet', supportedEffortLevels: ['medium', 'max']},
-          {value: 'haiku', displayName: 'Haiku'},
+          {value: 'haiku', displayName: 'Haiku', supportedEffortLevels: []},
+          {value: 'unadvertised', displayName: 'Unadvertised effort'},
         ] },
       } }))
     })
@@ -61,6 +62,7 @@ test('Claude returns model effort choices in the initialize response', async () 
   assert.deepEqual(await readOtherCliModelCatalog(resolution), [
     { id: 'sonnet', label: 'Sonnet', efforts: ['medium', 'max'] },
     { id: 'haiku', label: 'Haiku', efforts: [] },
+    { id: 'unadvertised', label: 'Unadvertised effort' },
   ])
 })
 

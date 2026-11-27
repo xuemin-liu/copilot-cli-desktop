@@ -4,7 +4,7 @@
 //
 //   node pr-poll.mjs <pr-or-url> <state-file> [--repo OWNER/REPO] [--pr-url URL] [--origin URL] [--forge github|gitea|gitlab]
 //                                             [--allow-http-origin ORIGIN] [--marker "<prefix>"] [--invert] [--watch-head]
-//                                             [--allow-approver LOGIN]... [--require-tag "[CLI]"]... [--snapshot]
+//                                             [--allow-approver LOGIN]... [--require-tag "[Reviewer]"]... [--strict-reviewer-tags] [--snapshot]
 //   node pr-poll.mjs <pr-or-url> <state-file> ... --init
 //   node pr-poll.mjs <pr-or-url> <state-file> ... --mark --through <reviewId>,<inlineId>,<issueId> --head <sha> [--base <sha>] [--snapshot-id <id>]
 //   node pr-poll.mjs <pr-or-url> <state-file> ... --wait [seconds] [--max <seconds>]
@@ -260,6 +260,7 @@ async function evaluateOnce({ prArg, stateFile }) {
         actorId: meta.actorId,
         actorLogin: meta.actorLogin,
         requiredTags,
+        requireExactReviewerTags: flag('--strict-reviewer-tags') || requiredTags.length > 1,
         marker,
       })
     : { approvalForHead: false, approvedTags: [], missingTags: requiredTags, approvingItems: [] }
