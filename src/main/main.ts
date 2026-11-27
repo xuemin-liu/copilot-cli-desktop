@@ -4078,7 +4078,8 @@ async function launchTempReviewerSeat(
   if (!runner) throw new Error('Git is not available')
   if (!store) throw new Error('Review reservations are unavailable')
   const expectedGeneration = seat.generation
-  // The round this launch was asked for: a round that replaces it while setup is awaited does not move it.
+  // The revision this launch was asked (and consented) for: a round that replaces it while setup is awaited does not
+  // move it. That round supersedes this launch through the seat generation, as before.
   const round = group.round, head = group.head, base = group.base
   const reusingExistingArea = Boolean(options?.reuseArea && seat.area && seat.launchId)
   const area = reusingExistingArea ? seat.area! : planReviewerArea(reviewerAreaBase())
@@ -4100,6 +4101,7 @@ async function launchTempReviewerSeat(
   }
   reviewLaunches.add(launchId)
   let allocatedTabId: string | null = null
+  let handedOff = false
   try {
     await makeReviewerArea(area)
     if (!reusingExistingArea) {
@@ -4164,7 +4166,6 @@ async function launchTempReviewerSeat(
       || group.requiredSeats.get(seat.cli) !== seat
       || seat.generation !== expectedGeneration
       || seat.lifecycle === 'stopped'
-      || group.round !== round
     )
 
     const allowAll = desktopConfig.reviewerAllowAll
@@ -4398,15 +4399,19 @@ async function launchTempReviewerSeat(
       broadcastState()
       refreshMenus()
     }
-    await cleanupReviewerSeatCredentials(area)
-    await store.setCodexAuthSync(launchId, null).catch(() => {})
-    const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
-    if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
-    else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
-    if (seat.generation === expectedGeneration) seat.area = null
+    // A newer generation of this seat that kept this area owns it now: leave its checkout, helper files and reservation.
+    handedOff = seat.area === area && seat.generation !== expectedGeneration
+    if (!handedOff) {
+      await cleanupReviewerSeatCredentials(area)
+      await store.setCodexAuthSync(launchId, null).catch(() => {})
+      const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
+      if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
+      else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+      if (seat.generation === expectedGeneration) seat.area = null
+    }
     throw error
   } finally {
-    reviewLaunches.delete(launchId)
+    if (!handedOff) reviewLaunches.delete(launchId)
   }
 }
 
