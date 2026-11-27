@@ -129,7 +129,8 @@ if (!process.versions.electron) {
     const project = createWorkspaceProfile(repo, 'read-only')
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), {
-      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['copilot'], reviewerAllowAll: true, reviewerStartPrompt: true,
+      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerAllowAll: true, reviewerStartPrompt: true,
+      reviewerEntries: [{ id: 'copilot-high', cli: 'copilot', reasoningEffort: 'high' }],
       meetingRoundTimeoutMinutes: 2, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
       provider: { type: 'openai', baseUrl: process.env.E2E_MODEL_URL, model: 'ui-check-model', offline: true },
     })
@@ -183,7 +184,7 @@ if (!process.versions.electron) {
     const started = await start(host, 'copilot seat')
     assert.equal(started.isError, false, started.text)
     const meetingA = meetingIdOf(started.text)
-    assert.match(started.text, /Hidden reviewer sessions for meeting [0-9A-Z]{4}: Copilot CLI\./)
+    assert.match(started.text, /Hidden reviewer sessions for meeting [0-9A-Z]{4}: Copilot CLI \(high effort\)\./)
     const outsider = await client('codex-cli')
     await outsider('meeting_join', { meeting: meetingA })
     assert.match((await outsider('meeting_next', { wait_seconds: 1 })).text, /^Nothing yet/, 'the round is held while the Copilot seat is still starting')
@@ -201,7 +202,7 @@ if (!process.versions.electron) {
     const digest = await nextMessage(host, 120_000)
     assert.match(digest, new RegExp(REVIEW_MARK), 'the Copilot seat reviewed the round')
     assert.match(digest, /Outside review: fine\./)
-    assert.match((await host('meeting_status')).text, /- Copilot CLI: in the meeting/)
+    assert.match((await host('meeting_status')).text, /- Copilot CLI \(high effort\): in the meeting/)
 
     // 2. Its vote counts: with the outside agent it closes the meeting, and the seat goes with it.
     await host('meeting_propose_close', { items: '- the plan as posted' })
