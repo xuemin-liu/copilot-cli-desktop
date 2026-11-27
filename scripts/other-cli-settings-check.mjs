@@ -289,8 +289,16 @@ if (!process.versions.electron) {
     const displayedEffort = await fixtureUi(`[...document.querySelectorAll(${JSON.stringify(copilotGrid + ' > label')})]
       .find(label => label.firstChild.textContent.trim() === 'Reasoning effort').querySelector('select').value`)
     assert.equal(displayedEffort, '', 'the saved effort is reflected despite the unrelated edit')
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    await fixtureUi(`[...document.querySelectorAll('label.settings-row')].find(label => label.textContent.includes('Use Desktop reviewer list')).querySelector('input').click()`)
+    const reviewerList = '.settings-card .reviewer-settings-list'
+    await selectOption(`${reviewerList} option[value="high"]`, fixtureUi)
+    await setInput(customInput, 'auto', fixtureUi)
+    assert.match(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]').textContent`), /auto does not support high reasoning effort/)
+    await setInput(customInput, 'auto-deployment', fixtureUi)
+    assert.equal(await fixtureUi(`document.querySelector('${reviewerList} [role=alert]') === null`), true)
     fixtureSettings.destroy()
-    console.log('OK: custom model typing preserves effort until the completed model is saved')
+    console.log('OK: custom model typing preserves effort and workspace model changes flag incompatible reviewer overrides')
 
     app.exit(0)
   }

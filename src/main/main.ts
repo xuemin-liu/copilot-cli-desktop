@@ -145,7 +145,7 @@ import { createOtherCliCache } from './agent-cli-cache.js'
 import { readCopilotModelCatalog, readOtherCliModelCatalog, type CliModelOption } from './cli-model-catalog.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { cliHasExplicitEnvOverride, provisionExistingCliPrWorkflowSkills, provisionPrWorkflowSkillsForCli } from './pr-workflow-skills.js'
-import { resolveReviewerEntries, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer } from './reviewer-settings.js'
+import { resolveReviewerEntries, reviewerWorkspaceModels, validateReviewerEntries, validateReviewerModelOverrides, type ResolvedReviewer } from './reviewer-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, isReviewerCli, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli, type SessionCliChoice } from './session-cli.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { killProcessTree } from './process-tree.js'
@@ -7519,15 +7519,17 @@ async function updateWorkspaceProfile(
   if (!isResumeMode(defaultResumeMode)) throw new Error('Invalid resume mode')
   // Check the submitted settings before changing anything, so a malformed value fails the save instead of being dropped.
   const validatedOtherCli = validateOtherCliConfig(otherCli, profile.otherCli)
+  const validatedLaunch = normalizeSessionLaunchConfig(launch)
   const validatedReviewerEntries = reviewerEntries === undefined ? profile.reviewerEntries : reviewerEntries === null ? undefined : validateReviewerEntries(reviewerEntries)
-  if (reviewerEntries !== undefined && validatedReviewerEntries) {
-    await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog)
+  if (validatedReviewerEntries) {
+    const workspaceModels = reviewerWorkspaceModels(validatedLaunch, validatedOtherCli)
+    await validateReviewerModelOverrides(validatedReviewerEntries, getModelCatalog, workspaceModels)
     assertWorkspaceListed(profile)
   }
   profile.name = normalizedName
   profile.permissionPreset = permissionPreset
   profile.defaultResumeMode = defaultResumeMode
-  profile.launch = normalizeSessionLaunchConfig(launch)
+  profile.launch = validatedLaunch
   if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
   else delete profile.otherCli
   if (validatedReviewerEntries && validatedReviewerEntries.length > 0) profile.reviewerEntries = validatedReviewerEntries

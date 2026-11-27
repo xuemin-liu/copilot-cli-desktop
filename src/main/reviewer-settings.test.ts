@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildOtherCliLaunchArgs } from './agent-cli-settings.js'
-import { resolveReviewerEntries, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
+import { resolveReviewerEntries, reviewerWorkspaceModels, validateReviewerEntries, validateReviewerModelOverrides, type ReviewerEntry } from './reviewer-settings.js'
 import { buildSessionLaunchArgs, DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 
 test('reviewer model and effort resolve together against the reviewed workspace', async () => {
@@ -67,4 +67,17 @@ test('catalog validation reports the incompatible reviewer before saving', async
   await assert.rejects(validateReviewerModelOverrides(entries, catalog), /Reviewer 2: small does not support high/)
   await validateReviewerModelOverrides([entries[0]!, { ...entries[1]!, reasoningEffort: 'default' }], catalog)
   await validateReviewerModelOverrides(entries, async () => [])
+})
+
+test('workspace model edits are checked against reviewers with an effort-only override', async () => {
+  const entries: ReviewerEntry[] = [{ id: 'inherited', cli: 'codex', reasoningEffort: 'high' }]
+  const catalog = async () => [
+    { id: 'full', label: 'Full', efforts: ['high'] },
+    { id: 'small', label: 'Small', efforts: ['low'] },
+  ]
+  const withModel = (model: string) => reviewerWorkspaceModels(DEFAULT_SESSION_LAUNCH_CONFIG, { codex: { model } })
+  await validateReviewerModelOverrides(entries, catalog, withModel('full'))
+  await assert.rejects(validateReviewerModelOverrides(entries, catalog, withModel('small')), /Reviewer 1: small does not support high/)
+  await validateReviewerModelOverrides([{ ...entries[0]!, model: 'full' }], catalog, withModel('small'))
+  await validateReviewerModelOverrides(entries, catalog)
 })

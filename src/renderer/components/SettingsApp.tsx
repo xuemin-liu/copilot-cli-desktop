@@ -7,7 +7,7 @@ import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import { REASONING_EFFORTS, type SessionLaunchConfig } from '../../main/session-launch.js'
-import { MAX_REVIEWER_ENTRIES, reviewerEfforts, reviewerModelEffortError, type ReviewerEntry } from '../../main/reviewer-settings.js'
+import { MAX_REVIEWER_ENTRIES, reviewerEfforts, reviewerModelEffortError, reviewerWorkspaceModels, type ReviewerEntry } from '../../main/reviewer-settings.js'
 import type { CliModelOption } from '../../main/cli-model-catalog.js'
 import { AGENT_CLI_SETTINGS, otherCliReasoningEfforts, type OtherCliConfig } from '../../main/agent-cli-settings.js'
 import { OTHER_CLIS, SESSION_CLIS, SUPPORTED_REVIEWER_CLIS, sessionCliLabel, type OtherCli, type ReviewerCli, type SessionCli } from '../../main/session-cli.js'
@@ -165,7 +165,7 @@ function ModelFields({ label, catalog, model, effort, fallbackEfforts = [], inhe
 function ReviewerEditor({ entries, catalogs, workspaceModels, disabled, onChange }: {
   entries: readonly ReviewerEntry[]
   catalogs: ModelCatalogs
-  workspaceModels?: Partial<Record<ReviewerCli, string>>
+  workspaceModels?: Readonly<Record<ReviewerCli, string>>
   disabled?: boolean
   onChange: (entries: ReviewerEntry[]) => void
 }): JSX.Element {
@@ -174,7 +174,7 @@ function ReviewerEditor({ entries, catalogs, workspaceModels, disabled, onChange
     <ul className="reviewer-settings-list" aria-label="Reviewers">
       {entries.map(({ id, cli, model, reasoningEffort }, index) => {
         const efforts = reviewerEfforts(cli)
-        const effortError = reviewerModelEffortError(model, reasoningEffort, catalogs[cli])
+        const effortError = reviewerModelEffortError(model ?? workspaceModels?.[cli], reasoningEffort, catalogs[cli])
         return (
           <li key={id}>
             <fieldset className="settings-form-grid" disabled={disabled}>
@@ -468,12 +468,7 @@ function WorkspaceProfileEditor({
           <ReviewerEditor
             entries={reviewerOverride}
             catalogs={modelCatalogs}
-            workspaceModels={{
-              copilot: launch.model,
-              claude: otherCli.claude?.model ?? '',
-              codex: otherCli.codex?.model ?? '',
-              antigravity: otherCli.antigravity?.model ?? '',
-            }}
+            workspaceModels={reviewerWorkspaceModels(launch, otherCli)}
             disabled={saving}
             onChange={setReviewerOverride}
           />

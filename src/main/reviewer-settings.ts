@@ -1,4 +1,4 @@
-import { otherCliReasoningEfforts, type PerCliConfig } from './agent-cli-settings.js'
+import { otherCliReasoningEfforts, type OtherCliConfig, type PerCliConfig } from './agent-cli-settings.js'
 import type { CliModelOption } from './cli-model-catalog.js'
 import type { PermissionPreset } from './permission-presets.js'
 import { MAX_TEMP_REVIEWER_TABS } from './session-tab-limit.js'
@@ -68,15 +68,29 @@ export function reviewerModelEffortError(
   return supported && !supported.includes(effort) ? `${model} does not support ${effort} reasoning effort.` : null
 }
 
+export function reviewerWorkspaceModels(
+  launch: Pick<SessionLaunchConfig, 'model'>,
+  otherCli: OtherCliConfig | undefined,
+): Record<ReviewerCli, string> {
+  return {
+    copilot: launch.model,
+    claude: otherCli?.claude?.model ?? '',
+    codex: otherCli?.codex?.model ?? '',
+    antigravity: otherCli?.antigravity?.model ?? '',
+  }
+}
+
 export async function validateReviewerModelOverrides(
   entries: readonly ReviewerEntry[],
   getCatalog: (cli: ReviewerCli) => Promise<readonly CliModelOption[]>,
+  workspaceModels?: Readonly<Record<ReviewerCli, string>>,
 ): Promise<void> {
-  const errors = await Promise.all(entries.map(async ({ cli, model, reasoningEffort }) => (
-    model && reasoningEffort && reasoningEffort !== 'default'
-      ? reviewerModelEffortError(model, reasoningEffort, await getCatalog(cli))
+  const errors = await Promise.all(entries.map(async ({ cli, model, reasoningEffort }) => {
+    const effectiveModel = model ?? workspaceModels?.[cli]
+    return effectiveModel && reasoningEffort && reasoningEffort !== 'default'
+      ? reviewerModelEffortError(effectiveModel, reasoningEffort, await getCatalog(cli))
       : null
-  )))
+  }))
   const invalid = errors.findIndex((error) => error !== null)
   if (invalid !== -1) throw new Error(`Reviewer ${invalid + 1}: ${errors[invalid]}`)
 }
