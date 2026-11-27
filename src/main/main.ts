@@ -6087,7 +6087,8 @@ async function advanceGroupTempReviewers(
                 const seatReceiptPath = await writeTempReviewerReceipt(group, seat, area.helper)
                 if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
                 const seatStateDir = join(area.helper, 'pr-state')
-                await writeFile(join(area.helper, 'reviewer-brief.md'), buildReviewerBrief({
+                // A brief that could not be written would leave the tab reading the previous round's: relaunch instead.
+                const briefWritten = await writeFile(join(area.helper, 'reviewer-brief.md'), buildReviewerBrief({
                   tag: seat.tag,
                   repository: group.repository,
                   prLabel: group.prLabel,
@@ -6104,7 +6105,8 @@ async function advanceGroupTempReviewers(
                   roundHistory: group.roundHistory,
                   forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.id),
                   seatReceiptConfigPath: seatReceiptPath,
-                }), { encoding: 'utf8', mode: 0o600 }).catch(() => {})
+                }), { encoding: 'utf8', mode: 0o600 }).then(() => true, () => false)
+                if (!briefWritten) return owned() ? 'relaunch' : 'stale'
                 if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
                 startTempSeatRoundTimer(group, seat)
                 const sent = sendSessionTask(
