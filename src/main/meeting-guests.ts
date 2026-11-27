@@ -467,7 +467,8 @@ export class GuestMailbox {
       if (typeof value.tokenHash !== 'string' || !/^[0-9a-f]{64}$/.test(value.tokenHash)) continue
       const time = (entry: unknown): number | null => typeof entry === 'number' && Number.isFinite(entry) ? entry : null
       // The hidden session behind a seat the desktop made is gone with the run that started it: its seat is over, so the
-      // meeting comes back without it and its host can have reviewers started again.
+      // meeting comes back without it. Reviewers are not started again for it: they join by its id, or the host starts a
+      // new meeting with hidden reviewers.
       const managed = value.managed === true && kind === 'reviewer'
       const saved = typeof value.closed === 'string' ? value.closed.slice(0, 200) : null
       this.seats.set(value.id, {

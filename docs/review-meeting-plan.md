@@ -1,7 +1,9 @@
 # Plan: review meetings with hidden reviewer sessions
 
-Status: agreed in review meeting X4QX (one reviewer, source read only, nothing run). No phase is built yet. Phase 5
-is deferred.
+Status: agreed in review meeting X4QX (one reviewer, source read only, nothing run). Phases 1 to 3 are built and
+released in v0.1.151. Phase 4 was run with three of the four CLIs (meeting 3N9F: Claude Code, Codex CLI, Antigravity
+CLI); a run with a hidden Copilot CLI reviewer is still to do, and so are the checks that meeting agreed (see the
+revision notes). Phase 5 is deferred.
 
 Today a review meeting gets its reviewers one at a time: the person tells another agent "join meeting K7QF", or adds
 a tab from the desktop. This plan adds a bundled skill, `review-meeting`, that works like `review-and-fix-pr`: the
@@ -61,8 +63,9 @@ the existing reviewer settings. The reviewers join, answer each round, and are c
    Restricted profiles wait for phase 5.
 10. **Teardown.** Triggered from the hub's central close path. Idempotent. It cancels pending consent, checkout
     preparation and process start, with a generation and open check after each await and before a spawn. After a
-    restart a restored host sees its managed seats as needing a relaunch, and an interrupted start has recoverable
-    area cleanup.
+    restart the hidden sessions are gone and are not started again: the restored meeting comes back without them,
+    reviewers can join it by its id, or the host ends it and starts a new meeting with hidden reviewers. An
+    interrupted start has recoverable area cleanup.
 
 ## Failure and security cases
 
@@ -88,7 +91,8 @@ One pull request each. Tests travel with the code they cover.
 2. **Copilot seats**: direct join after delivery readiness, a deadline on every delivery, with stub checks.
 3. **The skill**: `SKILL.md`, the provisioning lists, settings wording, documentation, package checks. Only after
    every CLI the settings offer can join.
-4. **A real four-CLI meeting**, run by hand and recorded here.
+4. **A real four-CLI meeting**, run by hand and recorded here. Run so far with three CLIs (meeting 3N9F); a run that
+   includes Copilot CLI as a hidden reviewer is still pending.
 5. **Later, separately**: restricted meeting profiles, one CLI at a time, entered only where a launch that never
    prompts, cannot write, and can still call the meeting tools has been demonstrated in a pseudo-terminal.
 
@@ -138,3 +142,16 @@ One pull request each. Tests travel with the code they cover.
   marker and backup rules), and `pr-poll.mjs --guide review-meeting` prints it for a CLI that did not find it. Settings
   says "Reviewers" for the CLI list and "hidden reviewer sessions" for the permission switch, since both now serve
   meetings too; messages that name those settings were changed with them.
+- Phase 1 limit, corrected (meeting 3N9F): the Retry of a pull request reviewer seat checks for a free slot before its
+  cleanup and does not check again after it, so when a meeting start takes the last slot in between, whichever launch
+  reaches `createBackgroundTab` second fails there. A reservation held through the cleanup would decide it once; not
+  built.
+- Phase 4, run: meeting 3N9F on the installed v0.1.151, hosted by a Claude Code session through the `review-meeting`
+  skill and the meeting tools. The consent was answered by the person; Claude Code, Codex CLI and Antigravity CLI were
+  started as hidden reviewers, all three joined, round 1 opened once they had, all three replied, and all three agreed
+  to the proposal in round 2, which closed the meeting. Their checkouts were removed with it. Copilot CLI was not among
+  the configured reviewers, so a Copilot seat and a Copilot host were not part of this run.
+- Agreed in 3N9F, not built yet: Electron fixture checks for a hidden Copilot seat that is silent for two rounds, one
+  whose tab changes conversation (after joining, and while its first prompt's recipient is being verified), and a
+  Copilot host using `start -Reviewers`. Left for a later phase: starting hidden reviewers for a meeting that is
+  already open, which would also cover a restored meeting.
