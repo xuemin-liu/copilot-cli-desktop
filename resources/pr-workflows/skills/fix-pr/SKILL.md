@@ -18,6 +18,8 @@ This workflow applies to **any remote Git repository and PR/MR host** (GitHub, s
    - **Bitbucket / Azure DevOps / other hosts**: matching CLI or REST API + `git credential fill`.
 3. If the user omitted the PR/MR number, resolve the open PR/MR for the current branch on that host. Inspect existing feedback immediately rather than waiting for a later poll.
 
+**Shell and state file**: the commands in this skill are written for a POSIX shell. In PowerShell write `$env:COPILOT_DESKTOP_PR_TOOLS` and `$env:COPILOT_DESKTOP_PR_STATE` (a bare `$COPILOT_DESKTOP_PR_TOOLS` is empty there), and keep the paths quoted. `$COPILOT_DESKTOP_PR_STATE` is a directory: `<state-file>` below is a file of your own inside it, one per PR and role, reused for this run and not shared with another session (for example `"$COPILOT_DESKTOP_PR_STATE/<host>-<owner>-<repo>-pr<number>-author.json"`).
+
 ## 2. Role boundaries
 
 - Permitted actions: reading PR metadata/comments, editing code on the PR's source branch, running local typecheck/build/tests, committing and pushing to the PR's source branch (no force-push), and posting `🤖 `-prefixed replies on review threads.
@@ -41,9 +43,9 @@ If there is no unaddressed reviewer feedback yet (and no current-head approval),
 
 Stop for approval **only** when all of the following hold:
 
-1. A reviewer has posted either a formal `APPROVED` review associated with the current full `head` SHA or an explicit inline/review comment that clearly approves and names the exact current full `head` SHA (e.g. `Approved at <full-head-sha>`). Quoted approvals, partial prefixes, or `"Not approved yet"` do **not** count, and this fixing session may never approve its own changes.
+1. A reviewer has posted either a formal `APPROVED` review associated with the current full `head` SHA or an explicit inline/review comment that clearly approves and names the exact current full `head` SHA (e.g. `Approved at <full-head-sha>`). Quoted approvals, partial prefixes, or `"Not approved yet"` do **not** count, and this fixing session may never approve its own changes. Once the PR's `base` has moved, the approval must also name the current base (`Reviewed base: <full-base-sha>`); an approval of an earlier base does not count.
 2. Zero valid actionable findings remain unaddressed. If an approving review also includes valid change requests, fix, test, push, and reply — which creates a new `head` SHA requiring fresh approval on that new SHA.
-3. A fresh lookup on the PR host immediately before finishing confirms the PR is still at that exact approved `head` SHA and no newer reviewer comments arrived.
+3. A fresh lookup on the PR host immediately before finishing confirms the PR is still at that exact approved `head` SHA and at the `base` SHA it was approved against, and no newer reviewer comments arrived.
 
 Also stop if the PR merges or closes, the user cancels the loop, or an explicit user decision is required to proceed.
 
@@ -53,8 +55,9 @@ When waiting for reviewer re-review after pushing or when no feedback has arrive
 - Use an async shell waiter so completion wakes this session without burning turns:
   - On GitHub, Gitea/Forgejo, or GitLab when `$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs` and `$COPILOT_DESKTOP_PR_STATE` are available:
     1. Capture a snapshot first (`node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --snapshot`).
-    2. After handling feedback, advance the state file explicitly with `--through` and the handled `snapshotId`: `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha> --snapshot-id <snapshotId>` (`--mark` requires `--through R,I,C`; passing `--snapshot-id` acknowledges the exact snapshot you handled).
-    3. Wait for new or edited reviewer comments/approvals with `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --wait 60`.
+    2. After handling feedback, advance the state file explicitly with `--through` and the handled `snapshotId`: `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --mark --through <maxReviewId>,<maxInlineId>,<maxIssueId> --head <full-head-sha> --base <full-base-sha> --snapshot-id <snapshotId>` (`--mark` requires `--through R,I,C`; passing `--snapshot-id` acknowledges the exact snapshot you handled). The three ids are `highest.maxReviewId`, `highest.maxInlineId` and `highest.maxIssueId` in the output of the snapshot or wait you handled, and `snapshotId` is its top-level `snapshotId`.
+    3. Wait for new or edited reviewer comments/approvals, or a moved `head` or `base`, with `node "$COPILOT_DESKTOP_PR_TOOLS/pr-poll.mjs" <pr> <state-file> --pr-url <url> --wait 60 --watch-head`.
+    4. Read the output for what it is: `newReviews`, `newInline` and `newIssue` hold only the reviewer items that are new or edited since your watermark, and a body over 8000 characters is cut (`truncated: true`), so read that item in full on the PR host before deciding. `approvalForHead` says whether an approval of the current `head` and `base` was counted; the fresh host lookup of section 4 still decides. When the tool knows which account you act as, a text approval is counted only from that account: when the reviewer is a different account that you have verified as trusted, add `--allow-approver <login>` to the snapshot and wait commands. A formal `APPROVED` review is counted from any account.
   - On other hosts: run a bounded async poll script checking the PR's state, `head` and `base` SHAs, reviews, and non-`🤖 ` comments (including `updated_at` edits) every 30–60 seconds until new reviewer activity or closure appears.
 - Without a verified async wake-up tool, address all current feedback now and state clearly that automatic background waiting is unavailable.
 - Report fixed items, commit SHAs, validation run, thread replies, and final approval status concisely.

@@ -19,6 +19,8 @@ Use whichever of these this session has:
   - Windows (PowerShell): `& $env:COPILOT_DESKTOP_MEETING_HELPER <command> ...`
   - macOS / Linux: `sh "$COPILOT_DESKTOP_MEETING_HELPER" <command> ...`
 
+If this session has neither, the meeting cannot be started from here: tell the person this skill needs Copilot CLI Desktop running.
+
 Never start reviewer CLIs yourself, and never answer for a reviewer.
 
 ## 1. Start the meeting
