@@ -1902,17 +1902,18 @@ async function copilotSessionStored(sessionId: string): Promise<boolean> {
   try { await access(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl')); return true } catch { return false }
 }
 
-/** Throws if the launch options a *fresh-vs-resume* choice would produce
+/** Builds the launch arguments and throws if any options
  * aren't supported by this Copilot CLI. `buildSessionLaunchArgs` is pure/sync
  * (`--worktree` is its only freshSession-dependent flag), so this is cheap
  * enough to run twice: once as an early, best-guess check in
  * buildSessionSpawnPlan (before touching any existing process), and again
  * inside finalizeSessionArgs against whichever freshSession turns out to be
  * true once the final resume id is known. */
-function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: string | null, freshSession: boolean): void {
+function validatedLaunchArgs(launch: SessionLaunchConfig, connectSessionId: string | null, freshSession: boolean): string[] {
   const launchArgs = buildSessionLaunchArgs(
     connectSessionId ? { ...launch, remoteControl: 'inherit', remoteExport: 'inherit' } : launch,
     freshSession,
+    copilotCapabilities.supportedOptions,
   )
   if (launchArgs.length > 0 && copilotCapabilities.probeFailed) {
     throw new Error('Could not determine Copilot CLI capabilities. Retry CLI detection from Settings before starting a session.')
@@ -1925,6 +1926,7 @@ function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: st
       `This Copilot CLI version does not support ${[...new Set(unsupportedLaunchOptions)].join(', ')}; update it or change the workspace launch profile`,
     )
   }
+  return launchArgs
 }
 
 /**
@@ -1974,7 +1976,7 @@ async function buildSessionSpawnPlan(
   // change the flags after a restart has stopped the old process.
   const permissionCapabilities: PermissionCapabilities = { toolAllowlist: copilotCapabilities.toolAllowlist, probeFailed: copilotCapabilities.probeFailed }
   if (!connectSessionId) assertPermissionPresetSupported(profile.permissionPreset, permissionCapabilities)
-  validateLaunchOptions(profile.launch, connectSessionId, likelyFreshSession)
+  validatedLaunchArgs(profile.launch, connectSessionId, likelyFreshSession)
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const inheritedEnvironment = { ...process.env, ...vaultEnvironment }
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, inheritedEnvironment)
@@ -2026,11 +2028,7 @@ function finalizeSessionArgs(
   const resumeArgs = buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
   const freshSession = !plan.connectSessionId
     && (resumeMode === 'new' || (resumeMode === 'auto-resume' && resumeArgs.length === 0))
-  validateLaunchOptions(plan.launch, plan.connectSessionId, freshSession)
-  const launchArgs = buildSessionLaunchArgs(
-    plan.connectSessionId ? { ...plan.launch, remoteControl: 'inherit', remoteExport: 'inherit' } : plan.launch,
-    freshSession,
-  )
+  const launchArgs = validatedLaunchArgs(plan.launch, plan.connectSessionId, freshSession)
   // Copilot refuses `--worktree` together with `--session-id`: a worktree session picks its own id, which the desktop
   // then reads back from the session store. `--name` is still accepted.
   const worktreeLaunch = freshSession && !plan.connectSessionId && plan.launch.worktree === true
