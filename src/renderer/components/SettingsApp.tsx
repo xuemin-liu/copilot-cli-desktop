@@ -87,13 +87,19 @@ const effortLabels: Record<string, string> = {
 const COPILOT_EFFORTS = REASONING_EFFORTS.filter((effort) => effort !== 'default')
 const CUSTOM_MODEL = '--custom-model'
 
+type ModelEffort = { model?: string; reasoningEffort?: string }
+
+function sameModelEffort(left: ModelEffort | undefined, right: ModelEffort | undefined): boolean {
+  return left?.model === right?.model && left?.reasoningEffort === right?.reasoningEffort
+}
+
 function acceptsNewModelEffort(
   catalog: CliModelOption[] | undefined,
-  choice: { model?: string; reasoningEffort?: string },
-  saved: { model?: string; reasoningEffort?: string } | undefined,
+  choice: ModelEffort,
+  saved: ModelEffort | undefined,
 ): boolean {
   const effort = choice.reasoningEffort
-  if (!effort || effort === 'default' || (choice.model === saved?.model && effort === saved?.reasoningEffort)) return true
+  if (!effort || effort === 'default' || sameModelEffort(choice, saved)) return true
   const levels = catalog?.find((model) => model.id === choice.model?.trim())?.efforts
   return levels === undefined || levels.includes(effort)
 }
@@ -436,11 +442,13 @@ function WorkspaceProfileEditor({
             const nextLaunch: SessionLaunchConfig = acceptsNewModelEffort(modelCatalogs.copilot, launch, profile.launch)
               ? launch : { ...launch, reasoningEffort: 'default' }
             const nextOtherCli = { ...otherCli }
+            const clearedEfforts: OtherCli[] = []
             for (const cli of OTHER_CLIS) {
               const config = otherCli[cli]
               if (config && !acceptsNewModelEffort(modelCatalogs[cli], config, profile.otherCli?.[cli])) {
                 const { reasoningEffort: _effort, ...remaining } = config
                 nextOtherCli[cli] = remaining
+                clearedEfforts.push(cli)
               }
             }
             setSaving(true)
@@ -454,8 +462,24 @@ function WorkspaceProfileEditor({
                 Object.keys(nextOtherCli).length > 0 ? nextOtherCli : undefined,
                 reviewerOverride ?? undefined,
               ).then((next) => {
-                setLaunch((current) => current === launch ? nextLaunch : current)
-                setOtherCli((current) => current === otherCli ? nextOtherCli : current)
+                if (nextLaunch !== launch) {
+                  setLaunch((current) => sameModelEffort(current, launch)
+                    ? { ...current, reasoningEffort: nextLaunch.reasoningEffort }
+                    : current)
+                }
+                if (clearedEfforts.length > 0) {
+                  setOtherCli((current) => {
+                    const updated = { ...current }
+                    for (const cli of clearedEfforts) {
+                      const config = current[cli]
+                      if (config && sameModelEffort(config, otherCli[cli])) {
+                        const { reasoningEffort: _effort, ...remaining } = config
+                        updated[cli] = remaining
+                      }
+                    }
+                    return updated
+                  })
+                }
                 return next
               }),
               `Saved profile "${name.trim() || profile.name}".`,

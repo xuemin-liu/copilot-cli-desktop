@@ -211,6 +211,8 @@ if (!process.versions.electron) {
       const state = ${JSON.stringify(fixtureState)}
       const unsubscribe = () => () => {}
       let saved
+      let delaySave = false
+      let releaseSave
       contextBridge.exposeInMainWorld('copilotDesktopSettings', {
         get: async () => state,
         getModelCatalog: async (cli) => cli === 'copilot' ? [{id: 'auto', label: 'Auto', efforts: []}] : [],
@@ -220,10 +222,18 @@ if (!process.versions.electron) {
         usageReport: async () => { throw new Error('Usage is unavailable in this fixture') },
         updateWorkspaceProfile: async (_id, name, _permission, _resume, launch) => {
           if (!name.trim()) throw new Error('Profile name is required')
+          if (delaySave) {
+            delaySave = false
+            await new Promise(resolve => { releaseSave = resolve })
+            releaseSave = undefined
+          }
           saved = launch
           return state
         },
         lastSavedLaunch: () => saved,
+        delayNextSave: () => { delaySave = true },
+        isSavePending: () => Boolean(releaseSave),
+        finishSave: () => releaseSave(),
       })
     `, 'utf8')
     const fixtureSettings = new BrowserWindow({ show: false, webPreferences: { preload: fixturePreload } })
@@ -263,10 +273,22 @@ if (!process.versions.electron) {
     await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).focus()`)
     await setInput(customInput, 'auto', fixtureUi)
     await fixtureUi(`document.querySelector(${JSON.stringify(customInput)}).blur()`)
+    await fixtureUi('window.copilotDesktopSettings.delayNextSave()')
     await clickButton('Save profile', fixtureUi)
+    assert.ok(await fixtureUi('window.copilotDesktopSettings.isSavePending()'))
+    const agentInput = 'input[placeholder="Default agent"]'
+    await setInput(agentInput, 'draft-agent', fixtureUi)
+    await fixtureUi('window.copilotDesktopSettings.finishSave()')
+    const saveIsReady = '[...document.querySelectorAll("button")].some(button => button.textContent === "Save profile" && !button.disabled)'
+    for (let attempt = 0; attempt < 100 && !await fixtureUi(saveIsReady); attempt++) await delay(50)
+    assert.ok(await fixtureUi(saveIsReady), 'delayed save completed')
     const autoLaunch = await fixtureUi('window.copilotDesktopSettings.lastSavedLaunch()')
     assert.equal(autoLaunch.model, 'auto')
     assert.equal(autoLaunch.reasoningEffort, 'default', 'committing Auto clears an unsupported effort')
+    assert.equal(await fixtureUi(`document.querySelector(${JSON.stringify(agentInput)}).value`), 'draft-agent', 'the concurrent agent edit stays in the draft')
+    const displayedEffort = await fixtureUi(`[...document.querySelectorAll(${JSON.stringify(copilotGrid + ' > label')})]
+      .find(label => label.firstChild.textContent.trim() === 'Reasoning effort').querySelector('select').value`)
+    assert.equal(displayedEffort, '', 'the saved effort is reflected despite the unrelated edit')
     fixtureSettings.destroy()
     console.log('OK: custom model typing preserves effort until the completed model is saved')
 
