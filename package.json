@@ -42,6 +42,7 @@
     "other-cli:check": "npm run build && node scripts/other-cli-tabs-check.mjs",
     "pr-workflows:check": "npm run build && node scripts/pr-workflows-e2e-check.mjs",
     "review-meeting:check": "npm run build && node scripts/review-meeting-e2e-check.mjs",
+    "review-meeting-copilot-paths:check": "npm run build && node scripts/review-meeting-copilot-paths-check.mjs",
     "review-meeting-copilot:check": "npm run build && node scripts/review-meeting-copilot-check.mjs",
     "reviewer-removal:check": "npm run build && node scripts/reviewer-folder-removal-check.mjs",
     "meeting:check": "npm run build && node scripts/electron-side-chat-check.mjs --meeting",

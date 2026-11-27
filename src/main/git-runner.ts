@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { posix, win32 } from 'node:path'
@@ -236,7 +237,11 @@ export class GitRunner {
         clearTimeout(graceTimer)
         options.signal?.removeEventListener('abort', onAbort)
         lease?.release()
-        reject((error as NodeJS.ErrnoException).code === 'ENOENT' ? new GitUnavailableError('git was not found') : error)
+        // A spawn fails with ENOENT for a working folder that is gone as well as for a missing executable; saying git
+        // was not found for the first sends the person looking for the wrong thing.
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') reject(error)
+        else if (!existsSync(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
+        else reject(new GitUnavailableError('git was not found'))
       })
       const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
       const emit = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {

@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
-import { GitRunner, gitSucceeded, resolveGitExecutable } from './git-runner.js'
+import { GitRunner, GitUnavailableError, gitSucceeded, resolveGitExecutable } from './git-runner.js'
 import { statusArgs } from './git-commands.js'
 import { parseStatusV2 } from './git-parse.js'
 import { spawn } from 'node:child_process'
@@ -263,4 +263,16 @@ test('a listener that throws never breaks the command it watches', { skip }, asy
   const result = await fixture.runner.run({ cwd: fixture.root, args: ['--version'], onOutput: () => { throw new Error('listener bug') } })
   assert.equal(result.exitCode, 0)
   assert.match(result.stdout.toString(), /^git version/)
+})
+
+test('a working folder that is gone is named as such, not reported as a missing git', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const gone = join(fixture.repo('plain'), '..', 'removed-worktree')
+  await assert.rejects(fixture.runner.run({ cwd: gone, args: statusArgs() }), (error: Error) => {
+    assert.match(error.message, /removed-worktree no longer exists/)
+    assert.doesNotMatch(error.message, /git was not found/)
+    assert.equal(error instanceof GitUnavailableError, false, 'git itself is there')
+    return true
+  })
 })

@@ -1,9 +1,9 @@
 # Plan: review meetings with hidden reviewer sessions
 
 Status: agreed in review meeting X4QX (one reviewer, source read only, nothing run). Phases 1 to 3 are built and
-released in v0.1.151. Phase 4 was run with three of the four CLIs (meeting 3N9F: Claude Code, Codex CLI, Antigravity
-CLI); a run with a hidden Copilot CLI reviewer is still to do, and so are the checks that meeting agreed (see the
-revision notes). Phase 5 is deferred.
+released in v0.1.151. Phase 4 was run in two meetings on that release: 3N9F with Claude Code, Codex CLI and
+Antigravity CLI as hidden reviewers, and SUZ7 with Copilot CLI. All four CLIs have reviewed as hidden reviewers; they
+have not been in one meeting together. Phase 5 is deferred.
 
 Today a review meeting gets its reviewers one at a time: the person tells another agent "join meeting K7QF", or adds
 a tab from the desktop. This plan adds a bundled skill, `review-meeting`, that works like `review-and-fix-pr`: the
@@ -91,8 +91,8 @@ One pull request each. Tests travel with the code they cover.
 2. **Copilot seats**: direct join after delivery readiness, a deadline on every delivery, with stub checks.
 3. **The skill**: `SKILL.md`, the provisioning lists, settings wording, documentation, package checks. Only after
    every CLI the settings offer can join.
-4. **A real four-CLI meeting**, run by hand and recorded here. Run so far with three CLIs (meeting 3N9F); a run that
-   includes Copilot CLI as a hidden reviewer is still pending.
+4. **A real four-CLI meeting**, run by hand and recorded here. Run as two meetings (3N9F with three CLIs, SUZ7 with
+   Copilot CLI), not as one meeting with all four.
 5. **Later, separately**: restricted meeting profiles, one CLI at a time, entered only where a launch that never
    prompts, cannot write, and can still call the meeting tools has been demonstrated in a pseudo-terminal.
 
@@ -155,3 +155,19 @@ One pull request each. Tests travel with the code they cover.
   whose tab changes conversation (after joining, and while its first prompt's recipient is being verified), and a
   Copilot host using `start -Reviewers`. Left for a later phase: starting hidden reviewers for a meeting that is
   already open, which would also cover a restored meeting.
+- Phase 4, second run: meeting SUZ7 on the installed v0.1.151, hosted by a Claude Code session, with Copilot CLI as the
+  one hidden reviewer. It was started after the person's consent, primed and joined by the desktop, reviewed round 1
+  from its own checkout, and agreed to the proposal in round 2, which closed the meeting.
+- After 3N9F, built: `scripts/review-meeting-copilot-paths-check.mjs` (real Copilot CLI, mock model). A Copilot session
+  hosts with `start -Reviewers` (consent once, the seat's review typed into the host, the helper's `status` listing the
+  seat, `end`); a joined seat whose tab is switched to another conversation with `/resume`; a seat that takes its
+  message and never answers, taken out after two rounds without a reply. Still not covered: a switch while the first
+  prompt's recipient is being verified.
+- What the switch case showed, agreed in SUZ7: with both conversations retained by the CLI the tab keeps its session id
+  and its binding is not delivery-ready, so the next round is not typed anywhere and the delivery deadline takes the
+  seat out (three minutes by default). `onMeetingCopilotSeatSwitched` did not fire there; whether it fires on a switch
+  that drops the old conversation is untested. The seat is not taken out sooner on such a binding, because a passing
+  failure to list the store looks the same, and closing the other conversation within the three minutes restores
+  delivery.
+- Both Electron checks asserted the consent question the moment the start answered, though the run asks only once its
+  commit is known; they wait for the question now. That was the "zero consent prompts" failure reviewers saw at times.
