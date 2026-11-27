@@ -334,8 +334,8 @@ A meeting lets several sessions review one session's plan or local changes witho
   review. The host then gets the reviews and that discussion together. It costs one more turn per reviewer per round;
   votes are not discussed.
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
-  answers your own message. [Hidden reviewers](#hidden-reviewers-the-desktop-starts) join because you allowed them for
-  that meeting. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
+  answers your own message. [Hidden reviewers](#hidden-reviewers-the-desktop-starts) join because you or your agent asked
+  for them in that meeting. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
   on what it reads, so prefer Restricted reviewers.
 - The shared patch gets the same protection as the Git panel's prompts: files that hold secrets by convention (`.env`,
   keys, credentials) are named but their changes are withheld, and values that look like credentials are masked. This
@@ -359,9 +359,13 @@ in a meeting"** or `/review-meeting`. The bundled `review-meeting` skill starts 
 desktop starts one hidden session for each row under **Settings → Reviewers**. A workspace can choose its own list.
 Each row follows that workspace's model and reasoning settings unless you choose overrides. You can add the same CLI more than once.
 
-- **You are asked first**, once per meeting, and the default answer is no. The question names the reviewers, the commit
-  they get, that later rounds and attachments are covered, and what their permissions allow. Decline, and the meeting
-  stays open for reviewers who join by id.
+- **They start without a question** by default, as soon as your agent asks for them. Because the meeting tools need no
+  sign-in, any program on this computer could start them too. Turn on **Settings → Reviewers → Ask before starting
+  hidden reviewers** to be asked first, once per meeting, with no as the default answer. The question names the
+  reviewers, the commit they get, that later rounds and attachments are covered, and what their permissions allow.
+  Decline, and the meeting stays open for reviewers who join by id. For a pull request the question always comes when
+  the pull request is not verified as opened by your GitHub account, when the repository has repo-local CLI or MCP
+  configuration (hooks among it), or when the desktop could not read what the pull request changes.
 - **Round 1 waits** until each hidden reviewer has joined or failed to, so a fast reviewer does not answer alone. Each
   reviewer has four minutes from its own start to join; your answer to the question and the preparation of the
   checkouts come before that.

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import {
+  githubPullUrlKey,
   inspectReviewCommitAgentConfigs,
   makeReviewerArea,
   planReviewerArea,
@@ -34,6 +35,8 @@ import {
   reviewerHelperDirAccess,
   shutdownActiveReviewerSeats,
   TempReviewerRegistry,
+  discloseAgentConfigs,
+  undisclosedAgentConfigs,
 } from './pr-temp-reviewers.js'
 
 const HEAD = 'a'.repeat(40)
@@ -557,6 +560,49 @@ test('TempReviewerRegistry refuses local-only / PR-less runs, tracks hidden revi
   assert.equal(finished.seats.length, 2)
 })
 
+test('reconcileSeatWithEvidenceLoader records nothing for a launch that was cancelled while its evidence was read', async () => {
+  const registry = new TempReviewerRegistry()
+  const { group } = registry.createGroup({
+    hostTabId: 'tab-cancel',
+    hostSessionId: 'sess-cancel',
+    profileId: 'prof-cancel',
+    projectPath: '/tmp/repo',
+    repository: 'owner/repo',
+    prLabel: 'PR #51',
+    prNumber: 51,
+    prUrl: 'https://github.com/owner/repo/pull/51',
+    head: HEAD,
+    base: BASE,
+    reviewers: resolvedReviewers(['copilot']),
+    allowAll: true,
+    origin: 'https://github.com/owner/repo.git',
+  })
+  group.stage = 'active'
+  const seat = group.requiredSeats.get('copilot')!
+  seat.lifecycle = 'running'
+  let cancelled = false
+  // The exit arrived before the Retry; the Retry cancels the launch while the forge is read.
+  const result = await reconcileSeatWithEvidenceLoader({
+    registry,
+    group,
+    seat,
+    trigger: 'crashed',
+    isSuperseded: () => cancelled,
+    loadEvidence: async () => {
+      cancelled = true
+      return { supported: true, verified: null }
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(seat.lifecycle, 'running', 'not marked failed for a launch that was taken over')
+  assert.equal(seat.needsAttention, false)
+  // Already cancelled when the event comes in: nothing is read or recorded.
+  let read = false
+  await reconcileSeatWithEvidenceLoader({ registry, group, seat, trigger: 'crashed', isSuperseded: () => true, loadEvidence: async () => { read = true; return { supported: false } } })
+  assert.equal(read, false)
+  assert.equal(seat.lifecycle, 'running')
+})
+
 test('reconcileSeatWithEvidenceLoader refuses to overwrite timed-out or round-advanced seats when in-flight verification resolves or rejects late', async () => {
   const registry = new TempReviewerRegistry()
   const { group } = registry.createGroup({
@@ -692,6 +738,42 @@ test('dismissing the last required seat ends the group as stopped, never approve
   assert.equal(group.outcome, 'stopped')
 })
 
+test('configuration counts as disclosed only in the version an approved question showed', () => {
+  // A start that asked about the tree it had.
+  const asked = { disclosedAgentConfigs: new Map<string, string>() }
+  discloseAgentConfigs(asked, { '.mcp.json': 'a1' }, ['.mcp.json'])
+  assert.deepEqual(undisclosedAgentConfigs(asked, { '.mcp.json': 'a1' }), [], 'shown at start')
+  // A base update changes the same file without touching base...head: asked again.
+  assert.deepEqual(undisclosedAgentConfigs(asked, { '.mcp.json': 'b2' }), ['.mcp.json'])
+  // A start without the question had no configuration to show.
+  const quiet = { disclosedAgentConfigs: new Map<string, string>() }
+  discloseAgentConfigs(quiet, {}, [])
+  // A verification-only question at a round with no configuration discloses nothing.
+  discloseAgentConfigs(quiet, {}, undisclosedAgentConfigs(quiet, {}))
+  // Configuration then arrives through the base: still asked.
+  const hook = { '.github/hooks/pre.json': 'c3' }
+  assert.deepEqual(undisclosedAgentConfigs(quiet, hook), ['.github/hooks/pre.json'])
+  discloseAgentConfigs(quiet, hook, ['.github/hooks/pre.json'])
+  assert.deepEqual(undisclosedAgentConfigs(quiet, hook), [], 'shown and approved')
+  assert.deepEqual(undisclosedAgentConfigs(quiet, { ...hook, '.mcp.json': 'd4' }), ['.mcp.json'], 'a new file is asked about')
+  // A path the question named but that is gone from the tree is not recorded.
+  discloseAgentConfigs(quiet, hook, ['.vscode/mcp.json'])
+  assert.equal(quiet.disclosedAgentConfigs.has('.vscode/mcp.json'), false)
+})
+
+test('githubPullUrlKey names the same pull request only for the same repository and number', () => {
+  const checked = 'https://github.com/owner/repo/pull/12'
+  for (const same of ['https://github.com/Owner/Repo/pull/12', 'https://github.com/owner/repo/pull/12/', 'https://github.com/owner/repo/pull/12/files', 'https://github.com/owner/repo/pull/12#discussion_r1', 'https://github.com/owner/repo/pull/12?w=1']) {
+    assert.equal(githubPullUrlKey(same), checked, same)
+  }
+  // Owner or repository names that look like sub-pages are kept.
+  assert.equal(githubPullUrlKey('https://github.com/owner/files/pull/12'), 'https://github.com/owner/files/pull/12')
+  assert.equal(githubPullUrlKey('https://github.com/commits/checks/pull/12/files'), 'https://github.com/commits/checks/pull/12')
+  for (const other of ['https://github.com/attacker/repo/pull/12', 'https://github.com/owner/repo/pull/120', 'https://ghe.example.com/owner/repo/pull/12', 'http://omaha:3001/owner/repo/pulls/12']) {
+    assert.notEqual(githubPullUrlKey(other), checked, other)
+  }
+})
+
 test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectReviewCommitAgentConfigs enforce same-repo origin branches and detect repo-local agent configs', async () => {
   const gitExe = await resolveGitExecutable()
   assert.ok(gitExe, 'git executable required')
@@ -745,7 +827,18 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     // Once pushed to a real repository branch on origin, prepareAgnosticReviewWorktree succeeds:
     execFileSync(gitExe.path, ['push', '-q', 'origin', 'feat/round-1'], { cwd: repo, env: gitEnv })
     const cleanInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, head1Sha, baseSha)
-    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [] })
+    assert.deepEqual(cleanInspect, { modifiedAgentConfigs: [], presentAgentConfigs: [], presentAgentConfigObjects: {}, complete: true })
+
+    // A pushed branch with no history in common with base: the diff cannot be read, so the scan says it is incomplete.
+    execFileSync(gitExe.path, ['checkout', '-q', '--orphan', 'unrelated'], { cwd: repo, env: gitEnv })
+    writeFileSync(join(repo, 'app.ts'), 'export const v = 9\n')
+    execFileSync(gitExe.path, ['add', '.'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['commit', '-q', '-m', 'unrelated'], { cwd: repo, env: gitEnv })
+    const unrelatedSha = execFileSync(gitExe.path, ['rev-parse', 'HEAD'], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    execFileSync(gitExe.path, ['push', '-q', 'origin', 'unrelated'], { cwd: repo, env: gitEnv })
+    execFileSync(gitExe.path, ['checkout', '-q', '-f', 'feat/round-1'], { cwd: repo, env: gitEnv })
+    const unrelatedInspect = await inspectReviewCommitAgentConfigs(runner, repo, upstream, unrelatedSha, baseSha)
+    assert.equal(unrelatedInspect.complete, false, 'a diff that could not be read is not a clean result')
 
     const area = await makeReviewerArea(planReviewerArea(join(dir, 'areas')))
     await prepareAgnosticReviewWorktree(runner, repo, upstream, area, head1Sha, baseSha, 12)
@@ -758,6 +851,8 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true })
     writeFileSync(join(repo, '.claude', 'settings.json'), '{}\n')
     writeFileSync(join(repo, '.claude', 'hooks', 'run.sh'), '#!/bin/sh\n')
+    // A name Git would quote without -z: still matched.
+    writeFileSync(join(repo, '.claude', 'hooks', 'ü.sh'), '#!/bin/sh\n')
     mkdirSync(join(repo, '.codex'), { recursive: true })
     writeFileSync(join(repo, '.codex', 'hooks.json'), '{}\n')
     mkdirSync(join(repo, '.github', 'hooks'), { recursive: true })
@@ -782,6 +877,7 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
       '.agents/hooks.json',
       '.agents/plugins/demo/mcp_config.json',
       '.claude/hooks/run.sh',
+      '.claude/hooks/ü.sh',
       '.claude/settings.json',
       '.codex/hooks.json',
       '.gemini/config/mcp_config.json',
@@ -793,6 +889,16 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
     ]
     assert.deepEqual(configInspect.modifiedAgentConfigs.sort(), expectedConfigs)
     assert.deepEqual(configInspect.presentAgentConfigs.sort(), expectedConfigs)
+    const mcpObject = execFileSync(gitExe.path, ['rev-parse', `${head2Sha}:.mcp.json`], { cwd: repo, env: gitEnv, encoding: 'utf8' }).trim()
+    assert.equal(configInspect.presentAgentConfigObjects['.mcp.json'], mcpObject, 'each config is recorded with its object id')
+
+    // From a subfolder with diff.relative on, the whole repository is still scanned.
+    execFileSync(gitExe.path, ['config', 'diff.relative', 'true'], { cwd: repo, env: gitEnv })
+    const fromSubfolder = await inspectReviewCommitAgentConfigs(runner, join(repo, 'nested'), upstream, head2Sha, baseSha)
+    execFileSync(gitExe.path, ['config', '--unset', 'diff.relative'], { cwd: repo, env: gitEnv })
+    assert.equal(fromSubfolder.complete, true)
+    assert.deepEqual(fromSubfolder.modifiedAgentConfigs.sort(), expectedConfigs)
+    assert.deepEqual(fromSubfolder.presentAgentConfigs.sort(), expectedConfigs)
 
     const refreshed = await refreshAgnosticReviewWorktree(runner, area, upstream, head2Sha, baseSha, 12)
     assert.equal(refreshed, head2Sha)

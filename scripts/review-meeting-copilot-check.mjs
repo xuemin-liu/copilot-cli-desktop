@@ -129,7 +129,7 @@ if (!process.versions.electron) {
     const project = createWorkspaceProfile(repo, 'read-only')
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), {
-      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['copilot'], reviewerAllowAll: true,
+      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerClis: ['copilot'], reviewerAllowAll: true, reviewerStartPrompt: true,
       meetingRoundTimeoutMinutes: 2, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
       provider: { type: 'openai', baseUrl: process.env.E2E_MODEL_URL, model: 'ui-check-model', offline: true },
     })

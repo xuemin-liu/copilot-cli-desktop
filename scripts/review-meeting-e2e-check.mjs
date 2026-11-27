@@ -216,7 +216,7 @@ class AgyStub {
     project.otherCli = { antigravity: { model: 'workspace-model' } }
     const configPath = join(userData, 'desktop.json')
     await writeDesktopConfig(configPath, {
-      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerEntries: [{ id: 'antigravity', cli: 'antigravity' }], reviewerAllowAll: true,
+      ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id, reviewerEntries: [{ id: 'antigravity', cli: 'antigravity' }], reviewerAllowAll: true, reviewerStartPrompt: true,
       meetingRoundTimeoutMinutes: 1, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false,
     })
 

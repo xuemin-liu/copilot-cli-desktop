@@ -422,6 +422,7 @@ class AgyStub {
       profiles: [project],
       activeProfileId: project.id,
       reviewerAllowAll: true,
+      reviewerStartPrompt: true,
       closeBehavior: 'quit',
       trayEnabled: false,
       notifications: false,

@@ -7,7 +7,7 @@ import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { PrLoopPosts, PrPostRejected } from './pr-loop-posts.js'
 import { prLoopRequest, prQueueRequest } from './pr-loop-request.js'
 import { PrReviewQueue, QUEUE_FILE, startupReopens } from './pr-review-queue.js'
-import { cloneForReview, endedReviewNote, firstReviewPrompt, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, endedReviewNote, firstReviewPrompt, githubPullUrlKey, inspectReviewCommitAgentConfigs, makeReviewerArea, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshAgnosticReviewWorktree, reviewCandidateReason, refreshReviewCheckout, removeReviewerAreaDetailed, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy, type ReviewerArea, type ReviewerAreaRemovalResult, type ReviewerPolicy } from './pr-review-launch.js'
 import { reviewerEnvironment, reviewerLaunchArguments } from './pr-reviewer-sandbox.js'
 import { DEFAULT_PR_MARKER } from './pr-loop-rules.js'
 import { githubCliApi,githubCliWrite,GithubReadFailed,githubRemoteRepository,parseGithubPullUrl,readGithubPull } from './workflow-github.js'
@@ -185,6 +185,8 @@ import {
   TempReviewerRegistry,
   type TempReviewerGroup,
   type TempReviewerSeat,
+  undisclosedAgentConfigs,
+  discloseAgentConfigs,
 } from './pr-temp-reviewers.js'
 import {
   MEETING_REVIEWER_BRIEF_FILE, MeetingReviewerError, MeetingReviewerRegistry, meetingCopilotPrimer, meetingSeatStallReason, meetingReviewerBrief, meetingReviewerConsentDetail, meetingReviewerPromptLine,
@@ -2196,7 +2198,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (session.activity === 'idle') noteTurn((turns) => turns.idle(id))
     if (session.activity === 'idle') {
       const idleSeat = tempReviewers.seatByTabId(id)
-      if (idleSeat && idleSeat.group.stage !== 'ended' && idleSeat.seat.lifecycle === 'running') {
+      if (idleSeat && idleSeat.group.stage !== 'ended' && idleSeat.seat.lifecycle === 'running' && !tempSeatLaunchCancelled(idleSeat.seat)) {
         const expectedRound = idleSeat.group.round
         const expectedGeneration = idleSeat.seat.generation
         void reconcileTempReviewerSeatEvidence(idleSeat.group, idleSeat.seat, 'idle', { expectedRound, expectedGeneration })
@@ -2225,7 +2227,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
     const tempSeat = managedTabs.get(id)?.session === session ? tempReviewers.seatByTabId(id) : null
-    if (tempSeat && tempSeat.group.stage !== 'ended') {
+    // A launch whoever is taking the seat over has cancelled: what its tab does now is no verdict on the seat.
+    if (tempSeat && tempSeat.group.stage !== 'ended' && !tempSeatLaunchCancelled(tempSeat.seat)) {
       if (status === 'approval-needed') { tempSeat.seat.needsAttention = true; tempReviewers.wakeAll() }
       else if (status === 'running') { tempSeat.seat.needsAttention = false }
       else if (!shuttingDown() && (status === 'crashed' || status === 'completed') && (tempSeat.seat.lifecycle === 'starting' || tempSeat.seat.lifecycle === 'running')) {
@@ -3960,6 +3963,8 @@ async function reconcileTempReviewerSeatEvidence(
       expectedRound,
       expectedGeneration,
       isShuttingDown: shuttingDown,
+      // Rechecked after the forge read too: a Retry can cancel the launch while this event is being reconciled.
+      isSuperseded: () => tempSeatLaunchCancelled(seat),
       onClearTimer: clearTempSeatTimer,
       onBroadcast: broadcastState,
       loadEvidence: async () => {
@@ -4079,6 +4084,8 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
         && group.requiredSeats.get(seat.id) === seat
         && seat.generation === expectedGen
         && (seat.lifecycle === 'starting' || seat.lifecycle === 'running')
+        // A generation being replaced (by a round or a Retry) times out as nothing: its successor has its own timer.
+        && !tempSeatLaunchCancelled(seat)
       )
       if (!isSeatStillActive()) {
         return
@@ -4105,6 +4112,22 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
   tempSeatTimers.set(key, timer)
 }
 
+/**
+ * Each seat's launch still in flight, settled either way, with the token that cancels it: a round that reuses or
+ * replaces the seat cancels it and waits for it first.
+ */
+const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
+
+/**
+ * The generation of each seat whose takeover (by a round or a Retry) has begun. It stays recorded through the teardown
+ * until the seat gets a new generation, so nothing its old tab does in between is taken as a verdict.
+ */
+const supersededTempSeatGenerations = new WeakMap<TempReviewerSeat, string>()
+
+/** The seat's current launch has been cancelled or its takeover has begun, and it has no new generation yet. */
+function tempSeatLaunchCancelled(seat: TempReviewerSeat): boolean {
+  return tempSeatLaunchesInFlight.get(seat)?.cancel.cancelled === true || supersededTempSeatGenerations.get(seat) === seat.generation
+}
 async function writeTempReviewerReceipt(group: TempReviewerGroup, seat: TempReviewerSeat, helper: string): Promise<string> {
   const port = await meetingControl.port()
   const seatToken = randomBytes(32).toString('hex')
@@ -4132,6 +4155,53 @@ async function launchTempReviewerSeat(
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
+  const cancel = { cancelled: false }
+  const run = launchTempReviewerSeatNow(group, seat, profile, cancel, options)
+  const entry = { settled: run.then(() => {}, () => {}), cancel }
+  tempSeatLaunchesInFlight.set(seat, entry)
+  try {
+    await run
+  } catch (error) {
+    // Cancelled by whoever is taking the seat over (a round or a Retry): its own cleanup has run, and the seat is
+    // theirs to report on, so this is no failure.
+    if (cancel.cancelled) return
+    throw error
+  } finally {
+    if (tempSeatLaunchesInFlight.get(seat) === entry) tempSeatLaunchesInFlight.delete(seat)
+  }
+}
+
+/** Per seat, the teardown or area handover in progress: the next one waits for it, so no two touch one area at once. */
+const tempSeatAreaWork = new WeakMap<TempReviewerSeat, Promise<unknown>>()
+
+function withTempSeatArea<T>(seat: TempReviewerSeat, work: () => Promise<T>): Promise<T> {
+  const previous = tempSeatAreaWork.get(seat) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(work)
+  const tail = next.catch(() => {})
+  tempSeatAreaWork.set(seat, tail)
+  void tail.then(() => { if (tempSeatAreaWork.get(seat) === tail) tempSeatAreaWork.delete(seat) })
+  return next
+}
+
+/**
+ * Cancel a seat's earlier launch and wait for it, cleanup and reservation release included, to finish. It stops at its
+ * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
+ */
+async function settleTempSeatLaunch(seat: TempReviewerSeat): Promise<void> {
+  supersededTempSeatGenerations.set(seat, seat.generation)
+  const inFlight = tempSeatLaunchesInFlight.get(seat)
+  if (!inFlight) return
+  inFlight.cancel.cancelled = true
+  await inFlight.settled
+}
+
+async function launchTempReviewerSeatNow(
+  group: TempReviewerGroup,
+  seat: TempReviewerSeat,
+  profile: WorkspaceProfile,
+  cancel: { readonly cancelled: boolean },
+  options?: { reuseArea?: boolean },
+): Promise<void> {
   const expectedGeneration = seat.generation
   const expectedRound = group.round
   const isSeatCancelled = (): boolean => (
@@ -4142,6 +4212,7 @@ async function launchTempReviewerSeat(
     || group.requiredSeats.get(seat.id) !== seat
     || seat.generation !== expectedGeneration
     || seat.lifecycle === 'stopped'
+    || cancel.cancelled
   )
   if (isSeatCancelled()) throw new Error('Temporary review stopped')
   const runner = await meetingGitRunner()
@@ -4149,6 +4220,8 @@ async function launchTempReviewerSeat(
   if (!runner) throw new Error('Git is not available')
   if (!store) throw new Error('Review reservations are unavailable')
   if (isSeatCancelled()) throw new Error('Temporary review stopped')
+  // The revision this launch was asked for. A round that replaces it cancels this launch (the round check above).
+  const head = group.head, base = group.base
   const reusingExistingArea = Boolean(options?.reuseArea && seat.area && seat.launchId)
   const area = reusingExistingArea ? seat.area! : planReviewerArea(reviewerAreaBase())
   const launchId = reusingExistingArea ? seat.launchId : basename(area.root)
@@ -4169,12 +4242,13 @@ async function launchTempReviewerSeat(
   }
   reviewLaunches.add(launchId)
   let allocatedTabId: string | null = null
+  let handedOff = false
   try {
     await makeReviewerArea(area)
     if (!reusingExistingArea) {
-      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, group.head, group.base, group.prNumber)
-      seat.checkedOut = group.head
-      seat.checkedOutBase = group.base
+      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber)
+      seat.checkedOut = head
+      seat.checkedOutBase = base
     }
     const prWorkflows = bundledPrWorkflows()
     const seatStateDir = join(area.helper, 'pr-state')
@@ -4189,8 +4263,8 @@ async function launchTempReviewerSeat(
       prNumber: group.prNumber,
       prUrl: group.prUrl,
       round: group.round,
-      head: group.head,
-      base: group.base,
+      head,
+      base,
       marker: group.marker,
       reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
       prToolsDir: prWorkflows.tools,
@@ -4424,8 +4498,12 @@ async function launchTempReviewerSeat(
     if (isSeatCancelled()) throw new Error('Temporary review stopped')
     broadcastState()
   } catch (error) {
-    clearTempSeatTimer(seat)
+    // A newer generation's round timer is not this launch's to clear.
+    if (seat.generation === expectedGeneration) clearTempSeatTimer(seat)
     if (allocatedTabId) {
+      // Detach the seat from this tab first: its process may report an exit while it is stopped, and that exit is not
+      // a verdict on the seat whoever cancelled this launch now owns.
+      if (seat.generation === expectedGeneration && seat.tabId === allocatedTabId) seat.tabId = null
       const managed = managedTabs.get(allocatedTabId)
       const pid = managed?.session.processId ?? null
       if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
@@ -4444,15 +4522,19 @@ async function launchTempReviewerSeat(
       broadcastState()
       refreshMenus()
     }
-    await cleanupReviewerSeatCredentials(area)
-    await store.setCodexAuthSync(launchId, null).catch(() => {})
-    const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
-    if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
-    else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
-    if (seat.generation === expectedGeneration) seat.area = null
+    // A newer generation of this seat that kept this area owns it now: leave its checkout, helper files and reservation.
+    handedOff = seat.area === area && seat.generation !== expectedGeneration
+    if (!handedOff) {
+      await cleanupReviewerSeatCredentials(area)
+      await store.setCodexAuthSync(launchId, null).catch(() => {})
+      const removal = await removeReviewerAreaDetailed(area, runner).catch((): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed' }))
+      if (removal.outcome === 'removed') await store.release(launchId).catch(() => {})
+      else await store.keep(launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+      if (seat.generation === expectedGeneration) seat.area = null
+    }
     throw error
   } finally {
-    reviewLaunches.delete(launchId)
+    if (!handedOff) reviewLaunches.delete(launchId)
   }
 }
 
@@ -4465,9 +4547,12 @@ async function askTempReviewerConsent(
   requireExplicitConsent: boolean,
   allowAll: boolean,
   warnings: readonly string[] = [],
+  // Settings turned the question off and nothing about this pull request needs it: see startTempReviewersFlow.
+  skipQuestion = false,
 ): Promise<boolean> {
   const nonCopilotReviewers = [...new Set(reviewers.map((reviewer) => reviewer.cli).filter((cli) => cli !== 'copilot'))]
   if (!requireExplicitConsent && nonCopilotReviewers.length === 0 && warnings.length === 0) return true
+  if (skipQuestion) return true
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -4690,7 +4775,14 @@ async function startTempReviewersFlow(options: {
         revisions.base = snapshot.base.toLowerCase()
       }
       const me = await api('user').catch(() => null) as { id?: unknown } | null
-      if (me && snapshot.author === me.id) {
+      // Reviewers get prUrl: it must name the pull request checked here, or the check says nothing about it.
+      const checkedUrl = `https://github.com/${ghRepo}/pull/${prNumber}`.toLowerCase()
+      const sameTarget = !prUrl || githubPullUrlKey(prUrl) === checkedUrl
+      if (!sameTarget) {
+        consentWarnings.push(
+          `The pull request link given (${prUrl}) is not ${checkedUrl}, the pull request checked on GitHub; reviewers are given that link.`,
+        )
+      } else if (me && snapshot.author === me.id) {
         verifiedOwnPull = true
       } else {
         consentWarnings.push(
@@ -4733,7 +4825,7 @@ async function startTempReviewersFlow(options: {
     }
   }
 
-  let configInspection: { modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }
+  let configInspection: Awaited<ReturnType<typeof inspectReviewCommitAgentConfigs>>
   try {
     configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutRoot, origin, revisions.head, revisions.base)
   } catch (error) {
@@ -4744,11 +4836,17 @@ async function startTempReviewersFlow(options: {
       `Confirm that you trust ${repository} ${prLabel} before starting unsandboxed CLI reviewer sessions inside its checkout.`,
     )
   }
+  if (!configInspection.complete) {
+    consentWarnings.push(
+      `Could not read which files ${repository} ${prLabel} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load on startup.`,
+    )
+  }
   if (configInspection.modifiedAgentConfigs.length > 0) {
     consentWarnings.push(
       `Warning: this pull request adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
     )
-  } else if (!verifiedOwnPull && configInspection.presentAgentConfigs.length > 0) {
+  }
+  if (configInspection.presentAgentConfigs.length > 0) {
     consentWarnings.push(
       `Warning: this repository contains repo-local CLI/MCP configuration (${configInspection.presentAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load on startup.`,
     )
@@ -4791,7 +4889,12 @@ async function startTempReviewersFlow(options: {
   void (async () => {
     const isOver = (): boolean => group.stage === 'ended' || group.round !== firstRound
     try {
-      const approved = await askTempReviewerConsent(repository, prLabel, reviewers, options.requireConsent, allowAll, consentWarnings)
+      // Skipped only for the person's own pull request in a repository with no repo-local CLI/MCP configuration at all:
+      // a scan that could not read the changes shows nothing, and an existing startup hook can run scripts anywhere in
+      // the repository, which no path check can clear.
+      const skipQuestion = !desktopConfig.reviewerStartPrompt && verifiedOwnPull && configInspection.complete
+        && configInspection.modifiedAgentConfigs.length === 0 && configInspection.presentAgentConfigs.length === 0
+      const approved = await askTempReviewerConsent(repository, prLabel, reviewers, options.requireConsent, allowAll, consentWarnings, skipQuestion)
       if (!approved) {
         if (!isOver()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -4802,6 +4905,8 @@ async function startTempReviewersFlow(options: {
       }
       if (isOver()) return
       group.consentGranted = true
+      // The question named every config in the tree (an empty tree has none to show): those versions are disclosed.
+      discloseAgentConfigs(group, configInspection.presentAgentConfigObjects, configInspection.presentAgentConfigs)
       for (const seat of [...group.requiredSeats.values()]) {
         if (isOver()) break
         if (group.requiredSeats.get(seat.id) !== seat || seat.lifecycle !== 'starting') continue
@@ -5173,7 +5278,10 @@ function onMeetingReviewerExit(tabId: string, status: 'completed' | 'crashed'): 
   })
 }
 
-async function askMeetingReviewerConsent(meetingId: string, detail: string, stillWanted: () => boolean): Promise<boolean> {
+async function askMeetingReviewerConsent(meetingId: string, ask: boolean, detail: string, stillWanted: () => boolean): Promise<boolean> {
+  // Turned off in Settings when the run was made: reviewers of the person's own project start without the question,
+  // and without waiting behind another question still open.
+  if (!ask) return stillWanted()
   const previous = tempReviewerConsentChain
   let release!: () => void
   tempReviewerConsentChain = new Promise<void>((resolveGate) => { release = resolveGate })
@@ -5270,7 +5378,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
   if (meetingReviewerPlacesUsed(meetingId) + reviewers.length > MAX_MEETING_PARTICIPANTS) return refuse(`a meeting takes at most ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
   let group: MeetingReviewerGroup
   try {
-    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, reviewers, allowAll })
+    group = meetingReviewers.create({ meetingId, hostTabId: resolved.hostTab?.id ?? null, profileId: profile.id, projectPath: resolved.checkoutFolder, reviewers, allowAll, ask: desktopConfig.reviewerStartPrompt })
   } catch (error) {
     if (error instanceof MeetingReviewerError) return refuse(error.message)
     meetingHub.release(meetingId)
@@ -5283,7 +5391,7 @@ async function startMeetingReviewers(options: { meetingId: string; desktopTag: s
     meetingHub.release(meetingId)
     void teardownMeetingReviewerSeats(seats, 'This reviewer was not started.')
   })
-  return `Hidden reviewer sessions for meeting ${meetingId}: ${reviewers.map((reviewer) => reviewer.label).join(', ')}. The person is being asked to allow them. Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
+  return `Hidden reviewer sessions for meeting ${meetingId}: ${reviewers.map((reviewer) => reviewer.label).join(', ')}. ${group.ask ? 'The person is being asked to allow them. ' : ''}Round 1 opens when each has joined or failed, so your first replies take a few minutes; ${options.hostTabId !== undefined ? 'the helper\'s status command' : 'meeting_status'} shows the seats.`
 }
 
 async function runMeetingReviewers(group: MeetingReviewerGroup, profile: WorkspaceProfile, hasChanges: boolean): Promise<void> {
@@ -5293,7 +5401,7 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
   group.projectPath = pinned.project
   group.commit = pinned.commit
   const reviewers = [...group.seats.values()]
-  const approved = await askMeetingReviewerConsent(group.meetingId, meetingReviewerConsentDetail({ reviewers, allowAll: group.allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
+  const approved = await askMeetingReviewerConsent(group.meetingId, group.ask, meetingReviewerConsentDetail({ reviewers, allowAll: group.allowAll, allowAllFlags: MEETING_ALLOW_ALL_FLAGS, commit: group.commit, projectPath: group.projectPath, hasChanges }), () => !over())
   if (over()) return
   if (!approved) {
     meetingReviewers.end(group.id, 'stopped', `You declined hidden reviewers for meeting ${group.meetingId}. Reviewers can still join with "join meeting ${group.meetingId}".`)
@@ -5787,6 +5895,8 @@ async function advanceGroupTempReviewers(
   if (!runner) return { ok: false, message: 'Git is not available.' }
   const revisions = await resolveGitRevisionsForReview(runner, checkoutFolder, headInput, baseInput ?? group.base)
   if (!revisions.ok) return { ok: false, message: revisions.message }
+  // The new head could not be confirmed on GitHub: the round still runs, but only after the person is asked.
+  let unverifiedHead = false
   try {
     const ghRepo = githubRemoteRepository(group.origin)
     if (ghRepo && group.prNumber !== null && !process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE) {
@@ -5812,7 +5922,8 @@ async function advanceGroupTempReviewers(
           revisions.base = snapshot.base.toLowerCase()
         }
       } catch {
-        // Proceed to origin branch reachability check below if GitHub CLI read is transiently unavailable.
+        // GitHub CLI read transiently unavailable: the origin branch check below still applies, and the person is asked.
+        unverifiedHead = true
       }
     } else if (!ghRepo && (group.prNumber !== null || group.prUrl) && !process.env.COPILOT_DESKTOP_TEST_FORGE_EVIDENCE_FILE) {
       const preForge = await loadForgeEvidenceForGroup(group).catch(() => null)
@@ -5839,9 +5950,14 @@ async function advanceGroupTempReviewers(
     }
     const configInspection = await inspectReviewCommitAgentConfigs(runner, checkoutFolder, group.origin, revisions.head, revisions.base)
     if (!group.consentGranted || group.round !== previousRound) return { ok: false, message: 'The review round changed while preparing this revision.' }
-    const requiresConsent = configInspection.modifiedAgentConfigs.length > 0
+    // A scan that could not read the round's changes cannot show that no CLI/MCP configuration changed, and
+    // configuration no approved question has shown in this version (new, or changed through a moved base) asks again.
+    const unaskedConfigs = undisclosedAgentConfigs(group, configInspection.presentAgentConfigObjects)
+    const requiresConsent = unverifiedHead || unaskedConfigs.length > 0 || !configInspection.complete || configInspection.modifiedAgentConfigs.length > 0
     tempReviewers.advanceRound(group.id, revisions.head, revisions.base, summary, options)
     const targetRound = group.round
+    // Each seat's generation as this round found it: a same-round Retry that moves one on owns that seat from then.
+    const plannedGenerations = new Map([...group.requiredSeats.values()].map((seat) => [seat.id, seat.generation]))
     if (requiresConsent) {
       group.consentGranted = false
       group.stage = 'starting'
@@ -5870,7 +5986,14 @@ async function advanceGroupTempReviewers(
         const prWorkflows = bundledPrWorkflows()
         if (requiresConsent) {
           for (const seat of [...group.requiredSeats.values()]) {
-            await cleanupTempReviewerSeat(seat)
+            // Behind any handover a newer round has started on this seat, and only while this round still owns it: an
+            // earlier launch still setting up is cancelled and settled first, then its tab (if any) and area go.
+            await withTempSeatArea(seat, async () => {
+              if (isStaleOrEnded()) return
+              await settleTempSeatLaunch(seat)
+              if (isStaleOrEnded()) return
+              await cleanupTempReviewerSeat(seat)
+            })
           }
           if (isStaleOrEnded()) return
           const activeReviewers = [...group.requiredSeats.values()]
@@ -5880,8 +6003,15 @@ async function advanceGroupTempReviewers(
             activeReviewers,
             true,
             group.allowAll,
-            [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`],
+            [
+              ...(unverifiedHead ? [`Could not confirm on GitHub that ${revisions.head.slice(0, 12)} is the head of ${group.prLabel}; it is on a branch of origin.`] : []),
+              ...(unaskedConfigs.length > 0 ? [`Warning: the repository at round ${targetRound} contains repo-local CLI/MCP configuration (${unaskedConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
+              ...(configInspection.complete ? [] : [`Could not read which files round ${targetRound} changes, so it is not known whether it adds or modifies repo-local CLI/MCP configuration that unsandboxed reviewer CLIs may load.`]),
+              ...(configInspection.modifiedAgentConfigs.length > 0 ? [`Warning: round ${targetRound} adds or modifies repo-local CLI/MCP configuration (${configInspection.modifiedAgentConfigs.join(', ')}) that unsandboxed reviewer CLIs may load.`] : []),
+            ],
           )
+          // A newer round replaced this one while the question was open: its answer applies to nothing now.
+          if (isStaleOrEnded()) return
           if (!approved) {
             if (group.stage !== 'ended') {
               const seats = tempReviewers.endGroup(group.id, 'stopped', 'Temporary PR reviewers were cancelled by the user.')
@@ -5892,42 +6022,66 @@ async function advanceGroupTempReviewers(
           }
           if (isStaleOrEnded()) return
           group.consentGranted = true
+          // Only configuration this question named counts as shown to the person.
+          discloseAgentConfigs(group, configInspection.presentAgentConfigObjects, [...unaskedConfigs, ...configInspection.modifiedAgentConfigs])
         }
 
-        const relaunchSeatAtNewHead = async (seat: TempReviewerSeat): Promise<void> => {
-          await stopAndCloseTempReviewerTabOnly(seat)
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.id)) return
-          if (!profile) {
-            tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
-            broadcastState()
-            return
-          }
-          let canReuseWorktree = false
-          if (!requiresConsent && seat.area && seat.launchId) {
-            const refreshed = await refreshAgnosticReviewWorktree(
-              runner,
-              seat.area,
-              seat.origin,
-              revisions.head,
-              revisions.base,
-              group.prNumber,
-            ).catch(() => null)
-            if (refreshed) {
-              seat.checkedOut = refreshed
-              seat.checkedOutBase = revisions.base
-              canReuseWorktree = true
+        const relaunchSeatAtNewHead = async (seat: TempReviewerSeat, expectedGeneration?: string): Promise<void> => {
+          // A newer round (or a manual Retry, which moves the generation on) may take the seat over during any wait
+          // below: after each one, this round stops before it cancels or closes anything they started.
+          const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.id) !== seat
+            || (expectedGeneration !== undefined && seat.generation !== expectedGeneration)
+          // The teardown and handover of the seat's area run one at a time per seat (another round's cleanup included);
+          // the launch itself runs after, guarded by its cancel token.
+          const prepared = await withTempSeatArea(seat, async (): Promise<{ reset: TempReviewerSeat; canReuseWorktree: boolean } | null> => {
+            if (superseded()) return null
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (superseded()) return null
+            // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
+            // reservation) before its area is touched.
+            await settleTempSeatLaunch(seat)
+            if (superseded()) return null
+            // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (superseded()) return null
+            if (!profile) {
+              tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
+              broadcastState()
+              return null
+            }
+            let canReuseWorktree = false
+            if (!requiresConsent && seat.area && seat.launchId) {
+              const refreshed = await refreshAgnosticReviewWorktree(
+                runner,
+                seat.area,
+                seat.origin,
+                revisions.head,
+                revisions.base,
+                group.prNumber,
+              ).catch(() => null)
+              if (refreshed) {
+                seat.checkedOut = refreshed
+                seat.checkedOutBase = revisions.base
+                canReuseWorktree = true
+              } else {
+                await cleanupTempReviewerSeat(seat)
+              }
             } else {
               await cleanupTempReviewerSeat(seat)
             }
-          } else {
-            await cleanupTempReviewerSeat(seat)
-          }
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.id)) return
-          const reset = tempReviewers.resetSeatGeneration(group.id, seat.id, { keepArea: canReuseWorktree })
-          broadcastState()
+            if (superseded()) return null
+            const reset = tempReviewers.resetSeatGeneration(group.id, seat.id, { keepArea: canReuseWorktree })
+            broadcastState()
+            return { reset, canReuseWorktree }
+          })
+          if (!prepared || !profile) return
+          const { reset, canReuseWorktree } = prepared
+          const launchedGeneration = reset.generation
           try {
             await launchTempReviewerSeat(group, reset, profile, { reuseArea: canReuseWorktree })
           } catch (error) {
+            // A launch a newer round superseded leaves that round's seat alone.
+            if (isStaleOrEnded() || group.requiredSeats.get(reset.id) !== reset || reset.generation !== launchedGeneration) return
             tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
             broadcastState()
           }
@@ -5937,51 +6091,70 @@ async function advanceGroupTempReviewers(
           if (isStaleOrEnded()) break
           if (!group.requiredSeats.has(seat.id)) continue
           if (plannedRelaunches.has(seat.id)) {
-            await relaunchSeatAtNewHead(seat)
+            await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
             continue
           }
           if (seat.cli === 'copilot' && seat.tabId && seat.area) {
             const managed = managedTabs.get(seat.tabId)
             if (managed && managed.session.activity === 'idle' && meetingPromptSettled(seat.tabId)) {
-              const refreshed = await refreshAgnosticReviewWorktree(runner, seat.area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
-              if (!refreshed) {
-                await relaunchSeatAtNewHead(seat)
-                continue
-              }
-              seat.checkedOut = refreshed
-              seat.checkedOutBase = revisions.base
-              const seatReceiptPath = await writeTempReviewerReceipt(group, seat, seat.area.helper)
-              const seatStateDir = join(seat.area.helper, 'pr-state')
-              await writeFile(join(seat.area.helper, 'reviewer-brief.md'), buildReviewerBrief({
-                tag: seat.tag,
-                repository: group.repository,
-                prLabel: group.prLabel,
-                prNumber: group.prNumber,
-                prUrl: group.prUrl,
-                round: targetRound,
-                head: revisions.head,
-                base: revisions.base,
-                marker: group.marker,
-                reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
-                prToolsDir: prWorkflows.tools,
-                seatStateDir,
-                checkoutPath: seat.area.checkout,
-                roundHistory: group.roundHistory,
-                forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.id),
-                seatReceiptConfigPath: seatReceiptPath,
-              }), { encoding: 'utf8', mode: 0o600 })
-              startTempSeatRoundTimer(group, seat)
-              const sent = sendSessionTask(
-                seat.tabId,
-                `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "${seat.tag}" on its own line directly on the PR. Use the updated reviewer brief and receipt instructions.`,
-                false,
-              )
-              if (sent.result !== 'sent') {
-                await relaunchSeatAtNewHead(seat)
-              }
+              // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
+              // and its area; a relaunch, if needed, runs after (it takes the queue itself).
+              const refreshGeneration = plannedGenerations.get(seat.id) ?? seat.generation
+              const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
+                // The generation too: a manual Retry moves it on and owns the seat from then.
+                const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.id) === seat && seat.generation === refreshGeneration
+                const area = seat.area
+                if (!owned()) return 'stale'
+                if (!area || !seat.tabId) return 'relaunch'
+                // Its launch is still in flight: the relaunch path cancels it and waits for its cleanup first.
+                if (tempSeatLaunchesInFlight.has(seat)) return 'relaunch'
+                const refreshed = await refreshAgnosticReviewWorktree(runner, area, seat.origin, revisions.head, revisions.base, group.prNumber).catch(() => null)
+                if (!owned()) return 'stale'
+                if (!refreshed || seat.area !== area || !seat.tabId) return 'relaunch'
+                seat.checkedOut = refreshed
+                seat.checkedOutBase = revisions.base
+                // A receipt that could not be written is this seat's problem, not the run's: start it again.
+                const seatReceiptPath = await writeTempReviewerReceipt(group, seat, area.helper).catch(() => null)
+                if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
+                if (!seatReceiptPath) return 'relaunch'
+                const seatStateDir = join(area.helper, 'pr-state')
+                // A brief that could not be written would leave the tab reading the previous round's: relaunch instead.
+                const briefWritten = await writeFile(join(area.helper, 'reviewer-brief.md'), buildReviewerBrief({
+                  tag: seat.tag,
+                  repository: group.repository,
+                  prLabel: group.prLabel,
+                  prNumber: group.prNumber,
+                  prUrl: group.prUrl,
+                  round: targetRound,
+                  head: revisions.head,
+                  base: revisions.base,
+                  marker: group.marker,
+                  reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
+                  prToolsDir: prWorkflows.tools,
+                  seatStateDir,
+                  checkoutPath: area.checkout,
+                  roundHistory: group.roundHistory,
+                  forceFullDiff: group.baseMovedInGroup || group.skippedSeatsForHead.has(seat.id),
+                  seatReceiptConfigPath: seatReceiptPath,
+                }), { encoding: 'utf8', mode: 0o600 }).then(() => true, () => false)
+                if (!briefWritten) return owned() ? 'relaunch' : 'stale'
+                if (!owned() || seat.area !== area || !seat.tabId) return owned() ? 'relaunch' : 'stale'
+                startTempSeatRoundTimer(group, seat)
+                const sent = sendSessionTask(
+                  seat.tabId,
+                  `Round ${targetRound} is ready on ${group.prUrl ?? `${group.repository} ${group.prLabel}`} at head ${revisions.head} (base ${revisions.base}). Inspect the delta and 🤖 replies on the PR, run checks in this detached worktree, and post your updated review or current-head approval starting with "Approved at ${revisions.head}" (with "Reviewed base: ${revisions.base}") and including "${seat.tag}" on its own line directly on the PR. Use the updated reviewer brief and receipt instructions.`,
+                  false,
+                )
+                return sent.result === 'sent' ? 'done' : 'relaunch'
+              })
+              if (outcome === 'relaunch') await relaunchSeatAtNewHead(seat, refreshGeneration)
             } else {
-              await relaunchSeatAtNewHead(seat)
+              await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
             }
+          } else {
+            // Planned for reuse, but its tab or area went while earlier seats were handled (its old launch cleaned up):
+            // start it again rather than leave it running with no tab or timer.
+            await relaunchSeatAtNewHead(seat, plannedGenerations.get(seat.id))
           }
         }
         if (!isStaleOrEnded() && group.stage === 'starting') {
@@ -5990,7 +6163,8 @@ async function advanceGroupTempReviewers(
         }
         broadcastState()
       } catch (error) {
-        if (group.stage !== 'ended') {
+        // Only the current round ends the run: a superseded round's failure is not about the seats running now.
+        if (!isStaleOrEnded()) {
           const seats = tempReviewers.endGroup(group.id, 'stopped', error instanceof Error ? error.message : 'Could not advance temporary PR reviewers.')
           await teardownTempReviewerSeats(seats)
           broadcastState()
@@ -8144,6 +8318,7 @@ function settingsPreferences(): DesktopPreferences {
     turnCheckpoints: desktopConfig.turnCheckpoints,
     reviewerEntries: desktopConfig.reviewerEntries.map((entry) => ({ ...entry })),
     reviewerAllowAll: desktopConfig.reviewerAllowAll,
+    reviewerStartPrompt: desktopConfig.reviewerStartPrompt,
   }
 }
 
@@ -8749,6 +8924,9 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     const previous = group.requiredSeats.get(payload)
     const retryRound = group.round
     if (!previous) throw new Error('That reviewer seat is not in this group')
+    // A round still starting its seats (its confirmation perhaps still open) launches them itself: a Retry now would
+    // start a reviewer on a revision nobody has confirmed yet.
+    if (group.stage === 'starting' || !group.consentGranted) throw new Error('This run is still starting its reviewers. Retry once it has.')
     const profile = desktopConfig.profiles.find((p) => p.id === group.profileId)
     if (!profile) throw new Error('Workspace profile is no longer available')
     // The slot limit is shared with meetings: a seat that still has its tab keeps that slot through the retry, and one
@@ -8756,17 +8934,32 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     if (previous.tabId === null && previous.lifecycle !== 'starting' && hiddenReviewerSlotsInUse() + 1 > MAX_TEMP_REVIEWER_TABS) {
       throw new Error(`All ${MAX_TEMP_REVIEWER_TABS} hidden reviewer slots are in use. Close a finished reviewer run, then retry.`)
     }
-    await cleanupTempReviewerSeat(previous)
-    if (group.stage === 'ended') {
+    // In the seat's queue, like a round's handover: an earlier launch is cancelled and settled, and a refresh in
+    // progress finishes, before the area goes and the generation moves on.
+    // A round that began while this Retry waited owns the seat now: it relaunches it at its own revision.
+    const overtaken = (): boolean => group.stage === 'ended' || group.stage === 'starting' || !group.consentGranted || group.round !== retryRound
+    const reset = await withTempSeatArea(previous, async () => {
+      if (overtaken()) return null
+      await settleTempSeatLaunch(previous)
+      if (overtaken()) return null
+      await cleanupTempReviewerSeat(previous)
+      if (overtaken()) return null
+      return tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
+    })
+    if (!reset) {
       broadcastState()
       return snapshot()
     }
-    if (!group.consentGranted || group.round !== retryRound) throw new Error('The review round changed while retrying this seat.')
-    const reset = tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     broadcastState()
+    const launchedGeneration = reset.generation
     try {
       await launchTempReviewerSeat(group, reset, profile)
     } catch (error) {
+      // A round that began during the launch cancelled it and owns the seat now: nothing failed that is this Retry's.
+      if (overtaken() || group.requiredSeats.get(payload) !== reset || reset.generation !== launchedGeneration) {
+        broadcastState()
+        return snapshot()
+      }
       tempReviewers.revokeSeat(reset, 'failed', error instanceof Error ? error.message : String(error))
       broadcastState()
       throw error
@@ -9340,6 +9533,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'turnCheckpoints',
     'reviewerEntries',
     'reviewerAllowAll',
+    'reviewerStartPrompt',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -9364,6 +9558,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
     || ('turnCheckpoints' in values && typeof values.turnCheckpoints !== 'boolean')
     || ('reviewerAllowAll' in values && typeof values.reviewerAllowAll !== 'boolean')
+    || ('reviewerStartPrompt' in values && typeof values.reviewerStartPrompt !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -9428,6 +9623,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (typeof values.turnCheckpoints === 'boolean') desktopConfig.turnCheckpoints = values.turnCheckpoints
     if (validatedReviewerEntries) desktopConfig.reviewerEntries = validatedReviewerEntries
     if (typeof values.reviewerAllowAll === 'boolean') desktopConfig.reviewerAllowAll = values.reviewerAllowAll
+    // Read when reviewers are about to start, so a start already waiting on its question still asks.
+    if (typeof values.reviewerStartPrompt === 'boolean') desktopConfig.reviewerStartPrompt = values.reviewerStartPrompt
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

@@ -912,7 +912,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerAllowAll'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'maxSessionTabs' | 'desktopControl' | 'openFilesOutsideWorkspace' | 'turnCheckpoints' | 'reviewerAllowAll' | 'reviewerStartPrompt'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -1172,6 +1172,22 @@ export function SettingsApp(): JSX.Element | null {
           launches hidden reviewers with <code>--allow-all</code> (Copilot CLI), <code>--dangerously-skip-permissions</code>{' '}
           (Claude Code and Antigravity CLI), and <code>--dangerously-bypass-approvals-and-sandbox</code> (Codex CLI) so background
           reviews do not stall on terminal prompts.
+        </p>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.reviewerStartPrompt}
+            onChange={(event) => updatePreference({ reviewerStartPrompt: event.target.checked })}
+          />
+          Ask before starting hidden reviewers
+        </label>
+        <p className="settings-disclaimer">
+          Off by default: hidden reviewers start as soon as your agent asks for them. The meeting tools need no sign-in, so a
+          program on this computer could start reviewers too; turn this on to be asked before each review meeting and pull
+          request review starts its reviewers. Your own request in a Copilot session to review and fix your pull request
+          already counts as the answer when only Copilot reviewers run. You are always asked for a pull request not verified
+          as opened by your GitHub account, for a repository that has repo-local CLI or MCP configuration (hooks among it),
+          and when the desktop could not read what the pull request changes.
         </p>
       </section>
 

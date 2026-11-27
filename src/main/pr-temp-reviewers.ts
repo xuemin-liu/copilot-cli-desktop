@@ -378,6 +378,23 @@ export function reviewerHelperDirAccess(
  * receipt or by the desktop asking the PR host once a minute (`interactiveSeatsToReconcile`), and at the latest by the
  * round timer.
  */
+/**
+ * The repo-local CLI/MCP configuration in a round's tree (path to Git object id) that no question the person approved
+ * has shown in this version: new paths, and known paths whose content changed. Either can arrive through a moved base
+ * without being in `base...head`.
+ */
+export function undisclosedAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, present: Readonly<Record<string, string>>): string[] {
+  return Object.entries(present).filter(([path, object]) => group.disclosedAgentConfigs.get(path) !== object).map(([path]) => path)
+}
+
+/** The person approved a question that showed these paths: their versions in `present` count as disclosed. */
+export function discloseAgentConfigs(group: Pick<TempReviewerGroup, 'disclosedAgentConfigs'>, present: Readonly<Record<string, string>>, shown: readonly string[]): void {
+  for (const path of shown) {
+    const object = present[path]
+    if (object) group.disclosedAgentConfigs.set(path, object)
+  }
+}
+
 export function otherCliReviewerOneShot(cli: Exclude<ReviewerCli, 'copilot'>, reviewerAllowAll: boolean, claudeTrustsProject = false): boolean {
   return reviewerAllowAll && (cli !== 'claude' || !claudeTrustsProject)
 }
@@ -668,6 +685,8 @@ export interface TempReviewerGroup {
   stage: 'starting' | 'active' | 'ended'
   outcome: 'approved' | 'merged' | 'closed' | 'stopped' | null
   notice: string | null
+  /** Repo-local CLI/MCP configuration (path to Git object id) shown in a question the person approved for this run. */
+  disclosedAgentConfigs: Map<string, string>
   /** Last attention/settled state key returned to a host status/wait call so repeated waits block instead of busy-looping. */
   lastObservedHostSettledKey: string | null
   /** Active required seats; only explicit user Dismiss removes a seat from this map. */
@@ -867,6 +886,7 @@ export class TempReviewerRegistry {
       stage: 'starting',
       outcome: null,
       notice: null,
+      disclosedAgentConfigs: new Map(),
       lastObservedHostSettledKey: null,
       requiredSeats,
       claimedEvidenceKeys: new Set<string>(),
@@ -1194,6 +1214,8 @@ export async function reconcileSeatWithEvidenceLoader(options: {
   expectedRound?: number
   expectedGeneration?: string
   isShuttingDown?: () => boolean
+  /** True once whoever is taking the seat over (a round or a Retry) has cancelled the launch this event came from. */
+  isSuperseded?: () => boolean
   onClearTimer?: (seat: TempReviewerSeat) => void
   onBroadcast?: () => void
   loadEvidence: () => Promise<
@@ -1207,6 +1229,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
     seat,
     trigger,
     isShuttingDown = () => false,
+    isSuperseded = () => false,
     onClearTimer,
     onBroadcast,
     loadEvidence,
@@ -1217,6 +1240,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
   const isGroupEnded = (): boolean => group.stage === 'ended'
   const isStillActiveInRound = (): boolean => (
     !isShuttingDown()
+    && !isSuperseded()
     && !isGroupEnded()
     && group.round === expectedRound
     && group.requiredSeats.get(seat.id) === seat
@@ -1226,6 +1250,7 @@ export async function reconcileSeatWithEvidenceLoader(options: {
 
   if (
     isShuttingDown()
+    || isSuperseded()
     || isGroupEnded()
     || group.round !== expectedRound
     || group.requiredSeats.get(seat.id) !== seat

@@ -46,7 +46,12 @@ export interface MeetingReviewerGroup {
    * included, uses it, whatever the setting says by then.
    */
   allowAll: boolean
-  /** `consent`: the person is being asked. `starting`: seats are coming up and round 1 is held. `active`: the gate is open. */
+  /**
+   * Whether the person is asked before the seats start, read once from Settings when the run is made: the start answer,
+   * the status and the question all follow it.
+   */
+  ask: boolean
+  /** `consent`: the person is being asked (or, without `ask`, the commit is being read). `starting`: seats are coming up and round 1 is held. `active`: the gate is open. */
   stage: 'consent' | 'starting' | 'active' | 'ended'
   outcome: 'closed' | 'stopped' | null
   seats: Map<string, MeetingReviewerSeat>
@@ -97,7 +102,7 @@ export class MeetingReviewerRegistry {
    * Record a run before the person is asked and before anything is made, so a second start in the same workspace is
    * refused from that moment on.
    */
-  create(input: { meetingId: string; hostTabId: string | null; profileId: string; projectPath: string; reviewers: readonly ResolvedReviewer[]; allowAll: boolean }): MeetingReviewerGroup {
+  create(input: { meetingId: string; hostTabId: string | null; profileId: string; projectPath: string; reviewers: readonly ResolvedReviewer[]; allowAll: boolean; ask?: boolean }): MeetingReviewerGroup {
     if (input.reviewers.length === 0) throw new MeetingReviewerError('Choose at least one reviewer in Settings.')
     if (this.forMeeting(input.meetingId)) throw new MeetingReviewerError(`Meeting ${input.meetingId} already has hidden reviewers.`)
     const busy = this.activeForProfile(input.profileId)
@@ -105,7 +110,7 @@ export class MeetingReviewerRegistry {
     const id = randomUUID()
     const group: MeetingReviewerGroup = {
       id, meetingId: input.meetingId, hostTabId: input.hostTabId, profileId: input.profileId, projectPath: input.projectPath,
-      commit: null, allowAll: input.allowAll, stage: 'consent', outcome: null, seats: new Map(), notice: null,
+      commit: null, allowAll: input.allowAll, stage: 'consent', outcome: null, seats: new Map(), notice: null, ask: input.ask ?? true,
     }
     for (const reviewer of input.reviewers) group.seats.set(reviewer.id, newSeat(id, reviewer, false))
     this.groups.set(id, group)
@@ -162,7 +167,7 @@ export class MeetingReviewerRegistry {
     if (!group || !previous) throw new MeetingReviewerError('That reviewer seat is not in this run.')
     if (group.stage === 'ended') throw new MeetingReviewerError('This run is over.')
     // Nothing starts before the person has answered: a Retry is no way round the question.
-    if (group.stage === 'consent') throw new MeetingReviewerError('Answer the question about hidden reviewers first.')
+    if (group.stage === 'consent') throw new MeetingReviewerError(group.ask ? 'Answer the question about hidden reviewers first.' : 'Wait until the hidden reviewers have started.')
     const next = newSeat(groupId, previous, true)
     next.guestName = previous.guestName
     group.seats.set(seatId, next)
@@ -247,7 +252,7 @@ export class MeetingReviewerRegistry {
     const group = this.list().filter((candidate) => candidate.meetingId === meetingId).at(-1)
     if (!group) return ''
     const seats = [...group.seats.values()].map((seat) => `${seat.label}: ${SEAT_STATUS[seat.lifecycle]}${seat.error ? ` (${seat.error})` : ''}`)
-    const head = group.stage === 'consent' ? 'Hidden reviewers: waiting for the person to allow them.'
+    const head = group.stage === 'consent' ? (group.ask ? 'Hidden reviewers: waiting for the person to allow them.' : 'Hidden reviewers: preparing to start.')
       : group.stage === 'starting' ? 'Hidden reviewers are starting; round 1 opens when each has joined or failed.'
       : group.stage === 'active' ? 'Hidden reviewers:'
       : 'Hidden reviewers (closed):'

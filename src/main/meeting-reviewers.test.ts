@@ -38,6 +38,19 @@ test('a run is recorded before anything starts, one per workspace and one per me
   assert.equal(run(registry, 'N3NN', 'p1').meetingId, 'N3NN')
 })
 
+test('a run made with the question turned off never says the person is being asked', () => {
+  const registry = new MeetingReviewerRegistry()
+  const asked = run(registry)
+  assert.equal(asked.ask, true, 'asks unless told otherwise')
+  assert.match(registry.statusText('K7QF'), /waiting for the person to allow them/)
+  const quiet = registry.create({ meetingId: 'M2MM', hostTabId: 'tab-2', profileId: 'p2', projectPath: 'D:\\web', reviewers: resolvedReviewers(['codex']), allowAll: true, ask: false })
+  assert.equal(quiet.stage, 'consent')
+  assert.match(registry.statusText('M2MM'), /^Hidden reviewers: preparing to start\./)
+  assert.doesNotMatch(registry.statusText('M2MM'), /allow them/)
+  assert.throws(() => registry.replace(quiet.id, 'codex'), /Wait until the hidden reviewers have started/)
+  assert.throws(() => registry.replace(asked.id, 'claude'), /Answer the question about hidden reviewers first/)
+})
+
 test('a seat is joined only by its own meeting seat, and the run is settled when no seat is still starting', () => {
   const registry = new MeetingReviewerRegistry()
   const group = run(registry)

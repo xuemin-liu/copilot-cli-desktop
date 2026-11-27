@@ -396,9 +396,15 @@ async function ensureOriginBranchCommit(
   }
 }
 
+/** A GitHub pull request link without its query, fragment, trailing slash or sub-page, lower-cased, to compare targets. */
+export function githubPullUrlKey(url: string): string {
+  return url.trim().toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/(\/pull\/\d+)\/(files|commits|checks)(\/.*)?$/, '$1')
+}
+
 /**
  * Verifies that `head` and `base` belong to `origin`'s own branches (never an external fork ref or unpushed local commit)
- * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs.
+ * and inspects whether the revision introduces or contains repo-local CLI/MCP execution configs. `presentAgentConfigObjects`
+ * maps each config path in `head`'s tree to its Git object id, so a change to it can be told from the version shown.
  */
 export async function inspectReviewCommitAgentConfigs(
   runner: GitRunner,
@@ -406,18 +412,43 @@ export async function inspectReviewCommitAgentConfigs(
   origin: string,
   head: string,
   base: string,
-): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[] }> {
+): Promise<{ modifiedAgentConfigs: string[]; presentAgentConfigs: string[]; presentAgentConfigObjects: Record<string, string>; complete: boolean }> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
-  const root = resolve(project)
-  await ensureOriginBranchCommit(runner, root, [], origin, head)
-  await ensureOriginBranchCommit(runner, root, [], origin, base)
-  const diffPaths = await git(runner, root, ['diff', '--name-only', `${base}...${head}`], 'read').catch(() => '')
-  const treePaths = await git(runner, root, ['ls-tree', '-r', '--name-only', head], 'read').catch(() => '')
+  await ensureOriginBranchCommit(runner, resolve(project), [], origin, head)
+  await ensureOriginBranchCommit(runner, resolve(project), [], origin, base)
+  // The whole repository, whatever folder the session is in: from its top level, and with --no-relative and
+  // --full-tree so neither diff.relative nor the current folder narrows the lists.
+  const top = await git(runner, resolve(project), ['rev-parse', '--show-toplevel'], 'read').catch(() => '')
+  const root = top ? resolve(top) : resolve(project)
+  // A failed or cut-off read (no merge base in a shallow clone, say, or a huge tree) is recorded, not taken as "no
+  // configs". `-z` gives raw paths: without it Git quotes unusual names, and a quoted name would not match.
+  let complete = true
+  const paths = async (args: readonly string[]): Promise<string> => {
+    const result = await runner.run({ cwd: root, args, kind: 'read', disableHooks: true, timeoutMs: 10 * 60_000, maxStdoutBytes: 16_000_000 }).catch(() => null)
+    if (!top || !result || result.exitCode !== 0 || result.timedOut || result.cancelled || result.stdoutTruncated) {
+      complete = false
+      return ''
+    }
+    return result.stdout.toString('utf8')
+  }
+  const diffPaths = await paths(['diff', '--no-relative', '-z', '--name-only', `${base}...${head}`])
+  // Each entry is "<mode> <type> <object>\t<path>".
+  const tree = await paths(['ls-tree', '--full-tree', '-r', '-z', head])
   const filterConfigs = (raw: string): string[] =>
-    [...new Set(raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && isRepoAgentExecConfigPath(line)))]
+    [...new Set(raw.split('\0').filter((path) => path.length > 0 && isRepoAgentExecConfigPath(path)))]
+  const presentAgentConfigObjects: Record<string, string> = {}
+  for (const entry of tree.split('\0')) {
+    const tab = entry.indexOf('\t')
+    if (tab < 0) continue
+    const path = entry.slice(tab + 1)
+    const object = entry.slice(0, tab).split(' ')[2]
+    if (object && isRepoAgentExecConfigPath(path)) presentAgentConfigObjects[path] = object
+  }
   return {
     modifiedAgentConfigs: filterConfigs(diffPaths),
-    presentAgentConfigs: filterConfigs(treePaths),
+    presentAgentConfigs: Object.keys(presentAgentConfigObjects),
+    presentAgentConfigObjects,
+    complete,
   }
 }
 
