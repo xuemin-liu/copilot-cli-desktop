@@ -4090,6 +4090,18 @@ async function launchTempReviewerSeat(
   }
 }
 
+/** Per seat, the teardown or area handover in progress: the next one waits for it, so no two touch one area at once. */
+const tempSeatAreaWork = new WeakMap<TempReviewerSeat, Promise<unknown>>()
+
+function withTempSeatArea<T>(seat: TempReviewerSeat, work: () => Promise<T>): Promise<T> {
+  const previous = tempSeatAreaWork.get(seat) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(work)
+  const tail = next.catch(() => {})
+  tempSeatAreaWork.set(seat, tail)
+  void tail.then(() => { if (tempSeatAreaWork.get(seat) === tail) tempSeatAreaWork.delete(seat) })
+  return next
+}
+
 /**
  * Cancel a seat's earlier launch and wait for it, cleanup and reservation release included, to finish. It stops at its
  * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
@@ -5868,7 +5880,8 @@ async function advanceGroupTempReviewers(
         const prWorkflows = bundledPrWorkflows()
         if (requiresConsent) {
           for (const seat of [...group.requiredSeats.values()]) {
-            await cleanupTempReviewerSeat(seat)
+            // Behind any handover a newer round has started on this seat, and only while this round still owns it.
+            await withTempSeatArea(seat, async () => { if (!isStaleOrEnded()) await cleanupTempReviewerSeat(seat) })
           }
           if (isStaleOrEnded()) return
           const activeClis = [...group.requiredSeats.keys()]
@@ -5903,43 +5916,51 @@ async function advanceGroupTempReviewers(
           // A newer round may take the seat over during any wait below: after each one, this round stops before it
           // cancels or closes anything that round started.
           const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.cli) !== seat
-          await stopAndCloseTempReviewerTabOnly(seat)
-          if (superseded()) return
-          // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
-          // reservation) before its area is touched.
-          await settleTempSeatLaunch(seat)
-          if (superseded()) return
-          // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
-          await stopAndCloseTempReviewerTabOnly(seat)
-          if (superseded()) return
-          if (!profile) {
-            tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
-            broadcastState()
-            return
-          }
-          let canReuseWorktree = false
-          if (!requiresConsent && seat.area && seat.launchId) {
-            const refreshed = await refreshAgnosticReviewWorktree(
-              runner,
-              seat.area,
-              seat.origin,
-              revisions.head,
-              revisions.base,
-              group.prNumber,
-            ).catch(() => null)
-            if (refreshed) {
-              seat.checkedOut = refreshed
-              seat.checkedOutBase = revisions.base
-              canReuseWorktree = true
+          // The teardown and handover of the seat's area run one at a time per seat (another round's cleanup included);
+          // the launch itself runs after, guarded by its cancel token.
+          const prepared = await withTempSeatArea(seat, async (): Promise<{ reset: TempReviewerSeat; canReuseWorktree: boolean } | null> => {
+            if (superseded()) return null
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (superseded()) return null
+            // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
+            // reservation) before its area is touched.
+            await settleTempSeatLaunch(seat)
+            if (superseded()) return null
+            // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (superseded()) return null
+            if (!profile) {
+              tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
+              broadcastState()
+              return null
+            }
+            let canReuseWorktree = false
+            if (!requiresConsent && seat.area && seat.launchId) {
+              const refreshed = await refreshAgnosticReviewWorktree(
+                runner,
+                seat.area,
+                seat.origin,
+                revisions.head,
+                revisions.base,
+                group.prNumber,
+              ).catch(() => null)
+              if (refreshed) {
+                seat.checkedOut = refreshed
+                seat.checkedOutBase = revisions.base
+                canReuseWorktree = true
+              } else {
+                await cleanupTempReviewerSeat(seat)
+              }
             } else {
               await cleanupTempReviewerSeat(seat)
             }
-          } else {
-            await cleanupTempReviewerSeat(seat)
-          }
-          if (isStaleOrEnded() || !group.requiredSeats.has(seat.cli)) return
-          const reset = tempReviewers.resetSeatGeneration(group.id, seat.cli, { keepArea: canReuseWorktree })
-          broadcastState()
+            if (superseded()) return null
+            const reset = tempReviewers.resetSeatGeneration(group.id, seat.cli, { keepArea: canReuseWorktree })
+            broadcastState()
+            return { reset, canReuseWorktree }
+          })
+          if (!prepared || !profile) return
+          const { reset, canReuseWorktree } = prepared
           try {
             await launchTempReviewerSeat(group, reset, profile, { reuseArea: canReuseWorktree })
           } catch (error) {
