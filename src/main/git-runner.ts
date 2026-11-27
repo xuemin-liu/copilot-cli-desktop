@@ -241,11 +241,13 @@ export class GitRunner {
         clearTimeout(graceTimer)
         options.signal?.removeEventListener('abort', onAbort)
         lease?.release()
-        // A spawn fails with ENOENT for a working folder that is gone, or is a file now, as well as for a missing
-        // executable; saying git was not found for those sends the person looking for the wrong thing.
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') reject(error)
-        else if (!isDirectory(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
-        else reject(new GitUnavailableError('git was not found'))
+        // A spawn fails with ENOENT for a working folder that is gone as well as for a missing executable, and for one
+        // that is a file now with ENOENT on Windows and ENOTDIR elsewhere; saying git was not found for those sends the
+        // person looking for the wrong thing.
+        const code = (error as NodeJS.ErrnoException).code
+        if ((code === 'ENOENT' || code === 'ENOTDIR') && !isDirectory(options.cwd)) reject(new Error(`The folder ${options.cwd} no longer exists`))
+        else if (code === 'ENOENT') reject(new GitUnavailableError('git was not found'))
+        else reject(error)
       })
       const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
       const emit = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
