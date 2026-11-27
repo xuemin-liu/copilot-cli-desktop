@@ -4078,6 +4078,8 @@ async function launchTempReviewerSeat(
   if (!runner) throw new Error('Git is not available')
   if (!store) throw new Error('Review reservations are unavailable')
   const expectedGeneration = seat.generation
+  // The round this launch was asked for: a round that replaces it while setup is awaited does not move it.
+  const round = group.round, head = group.head, base = group.base
   const reusingExistingArea = Boolean(options?.reuseArea && seat.area && seat.launchId)
   const area = reusingExistingArea ? seat.area! : planReviewerArea(reviewerAreaBase())
   const launchId = reusingExistingArea ? seat.launchId : basename(area.root)
@@ -4101,9 +4103,9 @@ async function launchTempReviewerSeat(
   try {
     await makeReviewerArea(area)
     if (!reusingExistingArea) {
-      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, group.head, group.base, group.prNumber)
-      seat.checkedOut = group.head
-      seat.checkedOutBase = group.base
+      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber)
+      seat.checkedOut = head
+      seat.checkedOutBase = base
     }
     const prWorkflows = bundledPrWorkflows()
     const seatStateDir = join(area.helper, 'pr-state')
@@ -4120,9 +4122,9 @@ async function launchTempReviewerSeat(
       groupId: group.id,
       cli: seat.cli,
       generation: seat.generation,
-      round: group.round,
-      head: group.head,
-      base: group.base,
+      round,
+      head,
+      base,
     }), { encoding: 'utf8', mode: 0o600 })
     const allowHttpOrigin = explicitHttpOriginFromGitOrigin(seat.origin)
     const briefPath = join(area.helper, 'reviewer-brief.md')
@@ -4132,9 +4134,9 @@ async function launchTempReviewerSeat(
       prLabel: group.prLabel,
       prNumber: group.prNumber,
       prUrl: group.prUrl,
-      round: group.round,
-      head: group.head,
-      base: group.base,
+      round,
+      head,
+      base,
       marker: group.marker,
       reviewPrSkillPath: join(prWorkflows.tools, 'skills', 'review-pr', 'SKILL.md'),
       prToolsDir: prWorkflows.tools,
@@ -4162,6 +4164,7 @@ async function launchTempReviewerSeat(
       || group.requiredSeats.get(seat.cli) !== seat
       || seat.generation !== expectedGeneration
       || seat.lifecycle === 'stopped'
+      || group.round !== round
     )
 
     const allowAll = desktopConfig.reviewerAllowAll
@@ -4774,6 +4777,8 @@ async function startTempReviewersFlow(options: {
         try {
           await launchTempReviewerSeat(group, seat, options.profile)
         } catch (error) {
+          // A launch a newer round superseded leaves that round's seat alone.
+          if (isEnded()) break
           tempReviewers.revokeSeat(seat, 'failed', error instanceof Error ? error.message : String(error))
           broadcastState()
         }

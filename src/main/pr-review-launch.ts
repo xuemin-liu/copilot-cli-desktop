@@ -398,7 +398,7 @@ async function ensureOriginBranchCommit(
 
 /** A GitHub pull request link without its query, fragment, trailing slash or sub-page, lower-cased, to compare targets. */
 export function githubPullUrlKey(url: string): string {
-  return url.trim().toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\/(files|commits|checks)(\/.*)?$/, '')
+  return url.trim().toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/(\/pull\/\d+)\/(files|commits|checks)(\/.*)?$/, '$1')
 }
 
 /**

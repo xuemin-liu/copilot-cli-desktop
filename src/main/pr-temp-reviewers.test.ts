@@ -711,6 +711,9 @@ test('githubPullUrlKey names the same pull request only for the same repository 
   for (const same of ['https://github.com/Owner/Repo/pull/12', 'https://github.com/owner/repo/pull/12/', 'https://github.com/owner/repo/pull/12/files', 'https://github.com/owner/repo/pull/12#discussion_r1', 'https://github.com/owner/repo/pull/12?w=1']) {
     assert.equal(githubPullUrlKey(same), checked, same)
   }
+  // Owner or repository names that look like sub-pages are kept.
+  assert.equal(githubPullUrlKey('https://github.com/owner/files/pull/12'), 'https://github.com/owner/files/pull/12')
+  assert.equal(githubPullUrlKey('https://github.com/commits/checks/pull/12/files'), 'https://github.com/commits/checks/pull/12')
   for (const other of ['https://github.com/attacker/repo/pull/12', 'https://github.com/owner/repo/pull/120', 'https://ghe.example.com/owner/repo/pull/12', 'http://omaha:3001/owner/repo/pulls/12']) {
     assert.notEqual(githubPullUrlKey(other), checked, other)
   }
