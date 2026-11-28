@@ -111,14 +111,6 @@ export function App(): JSX.Element {
   }), [])
   const tabsRef = useRef(state.tabs)
   tabsRef.current = state.tabs
-  const activeTabIdRef = useRef(state.activeTabId)
-  activeTabIdRef.current = state.activeTabId
-  useEffect(() => {
-    const current = activeWorkspaceRegularTab(tabsRef.current, activeTabIdRef.current, state.activeProfileId)
-    if (current?.sideChat && current.sideParentTabId) {
-      setPeekReviewerByHost((prev) => clearPeekForActivatedTab(prev, tabsRef.current, current.id))
-    }
-  }, [state.activeProfileId])
   useEffect(() => window.copilotDesktop.onHidePeekRequest(() => {
     updatePeekReviewerRef.current(null)
   }), [])

@@ -4593,8 +4593,32 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   const afterPeekShortcut = await h.request('desktop:get-state')
   assert.ok(afterPeekShortcut.tabs.some(tab => tab.id === ws1TabId), 'foreign-workspace session still survives standalone peek close shortcut')
 
-  // Switching back to ws1 with unresolved Copilot re-enables session menu items automatically:
+  // Activating a ws1 reviewer while on empty ws2 switches back to ws1 and emits desktop:peek-reviewer-request
+  // without emitting desktop:clear-peek-focus-request:
+  const ws1RevId = await h.addBackgroundReviewer(ws1.id, ws1TabId)
+  const beforeCrossWsPeek = win.messages.length
+  const afterCrossWsPeek = await h.request('desktop:activate-tab', ws1RevId)
+  assert.equal(afterCrossWsPeek.activeProfileId, ws1.id, 'cross-workspace reviewer click switches activeProfileId to ws1')
+  assert.equal(afterCrossWsPeek.activeTabId, ws1TabId, 'cross-workspace reviewer click keeps ws1TabId as activeTabId')
+  assert.ok(
+    win.messages.slice(beforeCrossWsPeek).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws1RevId && msg.payload?.peekKey === ws1TabId),
+    'cross-workspace reviewer click emits desktop:peek-reviewer-request',
+  )
+  assert.equal(
+    win.messages.slice(beforeCrossWsPeek).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    false,
+    'cross-workspace reviewer click does not emit desktop:clear-peek-focus-request',
+  )
+
+  // Switching back to ws2 and deliberately selecting ws1 via activateProfile emits desktop:clear-peek-focus-request
+  // with ws1TabId (even though ws1TabId already belonged to ws1) and re-enables session menu items automatically:
+  await h.request('desktop:activate-profile', ws2.id)
+  const beforeDeliberateReturn = win.messages.length
   await h.request('desktop:activate-profile', ws1.id)
+  assert.ok(
+    win.messages.slice(beforeDeliberateReturn).some(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === ws1TabId),
+    'deliberate activateProfile back to ws1 emits desktop:clear-peek-focus-request with ws1TabId',
+  )
   assert.equal(findMenuItem('File', 'Close Session Tab').enabled, true, 'switching back to ws1 refreshes Close Session Tab back to enabled')
   assert.equal(findMenuItem('File', 'Restart Active Session').enabled, true, 'switching back to ws1 re-enables Restart Active Session')
   assert.equal(findMenuItem('File', 'Unload Active Session').enabled, true, 'switching back to ws1 re-enables Unload Active Session')

@@ -7745,6 +7745,7 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
   desktopConfig.activeProfileId = profile.id
+  focusedPeekTabId = null
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
@@ -7754,7 +7755,11 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   // to one of them — otherwise activeProfileId and activeTabId/terminal
   // input can end up pointing at two different profiles.
   const activeTabBelongsToProfile = tabsState.tabs.some((tab) => tab.id === tabsState.activeTabId && !tab.tempReviewer && tab.workspaceProfileId === profile.id)
-  if (!activeTabBelongsToProfile) {
+  if (activeTabBelongsToProfile) {
+    if (mainWindow && !mainWindow.isDestroyed() && tabsState.activeTabId) {
+      mainWindow.webContents.send('desktop:clear-peek-focus-request', tabsState.activeTabId)
+    }
+  } else {
     const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)
     if (firstProfileTab) {
       selectSessionInMain(firstProfileTab.id)
