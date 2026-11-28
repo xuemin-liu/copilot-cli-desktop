@@ -1825,14 +1825,27 @@ test('a successful probe without --model retains the unsupported-option error', 
 test('failed capability detection does not stop a running session during restart', async () => {
   await fixture(async (harness, directory) => {
     const { profile, capabilities } = configure(harness, directory)
+    // The tab never got a prompt, so Copilot did not store it and the restart would start it fresh with this model.
     const opened = await harness.createMain()
-    // A resume keeps the session's own model, so this needs a launch option a resume still passes.
-    profile.launch.mode = 'plan'
+    profile.launch.model = 'gpt-5.3-codex'
     capabilities.probeFailed = true
     await assert.rejects(async () => harness.request('desktop:restart-tab', opened.activeTabId), /Could not determine Copilot CLI capabilities/)
     assert.equal(harness.spawns.length, 1)
     assert.equal(harness.spawns[0]!.stopped, false)
   })
+})
+
+test('restarting a tab Copilot never stored refuses an unsupported model or effort before stopping it', async () => {
+  for (const [field, flag] of [['model', '--model'], ['reasoningEffort', '--reasoning-effort']] as const) {
+    await fixture(async (harness, directory) => {
+      const { profile } = configure(harness, directory)
+      const opened = await harness.createMain()
+      profile.launch = { ...profile.launch, ...(field === 'model' ? { model: 'gpt-5.3-codex' } : { reasoningEffort: 'high' }) }
+      await assert.rejects(async () => harness.request('desktop:restart-tab', opened.activeTabId), new RegExp(`does not support ${flag}`))
+      assert.equal(harness.spawns.length, 1)
+      assert.equal(harness.spawns[0]!.stopped, false)
+    })
+  }
 })
 
 test('Restricted mode is refused when capability detection failed, and a restart leaves the session running', async () => {
