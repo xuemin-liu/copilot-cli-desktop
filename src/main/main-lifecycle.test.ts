@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void>; beforeFallbackCopy?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void>; beforeFallbackCopy?: () => Promise<void>; betweenLoadAndStartupSave?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -646,6 +646,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             legacyTabSanitizationUnflushed = false;
             configRecoveryHold = false;
             configWritesBlocked = false;
+            pendingFallbackWriteGuard = null;
             reservations = null;
             syncTabState();
           },
@@ -699,6 +700,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
             if (sanitized) legacyTabSanitizationUnflushed = true;
             syncWorkspaceState();
+            if (options.betweenLoadAndStartupSave) {
+              await options.betweenLoadAndStartupSave();
+            }
             const originalPersist = persistConfig;
             if (options.failSave) {
               persistConfig = async () => { throw new Error('ENOSPC: simulated settings write failure'); };
@@ -710,7 +714,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
               startupConfigPending = false;
             }
             await sweepReviewerAreas();
-            return recovery;
+            return { ...recovery, writesBlocked: configWritesBlocked };
           },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
@@ -5488,6 +5492,52 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), partialPostRenameRaw, 'in-progress partial restore bytes remain untouched on disk')
     assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held while partial restore is in progress')
 
+    // (2b) Distinct malformed UTF-8 byte sequences (`7b 80` vs `7b 81`) both decode to `"{\uFFFD"` in UTF-8,
+    //      yet raw Buffer comparison detects the replacement before fallback `copyFile` and blocks writes:
+    await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
+    await writeFile(join(directory, 'desktop.json'), Buffer.from([0x7b, 0x80]))
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnMalformedByteShift = await h.runStartupConfigAndSweepForTest({
+      beforeFallbackCopy: async () => {
+        await writeFile(join(directory, 'desktop.json'), Buffer.from([0x7b, 0x81]))
+      },
+    })
+    assert.ok(recoveryOnMalformedByteShift.hold, 'copied backup for 7b 81 is held')
+    assert.equal(recoveryOnMalformedByteShift.writesBlocked, true, 'raw byte comparison blocks fallback write on 7b 80 -> 7b 81')
+    assert.equal((await readFile(join(directory, 'desktop.json'))).equals(Buffer.from([0x7b, 0x81])), true, 'live 7b 81 bytes are not overwritten with defaults')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held after malformed-byte change')
+    await rm(recoveryOnMalformedByteShift.hold!, { force: true })
+
+    // (2c) If a valid restore arrives AFTER `loadDesktopConfigWithRecovery` moved the corrupt file aside
+    //      and BEFORE `saveSettingsAtStartup` publishes fallback defaults, exclusive create (`COPYFILE_EXCL`)
+    //      refuses to clobber the restored file, retains the recovery hold, and reloads & sanitizes the restore:
+    const lateRestoredWithCustomTabsRaw = JSON.stringify({
+      ...JSON.parse(repairedSameVersionRaw),
+      lastRunVersion: null,
+      maxSessionTabs: 17,
+    }, null, 2) + '\n'
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-5>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnLateRestoreBeforeSave = await h.runStartupConfigAndSweepForTest({
+      betweenLoadAndStartupSave: async () => {
+        await writeFile(join(directory, 'desktop.json'), lateRestoredWithCustomTabsRaw)
+      },
+    })
+    assert.ok(recoveryOnLateRestoreBeforeSave.hold, 'moved backup hold is retained when late restore wins before startup save')
+    assert.equal(recoveryOnLateRestoreBeforeSave.writesBlocked, false)
+    const savedAfterLateRestore = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(savedAfterLateRestore.maxSessionTabs, 17, 'restored maxSessionTabs=17 was preserved instead of default 20')
+    assert.equal(savedAfterLateRestore.activeProfileId, profile.id, 'late restore profile was reloaded into desktopConfig')
+    assert.equal(
+      savedAfterLateRestore.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
+      true,
+      'late restore tabs were sanitized before saving',
+    )
+    assert.equal(h.reservationList().length, 3, 'recovery hold stays active until the moved corrupt backup is removed')
+
+    await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()
@@ -5495,7 +5545,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     const recoveryAfterCompletedRestore = await h.runStartupConfigAndSweepForTest({
       afterRecoveryRevalidation: async () => {
         await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
-        await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
+        await rm(recoveryOnLateRestoreBeforeSave.hold!, { force: true })
       },
     })
     assert.deepEqual(

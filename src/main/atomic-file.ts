@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, rename, rm } from 'node:fs/promises'
+import { constants as fsConstants, renameSync } from 'node:fs'
+import { copyFile, mkdir, open, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { renameSync } from 'node:fs'
 
 const RETRYABLE_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM'])
 const UNSUPPORTED_SYNC_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM'])
@@ -46,6 +46,29 @@ export async function writeFileAtomic(filename: string, contents: string | Buffe
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * (attempt + 1)))
       }
     }
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined)
+  }
+}
+
+/**
+ * Flush `contents` to a temporary sibling file and publish it only if `filename` does not yet exist
+ * (`COPYFILE_EXCL`). Throws `EEXIST` without modifying `filename` if another writer created it first.
+ */
+export async function writeFileExclusive(filename: string, contents: string | Buffer, mode = 0o600): Promise<void> {
+  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
+  const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    const handle = await open(temporary, 'w', mode)
+    try {
+      await handle.writeFile(contents, typeof contents === 'string' ? { encoding: 'utf8' } : undefined)
+      await handle.sync().catch((error: NodeJS.ErrnoException) => {
+        if (!UNSUPPORTED_SYNC_CODES.has(error.code ?? '')) throw error
+      })
+    } finally {
+      await handle.close()
+    }
+    await copyFile(temporary, filename, fsConstants.COPYFILE_EXCL)
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined)
   }

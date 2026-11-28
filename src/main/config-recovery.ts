@@ -182,8 +182,8 @@ export interface ConfigRecoveryOutcome {
   newlyPreserved: boolean
   /** How `newlyPreserved` created `hold`: `'moved'` via rename or `'copied'` via fallback copy. */
   preservedMethod?: 'moved' | 'copied'
-  /** Exact UTF-8 bytes observed in `configPath` immediately before `newlyPreserved` moved or copied it. */
-  preMoveRaw?: string
+  /** Exact bytes observed in `configPath` immediately before `newlyPreserved` moved or copied it. */
+  preMoveBytes?: Buffer
 }
 
 type ConfigFileProbe =
@@ -307,7 +307,7 @@ export async function resolveConfigRecovery(
     if (preMoveProbe.state === 'parseable' || preMoveProbe.state === 'missing') {
       return restorePriorMarkerAndResolve(false)
     }
-    const preMoveRaw = preMoveProbe.state === 'unparseable' ? preMoveProbe.raw.toString('utf8') : undefined
+    const preMoveBytes = preMoveProbe.state === 'unparseable' ? preMoveProbe.raw : undefined
     const preserved = await preserveUnreadableFileDetailed(
       configPath,
       { rename: operations.rename ?? rename, copyFile: operations.copyFile ?? copyFile },
@@ -328,7 +328,7 @@ export async function resolveConfigRecovery(
         writesBlocked: false,
         newlyPreserved: true,
         preservedMethod: preserved.method,
-        ...(preMoveRaw !== undefined ? { preMoveRaw } : {}),
+        ...(preMoveBytes !== undefined ? { preMoveBytes } : {}),
       }
     }
     return restorePriorMarkerAndResolve(true)

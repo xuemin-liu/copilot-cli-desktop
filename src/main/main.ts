@@ -67,6 +67,7 @@ import {
   restoreWorkspaceProfile,
   recordDesktopVersion,
   writeDesktopConfig,
+  writeDesktopConfigExclusive,
   type CloseBehavior,
   type DesktopConfig,
   type DesktopPreferences,
@@ -467,6 +468,9 @@ let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 /** Set when an unreadable desktop.json could not be preserved: never replace the only copy. */
 let configWritesBlocked = false
+type FallbackWriteGuard = { kind: 'absent' } | { kind: 'copied'; expectedBytes: Buffer; backupPath: string | null }
+let pendingFallbackWriteGuard: FallbackWriteGuard | null = null
+class FallbackDestinationChangedError extends Error {}
 let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
@@ -1680,9 +1684,60 @@ async function persistConfig(change?: () => void, onFailure?: () => void): Promi
   }
   const { operation, queue } = queueConfigWrite(
     configWriteQueue,
-    () => {
+    async () => {
+      if (configWritesBlocked) {
+        change?.()
+        return
+      }
       change?.()
-      return writeDesktopConfig(configPath(), structuredClone(desktopConfig))
+      const nextConfig = structuredClone(desktopConfig)
+      const guard = pendingFallbackWriteGuard
+      if (!guard) {
+        await writeDesktopConfig(configPath(), nextConfig)
+        return
+      }
+      if (guard.kind === 'absent') {
+        try {
+          await writeDesktopConfigExclusive(configPath(), nextConfig)
+          pendingFallbackWriteGuard = null
+          return
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            pendingFallbackWriteGuard = null
+            configWritesBlocked = true
+            throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
+          }
+          throw error
+        }
+      }
+      let currentBytes: Buffer | null = null
+      try {
+        currentBytes = await readFile(configPath())
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      if (currentBytes === null) {
+        try {
+          await writeDesktopConfigExclusive(configPath(), nextConfig)
+          pendingFallbackWriteGuard = null
+          return
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            pendingFallbackWriteGuard = null
+            configWritesBlocked = true
+            throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
+          }
+          throw error
+        }
+      }
+      const backupBytes = guard.backupPath ? await readFile(guard.backupPath).catch(() => null) : null
+      if (!currentBytes.equals(guard.expectedBytes) || !backupBytes || !backupBytes.equals(guard.expectedBytes)) {
+        pendingFallbackWriteGuard = null
+        configWritesBlocked = true
+        throw new FallbackDestinationChangedError('desktop.json or its backup changed before fallback settings were written')
+      }
+      await writeDesktopConfig(configPath(), nextConfig)
+      pendingFallbackWriteGuard = null
     },
     onFailure,
   )
@@ -8295,10 +8350,43 @@ async function recheckCopilotCapabilities(): Promise<void> {
  * now (a full disk, a file another program holds), the app still starts with the settings it read, and the next save
  * writes them. Without the catch, that failure ended the whole startup with "failed to start".
  */
+function sameSnapshotBytes(left: Buffer | null, right: Buffer | null): boolean {
+  return left === null ? right === null : right !== null && left.equals(right)
+}
+
 async function saveSettingsAtStartup(migrated: boolean): Promise<boolean> {
   if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return !configWritesBlocked
   if (configWritesBlocked) return false
-  try { await persistConfig(); return true } catch (error) {
+  try {
+    await persistConfig()
+    return true
+  } catch (error) {
+    if (error instanceof FallbackDestinationChangedError) {
+      // A restore created or replaced desktop.json after recovery's last read and before fallback defaults
+      // were published. Retain `configRecoveryHold`, and if the new file is valid JSON, reload and sanitize
+      // it into memory; otherwise keep `configWritesBlocked = true` so the in-progress restore stays untouched.
+      const lateSnapshot = await readDesktopConfigSnapshot(configPath()).catch(() => null)
+      if (lateSnapshot && lateSnapshot.rawBytes !== null && !lateSnapshot.unparseable) {
+        for (const message of lateSnapshot.migrations) void writeAppLog(message)
+        desktopConfig = lateSnapshot.config
+        const reSanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+        legacyTabSanitizationUnflushed = reSanitized
+        configWritesBlocked = false
+        syncWorkspaceState()
+        const versionChanged = recordDesktopVersion(desktopConfig, app.getVersion())
+        if (!versionChanged && !reSanitized && lateSnapshot.migrations.length === 0) {
+          return true
+        }
+        try {
+          await persistConfig()
+          return true
+        } catch (saveError) {
+          void writeAppLog(`Could not save restored settings at startup: ${String(saveError)}`).catch(() => {})
+          return false
+        }
+      }
+      return false
+    }
     void writeAppLog(`Could not save the settings at startup; continuing with the ones that were read: ${String(error)}`).catch(() => {})
     return false
   }
@@ -8322,7 +8410,7 @@ async function loadDesktopConfigWithRecovery(
   // partial/malformed or fallback read) or a pre-existing recovery hold lifted without preserving or blocking.
   for (let attempt = 0; attempt < 3 && !recovery.newlyPreserved && !recovery.writesBlocked; attempt++) {
     const latest = await readDesktopConfigSnapshot(file)
-    if (latest.raw === snapshot.raw && !snapshot.unparseable && !(markerExistedBeforeRead && !recovery.hold)) {
+    if (sameSnapshotBytes(latest.rawBytes, snapshot.rawBytes) && !snapshot.unparseable && !(markerExistedBeforeRead && !recovery.hold)) {
       break
     }
     snapshot = latest
@@ -8333,21 +8421,29 @@ async function loadDesktopConfigWithRecovery(
   }
   if (recovery.newlyPreserved) {
     const postPreserveSnapshot = await readDesktopConfigSnapshot(file)
-    if (postPreserveSnapshot.raw !== null) {
+    if (postPreserveSnapshot.rawBytes !== null) {
       if (!postPreserveSnapshot.unparseable) {
         snapshot = postPreserveSnapshot
         recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
       } else {
         let staticCopiedOriginal = false
-        if (recovery.preservedMethod === 'copied' && snapshot.raw !== null && recovery.preMoveRaw === snapshot.raw) {
-          const preservedRaw = recovery.hold
-            ? await readFile(recovery.hold, 'utf8').catch(() => null)
+        if (
+          recovery.preservedMethod === 'copied' &&
+          snapshot.rawBytes !== null &&
+          recovery.preMoveBytes !== undefined &&
+          recovery.preMoveBytes.equals(snapshot.rawBytes)
+        ) {
+          const preservedBytes = recovery.hold
+            ? await readFile(recovery.hold).catch(() => null)
             : null
-          staticCopiedOriginal = preservedRaw === snapshot.raw && postPreserveSnapshot.raw === snapshot.raw
+          staticCopiedOriginal =
+            preservedBytes !== null &&
+            preservedBytes.equals(snapshot.rawBytes) &&
+            postPreserveSnapshot.rawBytes.equals(snapshot.rawBytes)
         }
         if (!staticCopiedOriginal) {
           const confirmSnapshot = await readDesktopConfigSnapshot(file)
-          if (confirmSnapshot.raw !== null && !confirmSnapshot.unparseable) {
+          if (confirmSnapshot.rawBytes !== null && !confirmSnapshot.unparseable) {
             snapshot = confirmSnapshot
             recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
           } else {
@@ -8364,6 +8460,11 @@ async function loadDesktopConfigWithRecovery(
       recovery = { ...recovery, writesBlocked: true }
     }
   }
+  pendingFallbackWriteGuard = recovery.newlyPreserved && !recovery.writesBlocked
+    ? (recovery.preservedMethod === 'copied' && snapshot.rawBytes !== null
+        ? { kind: 'copied', expectedBytes: snapshot.rawBytes, backupPath: recovery.hold }
+        : { kind: 'absent' })
+    : null
   for (const message of snapshot.migrations) onMigrated?.(message)
   desktopConfig = snapshot.config
   configRecoveryHold = Boolean(recovery.hold)

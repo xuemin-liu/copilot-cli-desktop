@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { normalizeBrowserProfileId } from './browser-profile.js'
 import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
-import { writeFileAtomic } from './atomic-file.js'
+import { writeFileAtomic, writeFileExclusive } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isSessionPermissionMode } from './permission-modes.js'
 import { isOtherCli, DEFAULT_REVIEWER_CLIS, type OtherCli } from './session-cli.js'
@@ -334,6 +334,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
 }
 
 export interface DesktopConfigReadSnapshot {
+  rawBytes: Buffer | null
   raw: string | null
   config: DesktopConfig
   migrations: string[]
@@ -342,22 +343,24 @@ export interface DesktopConfigReadSnapshot {
 
 export async function readDesktopConfigSnapshot(filename: string): Promise<DesktopConfigReadSnapshot> {
   const migrations: string[] = []
-  let raw: string | null = null
+  let rawBytes: Buffer | null = null
   try {
-    raw = await readFile(filename, 'utf8')
+    rawBytes = await readFile(filename)
   } catch (error) {
     if (!isMissingPath(error)) throw error
-    return { raw: null, config: normalizeDesktopConfig(null), migrations, unparseable: false }
+    return { rawBytes: null, raw: null, config: normalizeDesktopConfig(null), migrations, unparseable: false }
   }
+  const raw = rawBytes.toString('utf8')
   let parsed: unknown
   try {
     // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
     parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as unknown
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error
-    return { raw, config: normalizeDesktopConfig(null), migrations, unparseable: true }
+    return { rawBytes, raw, config: normalizeDesktopConfig(null), migrations, unparseable: true }
   }
   return {
+    rawBytes,
     raw,
     config: normalizeDesktopConfig(parsed, (message) => { migrations.push(message) }),
     migrations,
@@ -455,4 +458,8 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
 
 export async function writeDesktopConfig(filename: string, config: DesktopConfig): Promise<void> {
   await writeFileAtomic(filename, `${JSON.stringify(config, null, 2)}\n`)
+}
+
+export async function writeDesktopConfigExclusive(filename: string, config: DesktopConfig): Promise<void> {
+  await writeFileExclusive(filename, `${JSON.stringify(config, null, 2)}\n`)
 }
