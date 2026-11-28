@@ -711,3 +711,80 @@ test('the loopback endpoint needs the session’s token and refuses browser-orig
   await h.control.disable('tab')
   assert.equal((await post(port, '/desktop/status', { authorization: `Bearer ${token}` }, '{}')).status, 401)
 })
+
+test('screen-frame keyboardTarget enforces display containment, layout provenance, paint masks, and opaque occlusion while allowing negative coordinates and opaque foreground over blocked desktop', async t => {
+  const h = await harness(t)
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+
+  // 1. Negative display coordinates + blocked desktop behind opaque foreground -> PASSES!
+  const negScreen = { x: -1920, y: -200, width: 1920, height: 1080 }
+  h.host.displays = () => [{ id: 2, bounds: negScreen, scaleFactor: 1, primary: true }]
+  h.native.list = [
+    window('11', NOTEPAD, { x: -1500, y: 0, width: 400, height: 300 }, { className: 'Notepad', opaque: true }),
+    window('1', EXPLORER, negScreen, { className: 'Progman', opaque: true }),
+  ]
+  h.native.front = '11'
+  h.native.focus_ = { pid: 11, password: false }
+  h.answers.push('session')
+  const negShot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  await h.control.handle('tab', 'type', { frameId: negShot.frameId, text: 'hello' })
+  await h.control.handle('tab', 'key', { frameId: negShot.frameId, chord: 'ctrl+s' })
+  assert.deepEqual(h.native.actions.filter(a => !a.startsWith('focus')), ['type hello', 'key 17,83'])
+  h.native.actions.length = 0
+
+  // 2. Unseen modal dialog of the same app opened after screen capture -> REFUSED 409!
+  h.native.list.unshift(window('12', NOTEPAD, { x: -1400, y: 50, width: 200, height: 120 }, { className: '#32770', opaque: true }))
+  h.native.front = '12'
+  h.native.focus_ = { pid: 12, password: false }
+  await assert.rejects(
+    h.control.handle('tab', 'key', { frameId: negShot.frameId, chord: 'enter' }),
+    (err: unknown) => err instanceof DesktopControlError && err.status === 409 && /opened, moved or resized/.test(err.message),
+  )
+  assert.deepEqual(h.native.actions, [])
+
+  // 3. Window straddling display boundary on screen frame -> REFUSED 409 instructing to take a window screenshot!
+  h.host.displays = () => [{ id: 1, bounds: SCREEN, scaleFactor: 1, primary: true }]
+  h.native.list = [window('11', NOTEPAD, { x: 800, y: 100, width: 400, height: 300 }, { className: 'Notepad', opaque: true })]
+  h.native.front = '11'
+  h.native.focus_ = { pid: 11, password: false }
+  const straddleShot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  await assert.rejects(
+    h.control.handle('tab', 'type', { frameId: straddleShot.frameId, text: 'abc' }),
+    (err: unknown) => err instanceof DesktopControlError && err.status === 409 && /not fully inside the captured display.*screenshot of that window/i.test(err.message),
+  )
+  assert.deepEqual(h.native.actions, [])
+
+  // 4. Non-opaque foreground over blocked desktop (painted over in screen capture) -> REFUSED 403 before app prompt!
+  const calc = 'C:\\Windows\\System32\\calc.exe'
+  h.native.list = [
+    window('21', calc, { x: 100, y: 100, width: 400, height: 300 }, { opaque: false }),
+    window('1', EXPLORER, SCREEN, { className: 'Progman', opaque: true }),
+  ]
+  h.native.front = '21'
+  h.native.focus_ = { pid: 21, password: false }
+  const paintedShot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  h.asked.length = 0
+  await assert.rejects(
+    h.control.handle('tab', 'type', { frameId: paintedShot.frameId, text: '123' }),
+    (err: unknown) => err instanceof DesktopControlError && err.status === 403 && /painted over in the screenshot.*screenshot of the window itself/i.test(err.message),
+  )
+  assert.deepEqual(h.asked, [], 'refused before prompting to approve calc')
+  assert.deepEqual(h.native.actions, [])
+
+  // 5. Foreground window completely occluded at capture time by an earlier opaque window -> REFUSED 409!
+  h.native.list = [
+    window('20', 'C:\\Program Files\\Paint\\paint.exe', { x: 50, y: 50, width: 500, height: 500 }, { opaque: true }),
+    window('11', NOTEPAD, { x: 100, y: 100, width: 300, height: 200 }, { className: 'Notepad', opaque: true }),
+  ]
+  h.native.front = '20'
+  const occludedShot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  // Notepad comes to foreground without moving after the screenshot was taken, but it was 100% hidden behind Paint in the screenshot:
+  h.native.front = '11'
+  h.native.focus_ = { pid: 11, password: false }
+  await assert.rejects(
+    h.control.handle('tab', 'key', { frameId: occludedShot.frameId, chord: 'ctrl+a' }),
+    (err: unknown) => err instanceof DesktopControlError && err.status === 409 && /completely covered in the screenshot/.test(err.message),
+  )
+  assert.deepEqual(h.native.actions, [])
+})

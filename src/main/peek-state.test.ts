@@ -105,6 +105,12 @@ test('resolveToolPanelPromptTarget preserves sideChat targeting, excludes tempRe
     resolveToolPanelPromptTarget({ projectProfileId: 'ws-1', activeProfileId: 'ws-1', activeTabId: 'tab-host', sessions: [dormantHost], visibleMain: dormantHost }),
     undefined,
   )
+  // Sandboxed PR review loop tab (`reviewer: true`) is never a prompt target for the shared tools panel:
+  const sandboxedReviewer = makeTab('tab-pr-loop', 'ws-1', { reviewer: true })
+  assert.equal(
+    resolveToolPanelPromptTarget({ projectProfileId: 'ws-1', activeProfileId: 'ws-1', activeTabId: 'tab-pr-loop', sessions: [host, sandboxedReviewer], visibleMain: sandboxedReviewer }),
+    undefined,
+  )
 })
 
 test('reselecting a side chat during a reviewer peek clears the host peek so compact layout shows the side chat and closes it', () => {

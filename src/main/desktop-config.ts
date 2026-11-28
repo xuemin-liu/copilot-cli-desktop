@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { normalizeBrowserProfileId } from './browser-profile.js'
 import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
-import { writeFileAtomic } from './atomic-file.js'
+import { writeFileAtomic, writeFileExclusive } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isSessionPermissionMode } from './permission-modes.js'
 import { isOtherCli, DEFAULT_REVIEWER_CLIS, type OtherCli } from './session-cli.js'
@@ -316,6 +316,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
         : {}),
       ...(typeof tab.autoTitle === 'boolean' ? { autoTitle: tab.autoTitle } : {}),
       ...(tab.renamePending === true ? { renamePending: true as const } : {}),
+      ...(!isOtherCli(tab.cli) && tab.withholdAutoStart === true ? { withholdAutoStart: true as const } : {}),
       ...(typeof tab.launchWorktree === 'boolean' ? { launchWorktree: tab.launchWorktree } : {}),
       ...(typeof tab.launchWorktreePath === 'string' && tab.launchWorktreePath.length > 0 && tab.launchWorktreePath.length <= 4_096
         ? { launchWorktreePath: tab.launchWorktreePath } : {}),
@@ -332,23 +333,50 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
   return tabs
 }
 
+export interface DesktopConfigReadSnapshot {
+  rawBytes: Buffer | null
+  raw: string | null
+  config: DesktopConfig
+  migrations: string[]
+  unparseable: boolean
+}
+
+export async function readDesktopConfigSnapshot(filename: string): Promise<DesktopConfigReadSnapshot> {
+  const migrations: string[] = []
+  let rawBytes: Buffer | null = null
+  try {
+    rawBytes = await readFile(filename)
+  } catch (error) {
+    if (!isMissingPath(error)) throw error
+    return { rawBytes: null, raw: null, config: normalizeDesktopConfig(null), migrations, unparseable: false }
+  }
+  const raw = rawBytes.toString('utf8')
+  let parsed: unknown
+  try {
+    // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as unknown
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+    return { rawBytes, raw, config: normalizeDesktopConfig(null), migrations, unparseable: true }
+  }
+  return {
+    rawBytes,
+    raw,
+    config: normalizeDesktopConfig(parsed, (message) => { migrations.push(message) }),
+    migrations,
+    unparseable: false,
+  }
+}
+
 export async function readDesktopConfig(
   filename: string,
   reportMigration?: (message: string) => void,
   reportUnparseable?: () => void,
 ): Promise<DesktopConfig> {
-  let parsed: unknown
-  try {
-    // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
-    parsed = JSON.parse((await readFile(filename, 'utf8')).replace(/^﻿/, '')) as unknown
-  } catch (error) {
-    if (!isMissingPath(error) && !(error instanceof SyntaxError)) throw error
-    // Distinguish "no config yet" from "config exists but is unreadable" so
-    // callers do not treat the empty default as the user's real state.
-    if (error instanceof SyntaxError) reportUnparseable?.()
-    return normalizeDesktopConfig(null)
-  }
-  return normalizeDesktopConfig(parsed, reportMigration)
+  const snapshot = await readDesktopConfigSnapshot(filename)
+  if (snapshot.unparseable) reportUnparseable?.()
+  for (const message of snapshot.migrations) reportMigration?.(message)
+  return snapshot.config
 }
 
 /** Shared, side-effect-free normalization for startup and migration previews. */
@@ -430,4 +458,8 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
 
 export async function writeDesktopConfig(filename: string, config: DesktopConfig): Promise<void> {
   await writeFileAtomic(filename, `${JSON.stringify(config, null, 2)}\n`)
+}
+
+export async function writeDesktopConfigExclusive(filename: string, config: DesktopConfig): Promise<void> {
+  await writeFileExclusive(filename, `${JSON.stringify(config, null, 2)}\n`)
 }

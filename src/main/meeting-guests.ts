@@ -188,9 +188,9 @@ export class GuestMailbox {
     this.changed()
   }
 
-  /** The message `next` handed out and nothing has answered yet. */
+  /** The message `next` handed out and nothing has answered yet, ignoring superseded items `take` would replace. */
   given(seatId: string): MeetingDelivery | null {
-    return this.queues.get(seatId)?.given ?? null
+    return this.activeGiven(seatId)
   }
 
   /** The seat a token belongs to, or null. Looked up by hash, so the time taken says nothing about the token. */
@@ -284,10 +284,56 @@ export class GuestMailbox {
     return this.spent.has(seatId) && !this.watching(seatId)
   }
 
-  /** The message handed out is one a reviewer's meeting has stopped waiting for, and a newer one is queued behind it. */
+  /** A host digest or reminder that its meeting no longer awaits. */
+  private staleHostNotice(seatId: string, item: MeetingDelivery | null | undefined): boolean {
+    return Boolean(item && (item.kind === 'digest' || item.kind === 'reminder') && this.stale(seatId, item))
+  }
+
+  /** Whether `items` holds at least one message `take` would hand out (side-effect-free). */
+  private hasDeliverableIn(seatId: string, items: readonly MeetingDelivery[]): boolean {
+    return items.some((item) => !this.staleHostNotice(seatId, item))
+  }
+
+  /** The message handed out is one a reviewer's meeting has stopped waiting for, and a deliverable one is queued behind it. */
   private passedOver(seatId: string, queue: Queue | undefined): boolean {
     const given = queue?.given
-    return Boolean(given && queue!.items.length && (given.kind === 'post' || given.kind === 'vote' || given.kind === 'discussion') && this.stale(seatId, given))
+    return Boolean(
+      given
+      && (given.kind === 'post' || given.kind === 'vote' || given.kind === 'discussion')
+      && this.stale(seatId, given)
+      && this.hasDeliverableIn(seatId, queue!.items),
+    )
+  }
+
+  /** The currently handed-out message if still active (neither a stale host notice nor a passed-over reviewer prompt). */
+  private activeGiven(seatId: string): MeetingDelivery | null {
+    const queue = this.queues.get(seatId)
+    const given = queue?.given ?? null
+    if (!given) return null
+    if (this.staleHostNotice(seatId, given) || this.passedOver(seatId, queue)) return null
+    return given
+  }
+
+  /** Whether `take` would return a message right now, without mutating `given` or `items`. */
+  hasDeliverable(seatId: string): boolean {
+    const queue = this.queues.get(seatId)
+    if (!queue) return false
+    return this.activeGiven(seatId) !== null || this.hasDeliverableIn(seatId, queue.items)
+  }
+
+  /** Clear `given` when it is a superseded host `digest` or `reminder`. */
+  pruneStaleHostGiven(seatId: string): void {
+    const queue = this.queues.get(seatId)
+    if (queue?.given && this.staleHostNotice(seatId, queue.given)) {
+      queue.given = null
+    }
+  }
+
+  /** Drop queued host `digest` and `reminder` notices once the host has answered its round. */
+  dropHostNotices(seatId: string, meetingId: string): void {
+    const queue = this.queues.get(seatId)
+    if (!queue) return
+    queue.items = queue.items.filter((item) => item.meetingId !== meetingId || (item.kind !== 'digest' && item.kind !== 'reminder'))
   }
 
   private endWatchers(seatId: string, end: GuestWatchEnd | null): void {
@@ -307,8 +353,8 @@ export class GuestMailbox {
       if (seat.closed !== null) return seat.farewell !== null && quiet > GUEST_WAKE_GRACE_MS
       const queue = this.queues.get(seat.id)
       // One it may be working on gets longer. A message its meeting gave up on is not that: the newer one behind it is owed.
-      if (queue?.given && !this.passedOver(seat.id, queue)) return quiet > GUEST_QUIET_MS
-      return Boolean(queue?.items.length) && quiet > GUEST_WAKE_GRACE_MS
+      if (this.activeGiven(seat.id) !== null) return quiet > GUEST_QUIET_MS
+      return Boolean(queue && this.hasDeliverableIn(seat.id, queue.items)) && quiet > GUEST_WAKE_GRACE_MS
     })
   }
 
@@ -351,8 +397,21 @@ export class GuestMailbox {
   take(seatId: string): MeetingDelivery | null {
     const queue = this.queues.get(seatId)
     if (!queue) return null
-    if (this.passedOver(seatId, queue)) queue.given = null
-    queue.given ??= queue.items.shift() ?? null
+    if (this.staleHostNotice(seatId, queue.given) || this.passedOver(seatId, queue)) {
+      queue.given = null
+    }
+    while (!queue.given && queue.items.length > 0) {
+      const candidate = queue.items.shift()!
+      if (this.staleHostNotice(seatId, candidate)) continue
+      if (
+        (candidate.kind === 'post' || candidate.kind === 'vote' || candidate.kind === 'discussion')
+        && this.stale(seatId, candidate)
+        && this.hasDeliverableIn(seatId, queue.items)
+      ) {
+        continue
+      }
+      queue.given = candidate
+    }
     return queue.given
   }
 
@@ -368,18 +427,22 @@ export class GuestMailbox {
     const queue = this.queues.get(seatId)
     const given = queue?.given ?? null
     if (queue) queue.given = null
+    if (given && this.staleHostNotice(seatId, given)) return null
     return given
   }
 
   /**
    * Waits up to `ms` for a message (or the seat's end); true when something arrived. One wait per seat: a newer call ends an
-   * older one (a harness that retried after its tool call timed out), and `signal` ends it when its client goes away. A
-   * message handed out meanwhile stays given, so whichever call comes next gets it.
+   * older one (a harness that retried after its tool call timed out), and `signal` ends it when its client goes away. Queued
+   * messages stay in `items` until `read`/`take` claims one for a live caller.
    */
   wait(seatId: string, ms: number, signal?: AbortSignal): Promise<boolean> {
-    if (this.take(seatId) || this.seats.get(seatId)?.closed !== null) return Promise.resolve(true)
+    if (signal?.aborted) {
+      this.waiters.get(seatId)?.cancel()
+      return Promise.resolve(false)
+    }
+    if (this.hasDeliverable(seatId) || this.seats.get(seatId)?.closed !== null) return Promise.resolve(true)
     this.waiters.get(seatId)?.cancel()
-    if (signal?.aborted) return Promise.resolve(false)
     return new Promise((resolveWait) => {
       let cancelTimer = (): void => {}
       const done = (arrived: boolean): void => {
@@ -619,7 +682,9 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       const longest = via === 'mcp' ? GUEST_MCP_WAIT_SECONDS : GUEST_MAX_WAIT_SECONDS
       if (!Number.isFinite(wait) || wait < 1 || wait > longest) return { ok: false, message: `The wait takes 1 to ${longest} seconds.` }
       // A host asking for the same replies again has let its turn pass without answering them, as a Copilot host's turn
-      // ends: the hub reminds it once, then pauses the meeting.
+      // ends: the hub reminds it once, then pauses the meeting. Superseded host notices (from a round already answered or
+      // replaced by a manual Remind) are cleared first so they never count as unanswered.
+      if (seat.kind === 'host') mailbox.pruneStaleHostGiven(seat.id)
       const unanswered = seat.kind === 'host' ? mailbox.given(seat.id) : null
       if (unanswered && (unanswered.kind === 'digest' || unanswered.kind === 'reminder')) {
         mailbox.answer(seat.id)
@@ -677,6 +742,7 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       if (!answer.ok) return { ok: false, message: outsideHostWords(answer.message, via) }
       // The replies it had are answered; that turn of the host's is over.
       const answered = mailbox.answer(seat.id)
+      mailbox.dropHostNotices(seat.id, seat.meetingId)
       if (answered) deps.turnCompleted(seat, answered, '')
       return { ok: true, message: outsideHostWords(answer.message, via) }
     }

@@ -10,7 +10,7 @@ export interface StoppedNoticeContent {
   showLog: boolean
 }
 
-type NoticeTab = Pick<DesktopSessionTab, 'status' | 'remote'>
+type NoticeTab = Pick<DesktopSessionTab, 'status' | 'remote' | 'tempReviewer' | 'reviewer'>
 
 /** A session without a process: its terminal takes no input until it is resumed or restarted. */
 export function sessionStopped(tab: NoticeTab): boolean {
@@ -24,6 +24,22 @@ export function stoppedNoticeContent(tab: NoticeTab): StoppedNoticeContent | nul
   if (!sessionStopped(tab)) return null
   // A remote tab cannot be restarted here. Only its connection is known to have ended, not the remote session.
   if (tab.remote) return { heading: 'The connection to this remote session ended', text: 'Close this tab and connect again to continue.', action: null, showLog: false }
+  if (tab.tempReviewer) {
+    return {
+      heading: tab.status === 'crashed' ? 'This reviewer stopped unexpectedly' : 'This reviewer session has ended',
+      text: 'Use Retry in the reviewers bar to start it again, or Dismiss to close it.',
+      action: null,
+      showLog: tab.status === 'crashed',
+    }
+  }
+  if (tab.reviewer) {
+    return {
+      heading: tab.status === 'crashed' ? 'This review session stopped unexpectedly' : 'This review session has ended',
+      text: 'Close this tab and start a new review to continue.',
+      action: null,
+      showLog: tab.status === 'crashed',
+    }
+  }
   if (tab.status === 'dormant') return { heading: 'This session is not running', text: 'Resume to start it again.', action: 'Resume session', showLog: false }
   if (tab.status === 'crashed') return { heading: 'This session stopped unexpectedly', text: 'Restart to start it again.', action: 'Restart session', showLog: true }
   return { heading: 'This session has ended', text: 'Restart to start it again.', action: 'Restart session', showLog: false }

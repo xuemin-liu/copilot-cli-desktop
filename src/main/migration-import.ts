@@ -76,6 +76,7 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
   const plan: ImportPlan = { preview: { id: randomUUID(), changes: [], projects: archive.manifest.projects, mappings: { ...mappings }, warnings: [...archive.manifest.warnings] }, writes: [], fingerprints: new Map(), directoryFingerprints: new Map(), usage: null }
   const selected = new Set(choices.categories), replace = new Set(choices.replace)
   const groups = new Set<string>()
+  const groupRoots = new Set<string>()
   const targets = new Set<string>()
   const addChange = (id: string, path: string, category: MigrationChange['category'], before: Buffer | null, after: Buffer, detail = '', structured = false): boolean => {
     const identical = before !== null && (structured ? isDeepStrictEqual(JSON.parse(before.toString('utf8')), JSON.parse(after.toString('utf8'))) : digest(before) === digest(after))
@@ -105,6 +106,9 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
       if (groups.has(group)) continue
       groups.add(group)
       const root = target.slice(0, target.length - (file.path.length - group.length))
+      const normalizedRoot = resolve(root).toLowerCase()
+      if (groupRoots.has(normalizedRoot)) throw new Error('Multiple archive entries map to the same destination')
+      groupRoots.add(normalizedRoot)
       const existing = await directoryFiles(root)
       const existingNames = new Map([...existing.keys()].map((name) => [resolve(name).toLowerCase(), name]))
       const incoming = archive.files.filter((candidate) => candidate.path.startsWith(`${group}/`))

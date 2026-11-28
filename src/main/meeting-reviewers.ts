@@ -157,6 +157,11 @@ export class MeetingReviewerRegistry {
     if (!group || !seat) throw new MeetingReviewerError('That reviewer seat is not in this run.')
     group.seats.delete(seatId)
     seat.lifecycle = 'stopped'
+    if (group.seats.size === 0 && group.stage !== 'ended') {
+      group.stage = 'ended'
+      group.outcome = 'stopped'
+      group.notice = 'All hidden reviewers were dismissed; the meeting continues without them.'
+    }
     return seat
   }
 

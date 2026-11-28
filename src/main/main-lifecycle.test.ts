@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -89,6 +91,36 @@ interface Harness {
   workflowBroadcastReads(active:boolean):number
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
+  launchRuleEvent(rule:{id:string;revision:string;projectId:string;repository:string;scopeKey?:string},eventKey:string,version:string,title:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
+  interruptAutomaticTurn(tabId:string):void
+  pauseAutomaticProject(projectId?:string):void
+  setGithubApi(fn:((path:string,paged?:boolean)=>Promise<unknown>)|null):void
+  setProjectOriginOverride(origin:string|null):void
+  startPrReviewForTest(url:string,profileId?:string):Promise<{profileId:string}>
+  sweepReviewerAreasForTest():Promise<void>
+  openFollowupsForTest():Promise<import('./workflow-followups.js').WorkflowFollowups>
+  seedHeldInputForTest(tabId:string,items:string[]):void
+  readHeldInputForTest(tabId:string):string[]|undefined
+  reviewerTaskHas(taskId:string):boolean
+  reservationList():import('./pr-review-reservations.js').ReviewReservation[]
+  setupHiddenMeetingReviewerForTest(options: { profileId: string; projectPath: string; commit: string | null; cli?: 'claude' | 'codex' }): Promise<{
+    meetingId: string
+    groupId: string
+    seatId: string
+    guestSeatId: string
+    tabId: string | null
+    checkoutPath: string | null
+  }>
+  setupTempReviewerForTest(options: { profileId: string; projectPath: string; commit: string; cli?: 'claude' | 'codex' }): Promise<{
+    groupId: string
+    seatId: string
+    tabId: string
+    checkoutPath: string
+  }>
+  seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
+  resetRuntimeForColdStartForTest(): Promise<void>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void>; beforeFallbackCopy?: () => Promise<void>; betweenLoadAndStartupSave?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
+  meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   holdMeetingWrite(predicate:(path:string)=>boolean,work:()=>Promise<void>,started?:()=>void):void
@@ -103,7 +135,7 @@ interface Harness {
   corruptHandoff(tabId:string,corrupt?:boolean):void
   followupReadyFor(tabId:string):boolean
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
-  configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
+  configureBinding(tabId: string, rootPid: number, ownedPids: number[], envOverride?: NodeJS.ProcessEnv): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
   queueMeetingDelivery(tabId: string, kind: 'post' | 'add-dir',text?:string): void
@@ -292,6 +324,30 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           return real.writeMeetingFile(root, meetingId, path, text);
         }
       `,
+      './workflow-github.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'workflow-github.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'workflow-github.js'))};
+        let customApi = null;
+        export function setTestGithubApi(fn) { customApi = fn; }
+        export async function githubCliApi(dir) {
+          if (customApi) return customApi;
+          return real.githubCliApi(dir);
+        }
+        export async function githubCliWrite(dir) {
+          if (customApi) return async (_method, path) => ({ id: 9001, html_url: 'https://github.com/owner/repo/pull/1#r9001', path });
+          return real.githubCliWrite(dir);
+        }
+      `,
+      './pr-review-launch.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'pr-review-launch.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'pr-review-launch.js'))};
+        let originOverride = null;
+        export function setTestProjectOrigin(value) { originOverride = value; }
+        export async function projectOrigin(runner, project, repository) {
+          if (originOverride !== null) return originOverride;
+          return real.projectOrigin(runner, project, repository);
+        }
+      `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
@@ -321,6 +377,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
         import { holdMeetingWrite } from './meeting-session.js';
+        import { setTestGithubApi } from './workflow-github.js';
+        import { setTestProjectOrigin } from './pr-review-launch.js';
         import { browserStorageClears } from 'electron';
         import { SessionBindingReader as BindingReaderForTest } from './session-binding.js';
         const diagnosticWrites = [];
@@ -403,6 +461,266 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             const rule={id:randomUUID(),revision:randomUUID(),projectId,repository:'owner/repo',scopeKey:automationScope(projectId)};
             return launchAutomationTask(rule,{key:'github/owner/repo/issue/1',version:'a'.repeat(64),actorId:7,at:Date.now(),title:'Investigate issue',body:'Investigate token=fixture-secret',head,branch:'main'},authorized);
           },
+          launchRuleEvent: (rule,eventKey,version,title,head,authorized) => {
+            app.isReady=()=>true;state.resolution.version='1.0.105';refreshCopilotResolutionIfChanged=async()=>{};workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
+            return launchAutomationTask({...rule,scopeKey:rule.scopeKey??automationScope(rule.projectId)},{key:eventKey,version,actorId:7,at:Date.now(),title,body:'Investigate concurrent run',head,branch:'main'},authorized);
+          },
+          interruptAutomaticTurn: (tabId) => {
+            const run = automaticTurns.get(tabId);
+            if (run) interruptAutomatic(run.grant);
+          },
+          pauseAutomaticProject: (projectId) => interruptAutomaticProject(projectId),
+          setGithubApi: (fn) => setTestGithubApi(fn),
+          setProjectOriginOverride: (origin) => setTestProjectOrigin(origin),
+          startPrReviewForTest: (url, profileId) => {
+            app.isReady = () => true;
+            state.resolution.version = '1.0.105';
+            refreshCopilotResolutionIfChanged = async () => {};
+            workflows();
+            deliveryJournal ??= new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite'));
+            return startPrReview(url, profileId);
+          },
+          sweepReviewerAreasForTest: () => { app.isReady = () => true; return sweepReviewerAreas(); },
+          openFollowupsForTest: () => {
+            app.isReady = () => true;
+            workflows();
+            deliveryJournal ??= new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite'));
+            return openFollowups();
+          },
+          seedHeldInputForTest: (tabId, items) => { heldInput.set(tabId, [...items]); },
+          readHeldInputForTest: (tabId) => heldInput.get(tabId),
+          reviewerTaskHas: (taskId) => reviewerTasks.has(taskId),
+          reservationList: () => { app.isReady = () => true; return reviewReservations()?.list() ?? []; },
+          meetingIsGathering: (meetingId) => meetingHub.isGathering(meetingId),
+          setupHiddenMeetingReviewerForTest: async ({ profileId, projectPath, commit, cli = 'claude' }) => {
+            app.isReady = () => true;
+            guestsReady = true;
+            const hostInvite = guestMailbox.invite('', 'Outside Host', null, { kind: 'host', folder: projectPath });
+            const started = meetingHub.start({ tabId: hostInvite.seat.id, title: 'Outside Host (guest)', folder: projectPath }, { topic: 'audit', post: 'Plan v1', changes: null });
+            guestMailbox.started(hostInvite.seat, started.id);
+            meetingHub.hold(started.id);
+            const group = meetingReviewers.create({
+              meetingId: started.id,
+              hostTabId: null,
+              profileId,
+              projectPath,
+              reviewers: [{ id: cli, name: cli, label: 'Claude Code', cli, config: {} }],
+              allowAll: false,
+              ask: false,
+            });
+            const seat = group.seats.get(cli);
+            if (!commit) {
+              return { meetingId: started.id, groupId: group.id, seatId: seat.id, guestSeatId: '', tabId: null, checkoutPath: null };
+            }
+            group.stage = 'starting';
+            group.commit = commit;
+            const store = reviewReservations();
+            const runner = await meetingGitRunner();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            seat.launchId = launchId;
+            seat.area = area;
+            await store.reserve({ launchId, repository: 'meeting/' + started.id, number: 1, reviewer: 'meeting:' + group.id + ':' + seat.id + ':' + seat.generation, project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            await prepareMeetingReviewWorktree(runner, projectPath, area, commit);
+            const { seat: guest } = guestMailbox.invite(started.id, 'Claude Code', null, { managed: true });
+            seat.guestSeatId = guest.id;
+            guestMailbox.joined(guest);
+            meetingHub.join({ tabId: guest.id, title: 'Claude Code (guest)', folder: null }, started.id, { role: null });
+            meetingReviewers.seatJoined(guest.id);
+            const tabId = 'tab-' + (nextTabSequence++);
+            const session = new PtySession({ file: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: area.checkout, env: process.env, spawnPty: spawnNodePty, discoverSessionIdFromOutput: false, monitorSessionPermissions: false, detectApprovals: false });
+            tabsState = createBackgroundTab(tabsState, {
+              id: tabId,
+              title: 'Meeting ' + started.id + ' · Claude Code',
+              cli,
+              workspaceProfileId: profileId,
+              sessionPermissionPreset: null,
+              sessionPermissionMode: null,
+              permissionWarning: null,
+              remote: false,
+              cliVersion: '1.0.0',
+              lastSessionId: null,
+              privateOverrides: true,
+              canFork: false,
+              launchWorktree: false,
+              autoTitle: false,
+              tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: null, cli, repository: 'local', prLabel: 'Meeting ' + started.id, prNumber: null, prUrl: null, meetingId: started.id },
+            });
+            managedTabs.set(tabId, { session });
+            seat.tabId = tabId;
+            wireSessionEvents(tabId, session);
+            await queueTabTransition(tabId, () => session.start());
+            settleMeetingReviewerGate(group);
+            syncTabState();
+            broadcastState();
+            return { meetingId: started.id, groupId: group.id, seatId: seat.id, guestSeatId: guest.id, tabId, checkoutPath: area.checkout };
+          },
+          setupTempReviewerForTest: async ({ profileId, projectPath, commit, cli = 'claude' }) => {
+            app.isReady = () => true;
+            const created = tempReviewers.createGroup({
+              hostTabId: null,
+              hostSessionId: null,
+              profileId,
+              projectPath,
+              repository: 'owner/repo',
+              prLabel: 'PR #1',
+              prNumber: 1,
+              prUrl: 'https://github.com/owner/repo/pull/1',
+              marker: DEFAULT_PR_MARKER,
+              head: commit,
+              base: commit,
+              reviewers: [{ id: cli, name: cli, label: 'Claude Code', tag: '[Claude Code]', cli, config: {} }],
+              allowAll: false,
+              origin: 'https://github.com/owner/repo.git',
+            });
+            const { group } = created;
+            group.consentGranted = true;
+            group.stage = 'active';
+            const seat = group.requiredSeats.get(cli);
+            const store = reviewReservations();
+            const runner = await meetingGitRunner();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            seat.launchId = launchId;
+            seat.area = area;
+            seat.checkedOut = commit;
+            seat.checkedOutBase = commit;
+            await store.reserve({ launchId, repository: 'owner/repo', number: 1, reviewer: 'temp:' + group.id + ':' + seat.id, project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            await prepareMeetingReviewWorktree(runner, projectPath, area, commit);
+            const tabId = 'tab-' + (nextTabSequence++);
+            const session = new PtySession({ file: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: area.checkout, env: process.env, spawnPty: spawnNodePty, discoverSessionIdFromOutput: false, monitorSessionPermissions: false, detectApprovals: false });
+            tabsState = createBackgroundTab(tabsState, {
+              id: tabId,
+              title: 'Review PR #1 · Claude Code',
+              cli,
+              workspaceProfileId: profileId,
+              sessionPermissionPreset: null,
+              sessionPermissionMode: null,
+              permissionWarning: null,
+              remote: false,
+              cliVersion: '1.0.0',
+              lastSessionId: null,
+              privateOverrides: true,
+              canFork: false,
+              launchWorktree: false,
+              autoTitle: false,
+              tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: null, cli, repository: 'owner/repo', prLabel: 'PR #1', prNumber: 1, prUrl: 'https://github.com/owner/repo/pull/1' },
+            });
+            managedTabs.set(tabId, { session });
+            seat.tabId = tabId;
+            seat.lifecycle = 'running';
+            wireSessionEvents(tabId, session);
+            await queueTabTransition(tabId, () => session.start());
+            syncTabState();
+            broadcastState();
+            return { groupId: group.id, seatId: seat.id, tabId, checkoutPath: area.checkout };
+          },
+          seedUnboundReviewReservationForTest: async ({ number, projectPath, isolatedSessionId = null, boundTaskSessionId = null, profileId = 'profile' }) => {
+            app.isReady = () => true;
+            const store = reviewReservations();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            await store.reserve({ launchId, repository: 'owner/repo', number, reviewer: '77', project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            if (isolatedSessionId) {
+              await mkdir(join(area.root, 'home', 'session-state', isolatedSessionId), { recursive: true });
+            }
+            if (boundTaskSessionId) {
+              const task = workflows().submitted(boundTaskSessionId, profileId, 'Review #' + number);
+              await store.bind(launchId, task.id);
+            }
+            collectKnownReviewerSessionIds();
+            return launchId;
+          },
+          resetRuntimeForColdStartForTest: async () => {
+            await stopAllSessions();
+            await configWriteQueue.catch(() => {});
+            tabsState = { tabs: [], activeTabId: null };
+            profilesWithSessionTabs.clear();
+            unrestoredProfileTabs.clear();
+            knownReviewerSessionIds.clear();
+            knownUnboundReviewerReservations.clear();
+            unverifiedProvenanceLaunchIds.clear();
+            currentRunReviewLaunchIds.clear();
+            startupConfigPending = false;
+            legacyTabSanitizationUnflushed = false;
+            configRecoveryHold = false;
+            configWritesBlocked = false;
+            pendingFallbackExclusiveCreate = false;
+            workflowStore?.close();
+            workflowStore = null;
+            workflowError = null;
+            reservations = null;
+            syncTabState();
+          },
+          runStartupConfigAndSweepForTest: async (options = {}) => {
+            app.isReady = () => true;
+            startupConfigPending = true;
+            collectKnownReviewerSessionIds();
+            if (options.earlySweepBeforeConfigRead) {
+              await sweepReviewerAreas();
+            }
+            const recoveryOps = (options.afterRecoveryRevalidation || options.afterBackupRename || options.beforeFallbackCopy) ? (() => {
+              let statFired = false;
+              let renameFired = false;
+              let copyFired = false;
+              return {
+                ...(options.afterRecoveryRevalidation ? {
+                  stat: async (targetPath, ...rest) => {
+                    if (!statFired && String(targetPath).includes('desktop.json.corrupt-') && !existsSync(String(targetPath))) {
+                      statFired = true;
+                      await options.afterRecoveryRevalidation();
+                    }
+                    return stat(targetPath, ...rest);
+                  },
+                } : {}),
+                ...(options.afterBackupRename ? {
+                  rename: async (oldPath, newPath) => {
+                    const { rename: fsRename } = await import('node:fs/promises');
+                    await fsRename(oldPath, newPath);
+                    if (!renameFired && String(oldPath) === configPath()) {
+                      renameFired = true;
+                      await options.afterBackupRename();
+                    }
+                  },
+                } : {}),
+                ...(options.beforeFallbackCopy ? {
+                  rename: async () => {
+                    throw Object.assign(new Error('transient share lock'), { code: 'EBUSY' });
+                  },
+                  copyFile: async (srcPath, destPath, mode) => {
+                    if (!copyFired && String(srcPath) === configPath()) {
+                      copyFired = true;
+                      await options.beforeFallbackCopy();
+                    }
+                    const { copyFile: fsCopyFile } = await import('node:fs/promises');
+                    await fsCopyFile(srcPath, destPath, mode);
+                  },
+                } : {}),
+              };
+            })() : undefined;
+            const { migrated, recovery } = await loadDesktopConfigWithRecovery(undefined, options.betweenReadAndRecovery, recoveryOps);
+            const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
+            if (sanitized) legacyTabSanitizationUnflushed = true;
+            syncWorkspaceState();
+            if (options.betweenLoadAndStartupSave) {
+              await options.betweenLoadAndStartupSave();
+            }
+            const originalPersist = persistConfig;
+            if (options.failSave) {
+              persistConfig = async () => { throw new Error('ENOSPC: simulated settings write failure'); };
+            }
+            try {
+              await saveSettingsAtStartup(migrated || sanitized);
+            } finally {
+              persistConfig = originalPersist;
+              startupConfigPending = false;
+            }
+            await sweepReviewerAreas();
+            return { ...recovery, writesBlocked: configWritesBlocked };
+          },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
             const grant={id:randomUUID(),sessionId:tab.lastSessionId,projectId:tab.workspaceProfileId};
@@ -428,8 +746,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           followupReadyFor: tabId=>{app.isReady=()=>true;const tab=tabsState.tabs.find(t=>t.id===tabId),task=workflows().submitted(tab.lastSessionId,tab.workspaceProfileId,'Readiness fixture');return followupReady({taskId:task.id,sessionId:task.sessionId,projectId:task.projectId})},
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
-          configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
-            copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
+          configureBinding: (tabId, rootPid, pids, envOverride) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
+            copilotSessionRoot(envOverride ?? process.env), rootPid, async () => new Set(pids), () => true); },
           bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
           queueMeetingDelivery: (tabId, kind,text='automatic meeting material') => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text }); },
@@ -475,7 +793,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await desktopControl?.dispose();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();if(prPostTimer){clearInterval(prPostTimer);prPostTimer=null;}if(reviewQueueTimer){clearInterval(reviewQueueTimer);reviewQueueTimer=null;}reviewQueue=null;followups?.close();followups=null;prPosts?.close();prPosts=null;while(sweeping)await new Promise(r=>setTimeout(r,20));automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await desktopControl?.dispose();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -483,7 +801,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
       banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|pr-workflow-skills|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|pr-workflow-skills|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session|workflow-github|pr-review-launch)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
@@ -4759,4 +5077,784 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
     h.shellCalls.slice(beforeSecondLog).some(call => call.action === 'reveal' && call.target.endsWith(`${ws3Rev2Id}.log`)),
     'Show Active Session Log targets the second reviewer selected during startup',
   )
+}))
+
+test('concurrent automation runs under one rule isolate single-run cancellation and send Ctrl+C to both on project pause', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const repo = join(directory, 'auto-repo')
+  await mkdir(repo, { recursive: true })
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'a.txt'), 'one')
+  plain('add', '.')
+  plain('commit', '-qm', 'init')
+  plain('remote', 'add', 'origin', 'https://github.com/owner/repo.git')
+  const head = plain('rev-parse', 'HEAD').trim()
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+
+  const sharedRule = { id: randomUUID(), revision: randomUUID(), projectId: profile.id, repository: 'owner/repo' }
+  const sessionIds = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
+
+  const waitForSpawnOrLaunchError = async (expectedCount: number, launchPromise: Promise<unknown>, label: string): Promise<void> => {
+    let launchError: unknown = null
+    let failed = false
+    void launchPromise.catch((error) => {
+      failed = true
+      launchError = error
+    })
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      if (failed) throw launchError
+      if (h.spawns.length === expectedCount) return
+      await pause(20)
+    }
+    if (failed) throw launchError
+    assert.fail(`Timed out waiting for ${label}`)
+  }
+
+  const startOneRun = async (idx: number, pid: number) => {
+    let authorized = true
+    const launch = h.launchRuleEvent(
+      sharedRule,
+      `github/owner/repo/issue/${idx + 1}`,
+      String(idx + 1).repeat(64),
+      `Investigate #${idx + 1}`,
+      head,
+      () => authorized,
+    )
+    void launch.catch(() => {})
+    try {
+      await waitForSpawnOrLaunchError(idx + 1, launch, `spawn ${idx + 1}`)
+      const spawn = h.spawns[idx]!
+      const stateNow = await h.request('desktop:get-state')
+      const tabId = stateNow.tabs[idx]!.id
+      const wtName = spawn.args.find((a) => a.startsWith('--worktree='))!.slice('--worktree='.length)
+      const worktree = join(`${repo}.worktrees`, wtName)
+      plain('worktree', 'add', '-q', '-b', wtName, worktree, 'HEAD')
+      const sessionId = sessionIds[idx]!
+      const log = join(directory, 'session-state', sessionId, 'events.jsonl')
+      await mkdir(dirname(log), { recursive: true })
+      await writeFile(log, JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } }) + '\n')
+      await writeFile(join(dirname(log), `inuse.${pid}.lock`), '')
+      h.configureBinding(tabId, pid, [pid])
+      spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+      const receipt = await launch
+      await pause(350)
+      return { tabId, spawn, receipt, stopAuth: () => { authorized = false } }
+    } catch (error) {
+      authorized = false
+      await launch.catch(() => {})
+      throw error
+    }
+  }
+
+  // (a) Two concurrent runs under the same rule.revision: interrupting run 1 leaves run 2 untouched.
+  const run1 = await startOneRun(0, 7801)
+  const run2 = await startOneRun(1, 7802)
+  const beforeCancel1 = run1.spawn.written.length
+  const beforeCancel2 = run2.spawn.written.length
+
+  h.interruptAutomaticTurn(run1.tabId)
+  assert.deepEqual(run1.spawn.written.slice(beforeCancel1), ['\x03'], 'timed-out/cancelled run 1 receives Ctrl+C')
+  assert.deepEqual(run2.spawn.written.slice(beforeCancel2), [], 'sibling run 2 under the same rule is not cancelled')
+  const afterSingleCancel = await h.request('desktop:get-state')
+  assert.equal(afterSingleCancel.workflowDeliveries?.find((d) => d.sessionId === sessionIds[0])?.state, 'uncertain')
+  assert.equal(afterSingleCancel.workflowDeliveries?.find((d) => d.sessionId === sessionIds[1])?.state, 'submitted')
+
+  // (b) Project pause sends Ctrl+C to BOTH concurrent runs using each run's own sessionId.
+  const sessionIdsB = ['33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444']
+  sessionIds[0] = sessionIdsB[0]!
+  sessionIds[1] = sessionIdsB[1]!
+  // End run2's previous turn first so project has 2 free automatic slots again:
+  h.pauseAutomaticProject(profile.id)
+  assert.deepEqual(run2.spawn.written.slice(beforeCancel2), ['\x03'], 'project pause sends Ctrl+C to active run 2')
+
+  // Launch two fresh concurrent runs under one rule and pause the project while both are active:
+  await h.request('desktop:close-tab', run1.tabId)
+  await h.request('desktop:close-tab', run2.tabId)
+  h.spawns.length = 0
+  const runA = await startOneRun(0, 7803)
+  const runB = await startOneRun(1, 7804)
+  const beforePauseA = runA.spawn.written.length
+  const beforePauseB = runB.spawn.written.length
+  h.pauseAutomaticProject(profile.id)
+  assert.deepEqual(runA.spawn.written.slice(beforePauseA), ['\x03'], 'project pause interrupts concurrent run A')
+  assert.deepEqual(runB.spawn.written.slice(beforePauseB), ['\x03'], 'project pause interrupts concurrent run B')
+  runA.stopAuth()
+  runB.stopAuth()
+}))
+
+test('sandboxed PR review tabs enforce full isolation, provenance checks, close cleanup, and legacy startup filtering', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const bare = join(directory, 'origin.git')
+  const repo = join(directory, 'review-project')
+  await mkdir(bare, { recursive: true })
+  await mkdir(repo, { recursive: true })
+  execFileSync(gitExe.path, ['init', '--bare', '-q', bare])
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'file.txt'), 'base\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'base')
+  const baseSha = plain('rev-parse', 'HEAD').trim()
+  plain('checkout', '-qb', 'pr-42')
+  await writeFile(join(repo, 'file.txt'), 'pr change\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'pr head')
+  const headSha = plain('rev-parse', 'HEAD').trim()
+  plain('push', '-q', bare, 'main:refs/heads/main', 'pr-42:refs/pull/42/head')
+  execFileSync(gitExe.path, ['config', 'uploadpack.allowAnySHA1InWant', 'true'], { cwd: bare })
+  plain('checkout', '-q', 'main')
+  plain('remote', 'add', 'origin', 'https://github.com/owner/repo.git')
+  h.setProjectOriginOverride(bare)
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  h.createTestWindow()
+  await h.startTestDesktopControl()
+
+  // Open a normal host tab first so we can verify persistProfileTabs active fallback and tool isolation:
+  const hostState = await h.createMain()
+  const hostTabId = hostState.activeTabId!
+  assert.ok(hostState.tabs[0]?.browserProfileId, 'normal tab allocates a browserProfileId')
+
+  h.setGithubApi(async (path) => {
+    if (path === 'user') return { id: 77, login: 'me' }
+    if (path === 'repos/owner/repo/pulls/42') {
+      return {
+        state: 'open',
+        merged: false,
+        user: { id: 77, login: 'me' },
+        head: { sha: headSha, ref: 'pr-42', repo: { full_name: 'owner/repo' } },
+        base: { sha: baseSha, ref: 'main', repo: { full_name: 'owner/repo' } },
+      }
+    }
+    return [[]]
+  })
+
+  const waitSlow = async <T>(probe: () => Promise<T>, accept: (value: T) => boolean, label: string): Promise<T> => {
+    const deadline = Date.now() + 30_000
+    for (;;) {
+      const value = await probe()
+      if (accept(value)) return value
+      if (Date.now() >= deadline) assert.fail(`Timed out waiting for ${label}`)
+      await pause(40)
+    }
+  }
+
+  try {
+    const reviewPromise = h.startPrReviewForTest('https://github.com/owner/repo/pull/42', profile.id)
+    void reviewPromise.catch(() => {})
+    await waitSlow(async () => h.spawns.length, (n) => n === 2, 'sandboxed PR review spawns CLI')
+    const revSpawn = h.spawns[1]!
+    const midState = await h.request('desktop:get-state')
+    const revTab = midState.tabs.find((t) => t.id !== hostTabId)!
+    const reviewSessionId = revTab.lastSessionId!
+    assert.ok(reviewSessionId, 'sandboxed reviewer receives a deterministic sessionId')
+    assert.equal(revTab.reviewer, true, 'startPrReview marks tab.reviewer = true')
+    assert.equal(revTab.canFork, false, 'sandboxed reviewer sets canFork = false')
+    assert.equal(revTab.browserProfileId, undefined, 'sandboxed reviewer never allocates a browserProfileId')
+
+    // Bind the reviewer session inside its own reviewer COPILOT_HOME so startPrReview completes enrollment:
+    const reviewerHome = revSpawn.env?.COPILOT_HOME!
+    assert.ok(reviewerHome, 'sandboxed reviewer uses isolated COPILOT_HOME')
+    const revLog = join(reviewerHome, 'session-state', reviewSessionId, 'events.jsonl')
+    await mkdir(dirname(revLog), { recursive: true })
+    await writeFile(revLog, JSON.stringify({ type: 'session.start', data: { sessionId: reviewSessionId, startTime: new Date().toISOString(), context: { cwd: revSpawn.cwd } } }) + '\n')
+    await writeFile(join(dirname(revLog), 'inuse.8842.lock'), '')
+    h.configureBinding(revTab.id, 8842, [8842], revSpawn.env)
+    await h.refreshRecords(revTab.id)
+    revSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+    await reviewPromise
+    await pause(350)
+
+    // No browser bridge endpoint file was created for the sandboxed reviewer tab:
+    const bridgeFiles = await readdir(join(directory, 'browser-sessions')).catch(() => [] as string[])
+    assert.equal(bridgeFiles.some((entry) => entry.includes(revTab.id)), false, 'sandboxed reviewer never starts a browser bridge')
+
+    // Persisted desktop.json omits tab.reviewer and falls back active=true onto the surviving regular host tab:
+    await h.flushConfig()
+    const savedConfig = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    const savedTabs = savedConfig.profiles.find((p) => p.id === profile.id)!.tabs
+    assert.equal(savedTabs.length, 1, 'sandboxed reviewer tab is never persisted to desktop.json')
+    assert.equal(savedTabs[0]?.active, true, 'persistProfileTabs falls back active=true to regular workspace tab')
+
+    // Reject restart, unload (preserving held input!), forkSideChat (both reviewer and tempReviewer), popOut, browser-show-main, desktop-control, and gitCursorContext:
+    h.seedHeldInputForTest(revTab.id, ['buffered-key'])
+    await assert.rejects(() => h.request('desktop:unload-tab', revTab.id), /cannot be unloaded/)
+    assert.deepEqual(h.readHeldInputForTest(revTab.id), ['buffered-key'], 'rejected unload-tab does not cancel held input')
+    h.seedHeldInputForTest(revTab.id, [])
+
+    await assert.rejects(() => h.request('desktop:restart-tab', revTab.id), /cannot be restarted/)
+    await assert.rejects(() => h.request('desktop:fork-side-chat', revTab.id, reviewSessionId, 'Fork'), /Select a local main Copilot session/)
+    const tempRevId = await h.addBackgroundReviewer(profile.id, hostTabId)
+    await assert.rejects(() => h.request('desktop:fork-side-chat', tempRevId, reviewSessionId, 'Fork'), /Select a local main Copilot session/)
+    await assert.rejects(async () => h.request('desktop:pop-out-tab', revTab.id), /cannot be opened in a separate window/)
+    await assert.rejects(async () => h.request('desktop:browser-show-main', revTab.id), /do not have a tools panel or browser/)
+    await assert.rejects(async () => h.request('desktop:desktop-control-set', revTab.id, true), /sandboxed|Allow desktop control/i)
+    const writeRes = await h.request<{ gitCursorContextAttached: boolean }>('desktop:write-tab', revTab.id, '\r', 'secret host diff')
+    assert.equal(writeRes.gitCursorContextAttached, false)
+    assert.equal(revSpawn.written.some((chunk) => chunk.includes('secret host diff')), false)
+
+    // Menu items Restart Active Session and Unload Active Session are disabled when the sandboxed reviewer is active:
+    h.focusMainWindow(true)
+    await h.request('desktop:activate-tab', revTab.id)
+    h.refreshAppMenu()
+    const findMenuItem = (menuLabel: string, itemLabel: string) => {
+      const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean }> }>
+      return menu.find((item) => item.label === menuLabel)!.submenu!.find((item) => item.label === itemLabel)!
+    }
+    assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false)
+    assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false)
+
+    // Follow-up provenance guard: followups.authorized(grant) is true while bound to the exact sandboxed tab/session,
+    // and immediately becomes false + revokes grant & cleans up the reviewer area when the reviewer tab is closed:
+    const followups = await h.openFollowupsForTest()
+    const revGrant = followups.list().find((g) => g.role === 'reviewer')!
+    assert.ok(revGrant?.enabled)
+    assert.equal(followups.authorized(revGrant), true)
+    const reservationsBeforeClose = h.reservationList()
+    assert.equal(reservationsBeforeClose.length, 1)
+    const reviewerCheckoutPath = reservationsBeforeClose[0]!.checkout
+
+    await h.request('desktop:close-tab', revTab.id)
+    assert.equal(h.reviewerTaskHas(revGrant.taskId), false, 'closing tab.reviewer immediately clears reviewerTasks provenance')
+    assert.equal(followups.grant(revGrant.id)?.enabled, false, 'closing tab.reviewer immediately disables its reviewer grant')
+    assert.equal(followups.authorized(revGrant), false, 'reviewer grant is no longer authorized after tab close')
+
+    // Wait for sweepReviewerAreas triggered by closeSessionTab to remove the reviewer checkout and release the reservation:
+    await waitSlow(async () => h.reservationList().length, (n) => n === 0, 'sweepReviewerAreas releases closed reviewer reservation')
+    assert.equal(existsSync(reviewerCheckoutPath), false, 'closed reviewer worktree directory is removed')
+
+    // Provenance guard after tab close: even if a regular tab reuses reviewSessionId in the reviewer checkout path,
+    // followupPermission and role:'reviewer' re-enrollment are rejected because reviewerTasks no longer authorizes it:
+    await h.request('desktop:close-tab', tempRevId)
+    await h.request('desktop:close-tab', hostTabId)
+
+    // Legacy startup provenance filter: if an older version persisted a reviewer sessionId in desktop.json (both in an
+    // active workspace that becomes empty and an inactive workspace), restoreSavedWorkspaceTabs filters them out,
+    // opens a fresh default tab ONLY for the emptied active workspace, leaves the emptied inactive workspace without
+    // spawning a tab, and persists cleaned empty profile.tabs!
+    const inactiveRepo = join(directory, 'inactive-project')
+    await mkdir(inactiveRepo, { recursive: true })
+    const inactiveProfile = createWorkspaceProfile(inactiveRepo, 'default')
+    profile.tabs = [{ title: 'Review #42', lastSessionId: reviewSessionId, active: true }]
+    inactiveProfile.tabs = [{ title: 'Review #42', lastSessionId: reviewSessionId, active: true }]
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile, inactiveProfile], activeProfileId: profile.id }, capabilities)
+    const spawnsBeforeRestore = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+
+    const afterLegacyRestore = await h.request('desktop:get-state')
+    assert.equal(
+      afterLegacyRestore.tabs.some((t) => t.lastSessionId === reviewSessionId || t.title === 'Review #42'),
+      false,
+      'legacy saved reviewer tabs are filtered out on startup restore',
+    )
+    assert.equal(
+      afterLegacyRestore.tabs.filter((t) => t.workspaceProfileId === profile.id).length,
+      1,
+      'emptied active workspace falls through to opening one fresh default tab',
+    )
+    assert.equal(
+      afterLegacyRestore.tabs.filter((t) => t.workspaceProfileId === inactiveProfile.id).length,
+      0,
+      'emptied inactive workspace does not spawn a live tab during background restore',
+    )
+    assert.equal(h.spawns.length - spawnsBeforeRestore, 1, 'only the active workspace spawned a fresh session')
+    const cleanedConfig = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(cleanedConfig.profiles.find((p) => p.id === inactiveProfile.id)?.tabs, [], 'cleaned inactive profile.tabs is persisted')
+    assert.equal(
+      cleanedConfig.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === reviewSessionId),
+      false,
+      'cleaned active profile.tabs no longer contains the legacy reviewer sessionId',
+    )
+
+    // Unbound pre-beforePaste legacy crash handling:
+    // 1) An unbound reservation whose isolated <root>/home/session-state/<uuid> exists has reviewer-specific evidence
+    //    and is removed on startup restore.
+    // 2) An ambiguous same-title saved tab ("Review #99" with autoTitle: false, launchWorktree: false, and no
+    //    events.jsonl yet — e.g., an ordinary New Session tab saved before its first prompt alongside an unbound PR #99
+    //    reservation) is RETAINED in the saved profile as dormant while withholding automatic launch on startup.
+    // 3) A genuine user session stored in normal COPILOT_HOME/session-state/<uuid>/events.jsonl named "Review #99"
+    //    is preserved and still eligible for automatic startup launch!
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
+    const isolatedUnboundUuid = '11111111-2222-4333-8444-555555555555'
+    const ambiguousSameTitleUuid = '22222222-3333-4444-8555-666666666666'
+    const genuineUserUuid = '33333333-4444-4555-8666-777777777777'
+
+    // First verify:
+    // - Launch 0 where saveSettingsAtStartup FAILS (ENOSPC): sweepReviewerAreas preserves BOTH a task-bound
+    //   reservation without a follow-up grant AND an unbound reservation on disk while desktop.json remains unsaved.
+    // - Launch 1 where Copilot CLI resolution FAILS (restoreSaved does nothing) and saveSettingsAtStartup succeeds:
+    //   desktop.json removes both the task-bound and isolated-home reviewer tabs and persists withholdAutoStart: true
+    //   BEFORE sweepReviewerAreas releases all three reservations!
+    const boundNoFollowupUuid = '44444444-5555-4666-8777-888888888888'
+    profile.tabs = [
+      { title: 'Review #97', lastSessionId: boundNoFollowupUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
+    ]
+    await (await import('./desktop-config.js')).writeDesktopConfig(join(directory, 'desktop.json'), {
+      ...DEFAULT_DESKTOP_CONFIG,
+      profiles: [profile],
+      activeProfileId: profile.id,
+    })
+    await h.resetRuntimeForColdStartForTest()
+    await h.seedUnboundReviewReservationForTest({ number: 97, projectPath: repo, boundTaskSessionId: boundNoFollowupUuid, profileId: profile.id })
+    await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
+    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+
+    // First verify mid-run sweep gap: if backup is restored & removed while Desktop is still running,
+    // periodic sweep still holds reservations until startup/reload reads and saves the sanitized config.
+    const validRawConfig = await readFile(join(directory, 'desktop.json'), 'utf8')
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch = await h.runStartupConfigAndSweepForTest({ earlySweepBeforeConfigRead: true })
+    assert.ok(recoveryOnCorruptLaunch.hold, 'corrupt desktop.json was preserved under a settings recovery hold')
+    assert.equal(recoveryOnCorruptLaunch.writesBlocked, false, 'settings writes are allowed while recovery hold is active')
+    assert.equal(h.reservationList().length, 3, 'early pre-read sweep and recovery-hold launch both preserve all reviewer reservations')
+
+    // Re-create the active recovery-hold state (fallback desktop.json with current lastRunVersion + backup file + marker)
+    // and test TWO recovery paths:
+    // Path A: Mid-run sweep after backup removal holds reservations until restart.
+    const fallbackSavedOnCorruptLaunch = await readFile(join(directory, 'desktop.json'), 'utf8')
+    await writeFile(join(directory, 'desktop.json'), validRawConfig)
+    await rm(recoveryOnCorruptLaunch.hold!, { force: true })
+    await h.sweepReviewerAreasForTest()
+    assert.equal(h.reservationList().length, 3, 'mid-run sweep after backup removal still holds reservations until config is reloaded')
+
+    // Path B: Overlap during startup itself — fallback desktop.json (already recording current app version!) is read first,
+    // then between readDesktopConfig and resolveConfigRecovery the user replaces desktop.json with the repaired config
+    // (also recording current app version, so saveSettingsAtStartup would skip writing if not re-read & sanitized!) and
+    // removes the backup:
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-2>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch2 = await h.runStartupConfigAndSweepForTest()
+    assert.ok(recoveryOnCorruptLaunch2.hold, 'second corrupt launch established recovery hold with current-version fallback desktop.json')
+    const repairedSameVersionRaw = JSON.stringify({
+      ...JSON.parse(fallbackSavedOnCorruptLaunch),
+      profiles: [profile],
+      activeProfileId: profile.id,
+    }, null, 2) + '\n'
+
+    // Simulate Launch 0 where restoration happens BETWEEN readDesktopConfig and resolveConfigRecovery, AND save fails (ENOSPC):
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    h.setUnresolvedCopilot()
+    await h.runStartupConfigAndSweepForTest({
+      failSave: true,
+      betweenReadAndRecovery: async () => {
+        await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
+        await rm(recoveryOnCorruptLaunch2.hold!, { force: true })
+      },
+    })
+    assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
+
+    // Verify BOTH post-backup partial-restore transitions when the live file matches the backup:
+    // (1) After a move (`rename`), recreating desktop.json from the backup (identical corrupt bytes) before
+    //     repairing it still blocks settings writes instead of overwriting the recreated file with defaults:
+    const corruptBeforeMove = validRawConfig + '\n<<<corrupt-tail-3>>>'
+    await writeFile(join(directory, 'desktop.json'), corruptBeforeMove)
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnMovedSameBytes = await h.runStartupConfigAndSweepForTest({
+      afterBackupRename: async () => {
+        await writeFile(join(directory, 'desktop.json'), corruptBeforeMove)
+      },
+    })
+    assert.ok(recoveryOnMovedSameBytes.hold, 'moved backup is held')
+    assert.equal(recoveryOnMovedSameBytes.writesBlocked, true, 'settings writes are blocked when desktop.json is recreated from backup after move')
+    assert.equal(recoveryOnMovedSameBytes.newlyPreserved, false)
+    assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), corruptBeforeMove, 'recreated desktop.json remains untouched on disk')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held after post-move recreation')
+    await rm(recoveryOnMovedSameBytes.hold!, { force: true })
+
+    // (2) When `rename` fails transiently (`EBUSY`) and fallback `copyFile` captures new incomplete restore
+    //     bytes (so live file == backup, yet both differ from pre-move bytes), startup still blocks writes:
+    const partialPostRenameRaw = '{\n  "profiles": [\n    { "path": "incomplete'
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-4>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest({
+      beforeFallbackCopy: async () => {
+        await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
+      },
+    })
+    assert.ok(recoveryOnCorruptLaunch3.hold, 'copied backup is held')
+    assert.equal(recoveryOnCorruptLaunch3.writesBlocked, true, 'settings writes are blocked when fallback copy captures new partial restore bytes')
+    assert.equal(recoveryOnCorruptLaunch3.newlyPreserved, false)
+    assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), partialPostRenameRaw, 'in-progress partial restore bytes remain untouched on disk')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held while partial restore is in progress')
+
+    // (2b) Distinct malformed UTF-8 byte sequences (`7b 80` vs `7b 81`) both decode to `"{\uFFFD"` in UTF-8,
+    //      yet raw Buffer comparison detects the replacement before fallback `copyFile` and blocks writes:
+    await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
+    await writeFile(join(directory, 'desktop.json'), Buffer.from([0x7b, 0x80]))
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnMalformedByteShift = await h.runStartupConfigAndSweepForTest({
+      beforeFallbackCopy: async () => {
+        await writeFile(join(directory, 'desktop.json'), Buffer.from([0x7b, 0x81]))
+      },
+    })
+    assert.ok(recoveryOnMalformedByteShift.hold, 'copied backup for 7b 81 is held')
+    assert.equal(recoveryOnMalformedByteShift.writesBlocked, true, 'raw byte comparison blocks fallback write on 7b 80 -> 7b 81')
+    assert.equal((await readFile(join(directory, 'desktop.json'))).equals(Buffer.from([0x7b, 0x81])), true, 'live 7b 81 bytes are not overwritten with defaults')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held after malformed-byte change')
+    await rm(recoveryOnMalformedByteShift.hold!, { force: true })
+
+    // (2c) If a valid restore arrives AFTER `loadDesktopConfigWithRecovery` moved the corrupt file aside
+    //      and BEFORE `saveSettingsAtStartup` publishes fallback defaults, exclusive create (`COPYFILE_EXCL`)
+    //      refuses to clobber the restored file, retains the recovery hold, and reloads & sanitizes the restore:
+    const lateRestoredWithCustomTabsRaw = JSON.stringify({
+      ...JSON.parse(repairedSameVersionRaw),
+      lastRunVersion: null,
+      maxSessionTabs: 17,
+    }, null, 2) + '\n'
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-5>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnLateRestoreBeforeSave = await h.runStartupConfigAndSweepForTest({
+      betweenLoadAndStartupSave: async () => {
+        await writeFile(join(directory, 'desktop.json'), lateRestoredWithCustomTabsRaw)
+      },
+    })
+    assert.ok(recoveryOnLateRestoreBeforeSave.hold, 'moved backup hold is retained when late restore wins before startup save')
+    assert.equal(recoveryOnLateRestoreBeforeSave.writesBlocked, false)
+    const savedAfterLateRestore = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(savedAfterLateRestore.maxSessionTabs, 17, 'restored maxSessionTabs=17 was preserved instead of default 20')
+    assert.equal(savedAfterLateRestore.activeProfileId, profile.id, 'late restore profile was reloaded into desktopConfig')
+    assert.equal(
+      savedAfterLateRestore.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
+      true,
+      'late restore tabs were sanitized before saving',
+    )
+    assert.equal(h.reservationList().length, 3, 'recovery hold stays active until the moved corrupt backup is removed')
+    await rm(recoveryOnLateRestoreBeforeSave.hold!, { force: true })
+
+    // (2d) When `rename` fails with `EBUSY` so the copy fallback leaves an existing destination, startup
+    //      defers publishing defaults and retains the recovery hold, so a restore arriving after recovery
+    //      (`maxSessionTabs: 17`) is never overwritten with defaults (`20`):
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-6>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCopyThenLateRestore = await h.runStartupConfigAndSweepForTest({
+      beforeFallbackCopy: async () => {},
+      betweenLoadAndStartupSave: async () => {
+        await writeFile(join(directory, 'desktop.json'), lateRestoredWithCustomTabsRaw)
+      },
+    })
+    assert.ok(recoveryOnCopyThenLateRestore.hold, 'copied backup hold is retained when copy fallback leaves destination')
+    assert.equal(recoveryOnCopyThenLateRestore.writesBlocked, true, 'publishing defaults is deferred when copy fallback leaves destination')
+    const onDiskAfterCopyLateRestore = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(onDiskAfterCopyLateRestore.maxSessionTabs, 17, 'restored maxSessionTabs=17 was not replaced with default 20')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held under copy-fallback hold')
+
+    await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    h.setUnresolvedCopilot()
+    const spawnsBeforeUnresolvedLaunch = h.spawns.length
+    const recoveryAfterCompletedRestore = await h.runStartupConfigAndSweepForTest({
+      afterRecoveryRevalidation: async () => {
+        await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
+        await rm(recoveryOnCopyThenLateRestore.hold!, { force: true })
+      },
+    })
+    assert.deepEqual(
+      recoveryAfterCompletedRestore,
+      { hold: null, writesBlocked: false, newlyPreserved: false },
+      'completed restore is not moved into a new .corrupt backup',
+    )
+    assert.deepEqual(
+      (await readdir(directory)).filter((name) => name.includes('.corrupt-')),
+      [],
+      'no .corrupt backup files remain after completed restore',
+    )
+    await h.restoreSaved()
+    await h.flushConfig()
+    assert.equal(h.spawns.length, spawnsBeforeUnresolvedLaunch, 'unresolved Launch 1 spawns zero CLI processes')
+    assert.equal(h.reservationList().length, 0, 'Launch 1 sweep released reservations after settings write succeeded')
+    const savedAfterUnresolvedLaunch = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(savedAfterUnresolvedLaunch.activeProfileId, profile.id, 'restored activeProfileId was loaded instead of defaults')
+    assert.equal(
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === boundNoFollowupUuid),
+      false,
+      'Launch 1 removed task-bound reviewer tab without follow-up grant after surviving Launch 0 failed save',
+    )
+    assert.equal(
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid),
+      false,
+      'unresolved Launch 1 removed confirmed isolated-home reviewer tab before sweep',
+    )
+    assert.equal(
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
+      true,
+      'unresolved Launch 1 persisted withholdAutoStart: true onto desktop.json before sweep',
+    )
+
+    // Cold Launch 2 when Copilot CLI resolution SUCCEEDS (after reservations are already gone on disk):
+    // the persisted withholdAutoStart restriction keeps the tab dormant with zero CLI spawns,
+    // until the person explicitly clicks Resume (desktop:restart-tab), which clears withholdAutoStart!
+    await h.resetRuntimeForColdStartForTest()
+    await h.runStartupConfigAndSweepForTest()
+    const reloadedConfig = await (await import('./desktop-config.js')).readDesktopConfig(join(directory, 'desktop.json'))
+    h.configure(reloadedConfig, capabilities)
+    const spawnsBeforeSecondColdStart = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+    const afterSecondColdStart = await h.request('desktop:get-state')
+    const secondColdTab = afterSecondColdStart.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)
+    assert.ok(secondColdTab, 'ambiguous tab remains listed on second cold start after reservation sweep')
+    assert.equal(secondColdTab?.status, 'dormant', 'second cold start keeps tab dormant even after reservation was swept on unresolved Launch 1')
+    assert.equal(h.spawns.length, spawnsBeforeSecondColdStart, 'second cold start spawns zero CLI processes without explicit Resume')
+    await h.request('desktop:restart-tab', secondColdTab!.id)
+    await h.flushConfig()
+    assert.equal(h.spawns.length - spawnsBeforeSecondColdStart, 1, 'explicit Resume launches the session')
+    const savedAfterExplicitResume = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterExplicitResume.profiles.find((p) => p.id === profile.id)?.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)?.withholdAutoStart,
+      undefined,
+      'explicit Resume clears withholdAutoStart in desktop.json',
+    )
+
+    // Next verify mixed restore alongside a genuine stored user session named "Review #99":
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
+    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+    const genuineLog = join(directory, 'session-state', genuineUserUuid, 'events.jsonl')
+    await mkdir(dirname(genuineLog), { recursive: true })
+    await writeFile(genuineLog, JSON.stringify({ type: 'session.start', data: { sessionId: genuineUserUuid, startTime: new Date().toISOString(), context: { cwd: repo } } }) + '\n')
+
+    profile.tabs = [
+      { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false },
+    ]
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    const spawnsBeforeMixed = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+    const afterMixedRestore = await h.request('desktop:get-state')
+    assert.equal(afterMixedRestore.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)?.status, 'dormant', 'ambiguous tab stays dormant')
+    assert.equal(afterMixedRestore.tabs.some((t) => t.lastSessionId === genuineUserUuid), true, 'genuine stored user session titled Review #99 is preserved')
+    assert.equal(h.spawns.length - spawnsBeforeMixed, 1, 'non-ambiguous stored user session starts automatically')
+    await h.sweepReviewerAreasForTest()
+
+    // Finally verify startup resilience when `workflows.sqlite` contains a malformed unrelated task row
+    // alongside a valid bound reviewer reservation (and when task session lookup itself fails):
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
+    await h.flushConfig()
+    const boundMalformedTestUuid = '88888888-8888-4888-8888-888888888888'
+    await h.seedUnboundReviewReservationForTest({
+      number: 96,
+      projectPath: repo,
+      boundTaskSessionId: boundMalformedTestUuid,
+      profileId: profile.id,
+    })
+    profile.tabs = [
+      { title: 'Review #96', lastSessionId: boundMalformedTestUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false },
+    ]
+    await writeFile(
+      join(directory, 'desktop.json'),
+      JSON.stringify({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, null, 2) + '\n',
+    )
+    await h.resetRuntimeForColdStartForTest()
+    const { DatabaseSync } = await import('node:sqlite')
+    const workflowDbPath = join(directory, 'workflows.sqlite')
+    const rawWorkflowDb = new DatabaseSync(workflowDbPath)
+    try {
+      rawWorkflowDb.prepare('INSERT INTO tasks(id, session, active, value) VALUES (?, ?, 1, ?)')
+        .run(randomUUID(), randomUUID(), '{malformed-unrelated-task-payload')
+    } finally {
+      rawWorkflowDb.close()
+    }
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const seededFixtureBeforeStartup = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(
+      seededFixtureBeforeStartup.profiles.find((p) => p.id === profile.id)?.tabs.map((t) => t.lastSessionId),
+      [boundMalformedTestUuid, genuineUserUuid],
+      'cold-start fixture retains both seeded tab session IDs before startup runs',
+    )
+    await h.runStartupConfigAndSweepForTest()
+    const savedAfterMalformedTaskStartup = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterMalformedTaskStartup.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === boundMalformedTestUuid),
+      false,
+      'direct session column lookup sanitized bound reviewer tab despite malformed unrelated workflow task',
+    )
+    assert.equal(
+      savedAfterMalformedTaskStartup.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === genuineUserUuid),
+      true,
+      'genuine user session tab survived startup with malformed unrelated workflow task',
+    )
+    assert.equal(h.reservationList().length, 0, 'bound reservation swept cleanly after sanitization succeeded')
+
+    // Also verify that if the reserved task session lookup itself fails (unreadable/corrupt workflows.sqlite),
+    // startup continues cleanly, holds the affected reservation, and once a subsequent sweep resolves the
+    // session ID it removes the tab from live restore state and keeps it out of later tab saves:
+    const unverifiedLookupUuid = '99999999-9999-4999-8999-999999999999'
+    await h.seedUnboundReviewReservationForTest({
+      number: 95,
+      projectPath: repo,
+      boundTaskSessionId: unverifiedLookupUuid,
+      profileId: profile.id,
+    })
+    profile.tabs = [
+      { title: 'Review #95', lastSessionId: unverifiedLookupUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false, active: true },
+    ]
+    await writeFile(
+      join(directory, 'desktop.json'),
+      JSON.stringify({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, null, 2) + '\n',
+    )
+    await h.resetRuntimeForColdStartForTest()
+    const validWorkflowDbBytes = await readFile(workflowDbPath)
+    await writeFile(workflowDbPath, 'corrupt-sqlite-header')
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    await h.runStartupConfigAndSweepForTest()
+    assert.equal(
+      h.reservationList().some((r) => r.number === 95),
+      true,
+      'affected reservation is held when workflows.sqlite lookup fails at startup',
+    )
+    await h.restoreSaved()
+    await h.flushConfig()
+    assert.equal(
+      (await h.request('desktop:get-state')).tabs.some((t) => t.lastSessionId === unverifiedLookupUuid && t.status === 'dormant'),
+      true,
+      'unverified same-title tab stays dormant while provenance lookup is unavailable',
+    )
+
+    // Restore valid workflows.sqlite so the next sweep resolves `unverifiedLookupUuid`, removes the live tab,
+    // releases the reservation, and keeps `unverifiedLookupUuid` out of subsequent tab saves:
+    await writeFile(workflowDbPath, validWorkflowDbBytes)
+    await h.sweepReviewerAreasForTest()
+    await h.flushConfig()
+    const stateAfterLateLookupSweep = await h.request('desktop:get-state')
+    assert.equal(
+      stateAfterLateLookupSweep.tabs.some((t) => t.lastSessionId === unverifiedLookupUuid),
+      false,
+      'late-resolved reviewer tab is removed from live tabsState before reservation release',
+    )
+    assert.equal(h.reservationList().some((r) => r.number === 95), false, 'reservation released after live and saved state were sanitized')
+    const remainingUserTab = stateAfterLateLookupSweep.tabs.find((t) => t.lastSessionId === genuineUserUuid)
+    assert.ok(remainingUserTab)
+    await h.request('desktop:activate-tab', remainingUserTab!.id)
+    await h.flushConfig()
+    const savedAfterSubsequentTabSave = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterSubsequentTabSave.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === unverifiedLookupUuid),
+      false,
+      'subsequent tab save never writes the purged reviewer session back into desktop.json',
+    )
+  } finally {
+    h.setGithubApi(null)
+    h.setProjectOriginOverride(null)
+  }
+}))
+
+test('hidden meeting reviewers link desktopTabId without tab tags, release held Round 1 on 0-seat dismiss, and serialize overlapping close-tab + stop teardown', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const repo = join(directory, 'meeting-repo')
+  await mkdir(repo, { recursive: true })
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'doc.md'), 'v1\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'init')
+  const head = plain('rev-parse', 'HEAD').trim()
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  h.createTestWindow()
+
+  // 1. Dismissing the last remaining seat during `'consent'` ends the group, releases Round 1 (`isGathering === false`),
+  //    and leaves the meeting itself open!
+  const consentRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: null })
+  assert.equal(h.meetingIsGathering(consentRun.meetingId), true, 'Round 1 starts held while hidden reviewers are in consent')
+  const afterDismissConsent = await h.request('desktop:temp-reviewer-action', consentRun.groupId, 'dismiss', consentRun.seatId)
+  assert.equal(h.meetingIsGathering(consentRun.meetingId), false, 'dismissing last seat releases held Round 1 immediately')
+  const endedGroupView = afterDismissConsent.tempReviewerGroups?.find((g) => g.id === consentRun.groupId)
+  assert.equal(endedGroupView?.stage, 'ended')
+  assert.equal(endedGroupView?.outcome, 'stopped')
+  assert.equal(afterDismissConsent.meetings?.find((m) => m.id === consentRun.meetingId)?.stage, 'waiting', 'meeting stays open after all hidden reviewers are dismissed')
+  await h.request('desktop:meeting-action', consentRun.meetingId, 'stop')
+  await h.request('desktop:temp-reviewer-action', consentRun.groupId, 'dismiss-ended')
+
+  // 2. Live hidden non-Copilot reviewer links `participant.desktopTabId` via `meetingReviewers.seatByGuest`,
+  //    and overlapping `desktop:close-tab` + `desktop:temp-reviewer-action` `'stop'` completes without deadlock or orphaned worktrees:
+  const liveRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  const liveState = await h.request('desktop:get-state')
+  const meetingView = liveState.meetings!.find((m) => m.id === liveRun.meetingId)!
+  const participantView = meetingView.participants.find((p) => p.tabId === liveRun.guestSeatId)!
+  assert.equal(participantView.desktopTabId, liveRun.tabId, 'tabOfSeat falls back to meetingReviewers.seatByGuest(partyId)?.seat.tabId')
+  assert.equal(existsSync(liveRun.checkoutPath!), true)
+
+  // Fire manual tab close AND ReviewerBar Stop concurrently:
+  await Promise.all([
+    h.request('desktop:close-tab', liveRun.tabId!),
+    h.request('desktop:temp-reviewer-action', liveRun.groupId, 'stop'),
+  ])
+  const afterOverlap = await h.request('desktop:get-state')
+  assert.equal(afterOverlap.tabs.some((t) => t.id === liveRun.tabId), false, 'reviewer tab closed cleanly')
+  assert.equal(existsSync(liveRun.checkoutPath!), false, 'reviewer worktree removed cleanly without race failure')
+  assert.equal(h.reservationList().length, 0, 'reviewer reservation released cleanly')
+  await h.request('desktop:meeting-action', liveRun.meetingId, 'stop')
+
+  // 3. Delayed tab close during Retry overlapping with Stop (both meetingReviewers and tempReviewers):
+  //    Stop must await the in-flight tab closure before removing the reviewer checkout or resolving!
+  const delayedMeetingRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  let releaseMeetingStop!: () => void
+  let meetingStopEntered = false
+  const holdMeetingStop = new Promise<void>((resolveHold) => { releaseMeetingStop = resolveHold })
+  h.blockSessionStop(delayedMeetingRun.tabId!, holdMeetingStop, () => { meetingStopEntered = true })
+  const meetingRetry = h.request('desktop:temp-reviewer-action', delayedMeetingRun.groupId, 'retry', delayedMeetingRun.seatId)
+  void meetingRetry.catch(() => {})
+  await waitFor(async () => meetingStopEntered, Boolean, 'meeting Retry entered session.stop')
+  let meetingStopDone = false
+  const meetingStop = h.request('desktop:temp-reviewer-action', delayedMeetingRun.groupId, 'stop').then((res) => { meetingStopDone = true; return res })
+  await pause(80)
+  assert.equal(meetingStopDone, false, 'meeting Stop waits for Retry in-flight tab close before resolving')
+  assert.equal(existsSync(delayedMeetingRun.checkoutPath!), true, 'meeting checkout is not removed while Retry tab close is still in flight')
+  releaseMeetingStop()
+  await Promise.allSettled([meetingRetry, meetingStop])
+  assert.equal(meetingStopDone, true)
+  assert.equal(existsSync(delayedMeetingRun.checkoutPath!), false, 'meeting checkout removed after in-flight tab close finishes')
+  await h.request('desktop:meeting-action', delayedMeetingRun.meetingId, 'stop')
+
+  const delayedTempRun = await h.setupTempReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  let releaseTempStop!: () => void
+  let tempStopEntered = false
+  const holdTempStop = new Promise<void>((resolveHold) => { releaseTempStop = resolveHold })
+  h.blockSessionStop(delayedTempRun.tabId, holdTempStop, () => { tempStopEntered = true })
+  const tempRetry = h.request('desktop:temp-reviewer-action', delayedTempRun.groupId, 'retry', delayedTempRun.seatId)
+  void tempRetry.catch(() => {})
+  await waitFor(async () => tempStopEntered, Boolean, 'temp Retry entered session.stop')
+  let tempStopDone = false
+  const tempStop = h.request('desktop:temp-reviewer-action', delayedTempRun.groupId, 'stop').then((res) => { tempStopDone = true; return res })
+  await pause(80)
+  assert.equal(tempStopDone, false, 'temp Stop waits for Retry in-flight tab close before resolving')
+  assert.equal(existsSync(delayedTempRun.checkoutPath), true, 'temp checkout is not removed while Retry tab close is still in flight')
+  releaseTempStop()
+  await Promise.allSettled([tempRetry, tempStop])
+  assert.equal(tempStopDone, true)
+  assert.equal(existsSync(delayedTempRun.checkoutPath), false, 'temp checkout removed after in-flight tab close finishes')
+  assert.equal(h.reservationList().length, 0, 'all reviewer reservations released cleanly')
 }))

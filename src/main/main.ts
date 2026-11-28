@@ -19,11 +19,11 @@ import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, set
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { resolveConfigRecovery } from './config-recovery.js'
+import { resolveConfigRecovery, type ConfigRecoveryOutcome, type RecoveryOperations } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -62,11 +62,12 @@ import {
   isCloseBehavior,
   preferenceRollback,
   queueConfigWrite,
-  readDesktopConfig,
+  readDesktopConfigSnapshot,
   removeWorkspaceProfile,
   restoreWorkspaceProfile,
   recordDesktopVersion,
   writeDesktopConfig,
+  writeDesktopConfigExclusive,
   type CloseBehavior,
   type DesktopConfig,
   type DesktopPreferences,
@@ -357,14 +358,14 @@ function projectTools(): ProjectToolService {
         return null
       }
       const { main } = visibleSessionTabs(tabsState)
-      if (!main || main.tempReviewer || main.workspaceProfileId !== profileId) return null
+      if (!main || main.tempReviewer || main.reviewer || main.workspaceProfileId !== profileId) return null
       if (sessionWindows.has(main.id)) return validatedLastDockedSession(main.workspaceProfileId)
       return main.id
     },
     currentProject: () => desktopConfig.activeProfileId ?? null,
     activateProject: async (id, ownerId) => {
       await activateProfile(id)
-      const owner = ownerId && tabsState.tabs.find(tab => tab.workspaceProfileId === id && tab.browserProfileId === ownerId && !tab.tempReviewer)
+      const owner = ownerId && tabsState.tabs.find(tab => tab.workspaceProfileId === id && tab.browserProfileId === ownerId && !tab.tempReviewer && !tab.reviewer)
       if (owner) {
         lastDockedToolSession.set(id, owner.id)
         selectSessionInMain(owner.id)
@@ -396,7 +397,7 @@ function validatedLastDockedSession(profileId: string | null): string | null {
   const cached = lastDockedToolSession.get(profileId)
   if (!cached) return null
   const tab = tabsState.tabs.find((candidate) => candidate.id === cached)
-  if (!tab || tab.tempReviewer || tab.workspaceProfileId !== profileId || sessionWindows.has(tab.id)) return null
+  if (!tab || tab.tempReviewer || tab.reviewer || tab.workspaceProfileId !== profileId || sessionWindows.has(tab.id)) return null
   return tab.id
 }
 
@@ -467,6 +468,8 @@ let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 /** Set when an unreadable desktop.json could not be preserved: never replace the only copy. */
 let configWritesBlocked = false
+let pendingFallbackExclusiveCreate = false
+class FallbackDestinationChangedError extends Error {}
 let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
@@ -949,7 +952,7 @@ async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,au
               beforePaste:()=>{
                 if(!ready()||!authorized()||!journal.begin(delivery.id,authorized))return false
                 const task=store.submitted(sessionId,rule.projectId,text,{...taskContext(tab),origin:'automation'});taskId=task.id
-                const grant:FollowupGrant={id:rule.revision,taskId:task.id,sessionId,projectId:rule.projectId,scopeRevision:task.scopeRevision,permissionKey:rule.scopeKey,
+                const grant:FollowupGrant={id:delivery.id,taskId:task.id,sessionId,projectId:rule.projectId,scopeRevision:task.scopeRevision,permissionKey:rule.scopeKey,
                   repository:rule.repository,number:1,reviewers:[],failedChecks:false,enabled:true,activatedAt:Date.now(),seen:{},head:event.head,headCounts:{},total:1,health:'watching',checks:'absent'}
                 const mode=tab.sessionPermissionMode
                 const stillAuthorized=():boolean=>authorized()&&session.sessionBindingReady&&managedTabs.get(tabId)?.session===session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId
@@ -979,6 +982,7 @@ function followupPermission(task: import('./workflow-types.js').WorkflowTask):st
   if(shuttingDown()||workflowError||deliveryError||workflowsPaused(task.projectId))return null
   const tab=followupTab(task),session=tab?managedTabs.get(tab.id)?.session:null
   if(!tab||!session||!session.sessionCwd||!supportsTaskReporting({version:tab.cliVersion,sideChat:Boolean(tab.sideChat),remote:tab.remote,preset:tab.sessionPermissionPreset}))return null
+  if(isReviewerTask(task.id)&&(!validReviewerTask(task.id,tab)||!sameRealPath(session.sessionCwd,reviewerTasks.get(task.id)!.area.checkout)))return null
   // Unlike manual meeting delivery, unattended work requires positively established ownership.
   const binding=session.bindingDiagnostic
   if(binding.kind!=='bound'||binding.sessionId!==task.sessionId||!binding.deliveryReady)return null
@@ -988,7 +992,7 @@ function interruptAutomatic(grant:FollowupGrant):void {
   for(const [tabId,run] of automaticTurns)if(run.grant.id===grant.id&&!run.stopping){
     run.stopping=true;clearTimeout(run.timer)
     deliveryJournal?.uncertain(run.deliveryId)
-    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===grant.sessionId&&run.session.lastSessionId===grant.sessionId&&run.session.bindingDiagnostic.kind==='bound'&&run.session.sessionBindingReady)run.session.write('\x03')
+    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.grant.sessionId&&run.session.lastSessionId===run.grant.sessionId&&run.session.bindingDiagnostic.kind==='bound'&&run.session.sessionBindingReady)run.session.write('\x03')
   }
 }
 function endAutomatic(tabId:string,answered:boolean):void {
@@ -1020,8 +1024,135 @@ function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
 }
-/** Review loops started in this run: their worktree and policy. A restart leaves them for the person (needs-person). */
-const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number}>()
+/** Review loops started in this run: their worktree, policy, and exact sandboxed tab/session. A restart leaves them for the person (needs-person). */
+const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number;tabId:string;session:PtySession}>()
+const knownReviewerSessionIds=new Set<string>()
+const knownUnboundReviewerReservations=new Map<string,{project:string;number:number}>()
+const unverifiedProvenanceLaunchIds=new Set<string>()
+let startupConfigPending=false
+let legacyTabSanitizationUnflushed=false
+let configRecoveryHold=false
+function isReviewerTask(taskId:string):boolean {
+  if(reviewerTasks.has(taskId))return true
+  if(followups?.list().some(g=>g.taskId===taskId&&g.role==='reviewer'))return true
+  if(reviewReservations()?.list().some(r=>r.taskId===taskId))return true
+  return false
+}
+function validReviewerTask(taskId:string,tab:DesktopSessionTab|null):boolean {
+  const review=reviewerTasks.get(taskId)
+  return Boolean(review&&tab&&tab.id===review.tabId&&tab.reviewer===true&&managedTabs.get(tab.id)?.session===review.session)
+}
+type ReservedTaskSessionLookup={status:'resolved';sessionId:string}|{status:'missing'}|{status:'failed'}
+function lookupReservedTaskSession(taskId:string):ReservedTaskSessionLookup {
+  if(!isValidSessionId(taskId))return {status:'missing'}
+  const store=workflowStore??workflows()
+  if(store){
+    try{
+      const sessionId=store.sessionIdForTask(taskId)
+      return sessionId?{status:'resolved',sessionId}:{status:'missing'}
+    }catch{
+      return {status:'failed'}
+    }
+  }
+  const dbPath=join(app.getPath('userData'),'workflows.sqlite')
+  if(!existsSync(dbPath))return {status:'missing'}
+  try{
+    const sessionId=WorkflowStore.sessionIdForTaskFromFile(dbPath,taskId)
+    return sessionId?{status:'resolved',sessionId}:{status:'missing'}
+  }catch{
+    return {status:'failed'}
+  }
+}
+function collectKnownReviewerSessionIds():Set<string> {
+  const reservationsList=reviewReservations()?.list()??[]
+  if(reservationsList.length){
+    for(const record of reservationsList){
+      let sessionId:string|undefined
+      if(record.taskId){
+        const lookup=lookupReservedTaskSession(record.taskId)
+        if(lookup.status==='resolved'){
+          sessionId=lookup.sessionId
+          knownReviewerSessionIds.add(sessionId)
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }else if(lookup.status==='failed'){
+          unverifiedProvenanceLaunchIds.add(record.launchId)
+        }
+      }
+      try{
+        for(const entry of readdirSync(join(record.root,'home','session-state'),{withFileTypes:true})){
+          if(entry.isDirectory()&&isValidSessionId(entry.name))knownReviewerSessionIds.add(entry.name)
+        }
+      }catch{/* Isolated Copilot home has not written session-state yet or was already removed. */}
+      if(!sessionId&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')&&record.project&&Number.isSafeInteger(record.number)){
+        knownUnboundReviewerReservations.set(`${resolve(record.project)}#${record.number}`,{project:record.project,number:record.number})
+      }
+    }
+  }
+  if(followups){
+    try{
+      for(const grant of followups.list())if(grant.role==='reviewer'&&grant.sessionId)knownReviewerSessionIds.add(grant.sessionId)
+    }catch{/* Ignore unreadable follow-up rows during startup provenance scan. */}
+  }else{
+    const followupDbPath=join(app.getPath('userData'),'workflow-followups.sqlite')
+    if(existsSync(followupDbPath)){
+      for(const sessionId of WorkflowFollowups.reviewerSessionIds(followupDbPath))knownReviewerSessionIds.add(sessionId)
+    }
+  }
+  return new Set(knownReviewerSessionIds)
+}
+function isAmbiguousUnboundReviewerTabForProfile(profilePath:string,saved:RestoredTab,normalSessionRoot:string):boolean {
+  return (
+    !saved.cli
+    &&!saved.sideChat
+    &&!saved.launchWorktreePath
+    &&saved.launchWorktree!==true
+    &&saved.autoTitle!==true
+    &&saved.renamePending!==true
+    &&[...knownUnboundReviewerReservations.values()].some(r=>sameRealPath(r.project,profilePath)&&saved.title===`Review #${r.number}`)
+    &&(!saved.lastSessionId||!existsSync(join(normalSessionRoot,saved.lastSessionId,'events.jsonl')))
+  )
+}
+function sanitizeLegacyReviewerTabsInConfig(config:DesktopConfig=desktopConfig):boolean {
+  const reviewerSessionIds=collectKnownReviewerSessionIds()
+  const normalSessionRoot=copilotSessionRoot(process.env)
+  let changed=false
+  for(const profile of config.profiles){
+    const nextTabs:RestoredTab[]=[]
+    for(const saved of profile.tabs){
+      if(saved.lastSessionId&&reviewerSessionIds.has(saved.lastSessionId)){
+        changed=true
+        continue
+      }
+      if(!saved.withholdAutoStart&&isAmbiguousUnboundReviewerTabForProfile(profile.path,saved,normalSessionRoot)){
+        nextTabs.push({...saved,withholdAutoStart:true})
+        changed=true
+        continue
+      }
+      nextTabs.push(saved)
+    }
+    if(nextTabs.length!==profile.tabs.length||nextTabs.some((tab,index)=>tab!==profile.tabs[index])){
+      profile.tabs=nextTabs
+    }
+  }
+  return changed
+}
+async function purgeResolvedLegacyReviewerSession(sessionId:string):Promise<boolean> {
+  let changed=sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+  for(const [profileId,savedTabs] of unrestoredProfileTabs){
+    const filtered=savedTabs.filter(saved=>saved.lastSessionId!==sessionId)
+    if(filtered.length!==savedTabs.length){
+      changed=true
+      if(filtered.length>0)unrestoredProfileTabs.set(profileId,filtered)
+      else unrestoredProfileTabs.delete(profileId)
+    }
+  }
+  const liveMatches=tabsState.tabs.filter(tab=>!tab.reviewer&&!tab.tempReviewer&&tab.lastSessionId===sessionId)
+  for(const liveTab of liveMatches){
+    await closeSessionTab(liveTab.id)
+    changed=true
+  }
+  return changed
+}
 /** Review loops seen running in this run: when one ends, the person is told how the PR left review. */
 const runningReviews=new Set<string>()
 /** Ended reviews whose outcome is being read now: one read at a time each. */
@@ -1052,6 +1183,8 @@ async function reportEndedReviews():Promise<void>{
 const missingChecks=new Map<string,string>()
 /** Reviews starting now, by launch id: the sweep leaves them alone. */
 const reviewLaunches=new Set<string>()
+/** Sandboxed PR reviews reserved in this process run (whose tabs are never persisted to desktop.json). */
+const currentRunReviewLaunchIds=new Set<string>()
 let reservations:ReviewReservations|null=null
 /** Which review owns which reviewer folder and worktree (pr-review-reservations.ts). */
 function reviewReservations():ReviewReservations|null{
@@ -1093,6 +1226,26 @@ async function sweepReviewerAreas():Promise<void>{
       // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
+      if(unverifiedProvenanceLaunchIds.has(record.launchId)){
+        if(!record.taskId){
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }else{
+          const retryLookup=lookupReservedTaskSession(record.taskId)
+          if(retryLookup.status==='failed')continue
+          if(retryLookup.status==='resolved'){
+            knownReviewerSessionIds.add(retryLookup.sessionId)
+            if(await purgeResolvedLegacyReviewerSession(retryLookup.sessionId)){
+              legacyTabSanitizationUnflushed=true
+              await persistConfig().catch(()=>{})
+            }
+            if(legacyTabSanitizationUnflushed||configWritesBlocked||configRecoveryHold)continue
+          }
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }
+      }
+      if(!currentRunReviewLaunchIds.has(record.launchId)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')){
+        if(startupConfigPending||legacyTabSanitizationUnflushed||configWritesBlocked||configRecoveryHold)continue
+      }
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       if(meetingReviewers.holdsLaunch(record.launchId))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
@@ -1145,6 +1298,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
   await clearDetachedReviewHold(store,pull.repository,pull.number,String(me.id))
   await store.reserve({launchId,repository:pull.repository,number:pull.number,reviewer:String(me.id),project:resolve(profile.path),root:area.root,checkout:area.checkout,ref:area.ref})
   reviewLaunches.add(launchId)
+  currentRunReviewLaunchIds.add(launchId)
   let tabId:string|null=null
   try{
     await makeReviewerArea(area)
@@ -1167,7 +1321,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
         const tasks=workflows()
         if(!tasks)throw new Error('Workflow storage is unavailable')
         const result=sendSessionTask(createdTab,text,false,{
-          beforePaste:()=>{const task=tasks.submitted(sessionId,profile!.id,text,{...taskContext(tab),pullUrl:url});taskId=task.id;reviewerTasks.set(task.id,{area,policy,origin,number:pull.number});void store.bind(launchId,task.id).catch(()=>{});return true},
+          beforePaste:()=>{const task=tasks.submitted(sessionId,profile!.id,text,{...taskContext(tab),pullUrl:url});taskId=task.id;knownReviewerSessionIds.add(sessionId);reviewerTasks.set(task.id,{area,policy,origin,number:pull.number,tabId:createdTab,session});void store.bind(launchId,task.id).catch(()=>{});return true},
           beforeEnter:()=>managedTabs.get(createdTab)?.session===session,
           aborted:()=>{},
         })
@@ -1191,7 +1345,10 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
       else await store.keep(launchId,removal.reason==='detached'?removal.detachedAt:undefined).catch(()=>{})
     }
     throw error
-  }finally{reviewLaunches.delete(launchId)}
+  }finally{
+    reviewLaunches.delete(launchId)
+    if(tabId&&!tabsState.tabs.some(t=>t.id===tabId))void sweepReviewerAreas().catch(()=>{})
+  }
 }
 
 /**
@@ -1356,10 +1513,10 @@ async function openFollowups():Promise<WorkflowFollowups> {
       verifyRepository:async(task,pr,role)=>{
         const tab=followupTab(task),folder=tab?managedTabs.get(tab.id)?.session.sessionCwd:null,runner=await meetingGitRunner()
         if(!folder||!runner)throw new Error('Open the local task checkout first')
-        if(role==='reviewer'){
+        if(role==='reviewer'||isReviewerTask(task.id)){
           // The reviewer's clone has no branch: the desktop moves it to the PR's head while it is clean.
           const review=reviewerTasks.get(task.id)
-          if(!review||!sameRealPath(folder,review.area.checkout))throw new Error('The review session is not in its own checkout')
+          if(!review||!validReviewerTask(task.id,tab)||!sameRealPath(folder,review.area.checkout))throw new Error('The review session is not in its own checkout')
           await verifyReviewerPolicy(review.area,review.policy)
           const head=await refreshReviewCheckout(runner,review.area,review.origin,pr.head,review.number,pr.base)
           const grant=followups?.list().find(g=>g.enabled&&g.taskId===task.id&&g.role==='reviewer')
@@ -1372,6 +1529,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
       send:async(delivery,grant)=>{
         const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null,session=tab?managedTabs.get(tab.id)?.session:null
         if(!tab||!session||!meetingPromptSettled(tab.id))return 'busy'
+        if((grant.role==='reviewer'||isReviewerTask(grant.taskId))&&!validReviewerTask(grant.taskId,tab))return 'busy'
         const ready=await session.prepareMeetingDelivery(grant.sessionId)
         if(!ready()||!controller.authorized(grant)||automaticTurns.has(tab.id)||meetingOutbox.inTurn(tab.id)||meetingOutbox.readyTabs().includes(tab.id)
           ||!automaticProjectReady(grant.projectId))return 'busy'
@@ -1400,7 +1558,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
   try{return await followupOpening}finally{followupOpening=null}
 }
 function workflows(): WorkflowStore | null {
-  if (!app.isReady() || workflowError) return null
+  if (typeof app.isReady !== 'function' || !app.isReady() || workflowError) return null
   try { return workflowStore ??= new WorkflowStore(join(app.getPath('userData'), 'workflows.sqlite')) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return null }
 }
@@ -1495,7 +1653,7 @@ function syncTabState(): void {
 function broadcastState(): void {
   activeFocusedPeekTabId()
   const { main } = visibleSessionTabs(tabsState)
-  if (main && !main.tempReviewer && !sessionWindows.has(main.id)) lastDockedToolSession.set(main.workspaceProfileId, main.id)
+  if (main && !main.tempReviewer && !main.reviewer && !sessionWindows.has(main.id)) lastDockedToolSession.set(main.workspaceProfileId, main.id)
   projectToolService?.refreshConnections()
   const shared=snapshot()
   if(workflowAttentionReady)workflowNotifications.update(attentionItems(shared),desktopConfig.notifications)
@@ -1545,6 +1703,7 @@ function popOutSessionTab(tabId: string): DesktopState {
   const tab = tabsState.tabs.find(tab => tab.id === tabId)
   if (!tab) throw new Error('Unknown session tab')
   if (tab.tempReviewer) throw new Error('Temporary reviewer sessions cannot be opened in a separate window')
+  if (tab.reviewer) throw new Error('Sandboxed PR review sessions cannot be opened in a separate window')
   const existing = sessionWindows.get(tabId)
   if (existing) { focusSessionWindow(existing); return snapshot() }
   const window = new BrowserWindow({
@@ -1590,14 +1749,34 @@ async function persistConfig(change?: () => void, onFailure?: () => void): Promi
   }
   const { operation, queue } = queueConfigWrite(
     configWriteQueue,
-    () => {
+    async () => {
+      if (configWritesBlocked) {
+        change?.()
+        return
+      }
       change?.()
-      return writeDesktopConfig(configPath(), structuredClone(desktopConfig))
+      const nextConfig = structuredClone(desktopConfig)
+      if (!pendingFallbackExclusiveCreate) {
+        await writeDesktopConfig(configPath(), nextConfig)
+        return
+      }
+      try {
+        await writeDesktopConfigExclusive(configPath(), nextConfig)
+        pendingFallbackExclusiveCreate = false
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          pendingFallbackExclusiveCreate = false
+          configWritesBlocked = true
+          throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
+        }
+        throw error
+      }
     },
     onFailure,
   )
   configWriteQueue = queue
   await operation
+  legacyTabSanitizationUnflushed = false
 }
 
 /**
@@ -1613,11 +1792,13 @@ function persistProfileTabs(): void {
   const rawActive = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)
   const activeForPersist = rawActive?.tempReviewer
     ? (visibleSessionTabs(tabsState).main?.id ?? null)
-    : tabsState.activeTabId
+    : rawActive?.reviewer
+      ? (tabsState.tabs.find((tab) => tab.workspaceProfileId === rawActive.workspaceProfileId && !tab.remote && !tab.tempReviewer && !tab.reviewer)?.id ?? null)
+      : tabsState.activeTabId
   for (const profile of desktopConfig.profiles) {
     if (!profilesWithSessionTabs.has(profile.id)) continue
     profile.tabs = tabsState.tabs
-      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !tab.tempReviewer)
+      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !tab.tempReviewer && !tab.reviewer && !(tab.lastSessionId && knownReviewerSessionIds.has(tab.lastSessionId)))
       .map((tab) => {
         const parentSessionId = tabsState.tabs.find((parent) => parent.id === tab.sideParentTabId)?.lastSessionId
         return {
@@ -1630,6 +1811,7 @@ function persistProfileTabs(): void {
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
+          ...(tab.withholdAutoStart ? { withholdAutoStart: true as const } : {}),
           ...(tab.id === activeForPersist ? { active: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
@@ -1830,7 +2012,7 @@ function activeAccessLabel(): string {
 function activeTabIsRestartable(): boolean {
   const focusedId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
   const tab = tabsState.tabs.find((candidate) => candidate.id === focusedId)
-  return tab !== undefined && !tab.remote && !tab.tempReviewer
+  return tab !== undefined && !tab.remote && !tab.tempReviewer && !tab.reviewer
 }
 
 /**
@@ -2612,7 +2794,7 @@ async function startSessionTab(
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
-    browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map(tab => tab.browserProfileId)),
+    ...(sideOptions.reviewer ? {} : { browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map(tab => tab.browserProfileId)) }),
     workspaceProfileId: profile.id,
     sessionPermissionPreset,
     sessionPermissionMode,
@@ -2622,10 +2804,11 @@ async function startSessionTab(
     lastSessionId: deterministicSessionId,
     ...(sideOptions.sideChat ? { sideChat: true as const } : {}),
     ...(sideOptions.sideParentTabId ? { sideParentTabId: sideOptions.sideParentTabId } : {}),
-    privateOverrides: !connectSessionId && (sideOptions.privateOverrides
+    ...(sideOptions.reviewer ? { reviewer: true as const } : {}),
+    privateOverrides: !connectSessionId && !sideOptions.reviewer && (sideOptions.privateOverrides
       ?? desktopConfig.browserOverrides === 'private'),
-    canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
-    ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
+    canFork: !connectSessionId && !sideOptions.sideChat && !sideOptions.reviewer && supportsSessionFork(state.resolution?.version ?? null),
+    ...(connectSessionId || sideOptions.reviewer ? {} : { launchWorktree: profile.launch.worktree === true }),
     ...(existingWorktree ? { launchWorktreePath: existingWorktree.root } : {}),
     autoTitle,
   }, desktopConfig.maxSessionTabs)
@@ -2641,7 +2824,9 @@ async function startSessionTab(
     await queueTabTransition(id, async () => {
       if (shuttingDown()) throw new Error('The app is shutting down or updating')
       if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
-      await projectTools().startBridge(id, profile.id, browserSessionPaths(browserSessionRoot(), id).endpoint)
+      if (!sideOptions.reviewer) {
+        await projectTools().startBridge(id, profile.id, browserSessionPaths(browserSessionRoot(), id).endpoint)
+      }
       if (desktopEnvironment) await desktopControl!.register(id)
       await session.start()
       if (shuttingDown()) {
@@ -3045,7 +3230,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
   const operation = queueTabTransition(tabId, async () => {
     if (shuttingDown()) throw new Error('The app is shutting down or updating')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-    if (!tab || tab.remote || tab.sideChat || tab.cli) throw new Error('Select a local main Copilot session to fork into a side chat')
+    if (!tab || tab.remote || tab.sideChat || tab.cli || tab.tempReviewer || tab.reviewer) throw new Error('Select a local main Copilot session to fork into a side chat')
     const existing = tabsState.tabs.find((candidate) => candidate.sideParentTabId === tabId)
     if (existing) throw new Error('This session already has a side chat. Close it before creating another fork.')
     if (regularTabCount(tabsState) >= desktopConfig.maxSessionTabs) throw new Error('Close a session tab before opening a side chat')
@@ -3982,26 +4167,36 @@ function configuredTempReviewerTimeoutMs(): number {
   return Number.isFinite(raw) && raw >= 500 ? Math.round(raw) : DEFAULT_TEMP_REVIEWER_TIMEOUT_MS
 }
 
-async function stopAndCloseTempReviewerTabOnly(seat: TempReviewerSeat): Promise<void> {
+const tempSeatTabCloses = new Map<string, Promise<void>>()
+
+function stopAndCloseTempReviewerTabOnly(seat: TempReviewerSeat): Promise<void> {
   clearTempSeatTimer(seat)
+  const key = `${seat.groupId}:${seat.id}`
   const tabId = seat.tabId
   seat.tabId = null
-  if (!tabId) return
-  const managed = managedTabs.get(tabId)
-  if (managed?.session.lastSessionId) {
-    seat.lastSessionId = managed.session.lastSessionId
-  }
-  const pid = managed?.session.processId ?? tabsState.tabs.find((t) => t.id === tabId)?.processId ?? null
-  if (pid && pid > 1) {
-    await killProcessTree(pid).catch(() => {})
-  }
-  if (tabsState.tabs.some((tab) => tab.id === tabId)) {
-    await closeSessionTab(tabId).catch(() => {})
-  }
+  const previous = tempSeatTabCloses.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(async () => {
+    if (!tabId) return
+    const managed = managedTabs.get(tabId)
+    if (managed?.session.lastSessionId) {
+      seat.lastSessionId = managed.session.lastSessionId
+    }
+    const pid = managed?.session.processId ?? tabsState.tabs.find((t) => t.id === tabId)?.processId ?? null
+    if (pid && pid > 1) {
+      await killProcessTree(pid).catch(() => {})
+    }
+    if (tabsState.tabs.some((tab) => tab.id === tabId)) {
+      await closeSessionTab(tabId).catch(() => {})
+    }
+  })
+  tempSeatTabCloses.set(key, next)
+  void next.finally(() => {
+    if (tempSeatTabCloses.get(key) === next) tempSeatTabCloses.delete(key)
+  })
+  return next
 }
 
-async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
-  await stopAndCloseTempReviewerTabOnly(seat)
+async function cleanupTempReviewerAreaOnly(seat: TempReviewerSeat): Promise<void> {
   const area = seat.area
   seat.area = null
   const store = reviewReservations()
@@ -4028,6 +4223,14 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
     if (group) group.notice = group.notice ? `${group.notice} ${msg}` : msg
     workflowNotice = msg
   }
+}
+
+async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
+  const pendingLaunch = cancelTempSeatLaunch(seat)
+  await stopAndCloseTempReviewerTabOnly(seat)
+  if (pendingLaunch) await pendingLaunch
+  await stopAndCloseTempReviewerTabOnly(seat)
+  await withTempSeatArea(seat, () => cleanupTempReviewerAreaOnly(seat))
 }
 
 async function teardownTempReviewerSeats(seats: readonly TempReviewerSeat[]): Promise<void> {
@@ -4248,7 +4451,12 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
  * Each seat's launch still in flight, settled either way, with the token that cancels it: a round that reuses or
  * replaces the seat cancels it and waits for it first.
  */
-const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
+interface TempSeatLaunchControl {
+  cancelled: boolean
+  controller: AbortController
+}
+
+const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: TempSeatLaunchControl }>()
 
 /**
  * The generation of each seat whose takeover (by a round or a Retry) has begun. It stays recorded through the teardown
@@ -4287,7 +4495,7 @@ async function launchTempReviewerSeat(
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
-  const cancel = { cancelled: false }
+  const cancel: TempSeatLaunchControl = { cancelled: false, controller: new AbortController() }
   const run = launchTempReviewerSeatNow(group, seat, profile, cancel, options)
   const entry = { settled: run.then(() => {}, () => {}), cancel }
   tempSeatLaunchesInFlight.set(seat, entry)
@@ -4315,23 +4523,28 @@ function withTempSeatArea<T>(seat: TempReviewerSeat, work: () => Promise<T>): Pr
   return next
 }
 
+function cancelTempSeatLaunch(seat: TempReviewerSeat): Promise<void> | null {
+  supersededTempSeatGenerations.set(seat, seat.generation)
+  const inFlight = tempSeatLaunchesInFlight.get(seat)
+  if (!inFlight) return null
+  inFlight.cancel.cancelled = true
+  inFlight.cancel.controller.abort()
+  return inFlight.settled
+}
+
 /**
  * Cancel a seat's earlier launch and wait for it, cleanup and reservation release included, to finish. It stops at its
  * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
  */
 async function settleTempSeatLaunch(seat: TempReviewerSeat): Promise<void> {
-  supersededTempSeatGenerations.set(seat, seat.generation)
-  const inFlight = tempSeatLaunchesInFlight.get(seat)
-  if (!inFlight) return
-  inFlight.cancel.cancelled = true
-  await inFlight.settled
+  await cancelTempSeatLaunch(seat)
 }
 
 async function launchTempReviewerSeatNow(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
-  cancel: { readonly cancelled: boolean },
+  cancel: { readonly cancelled: boolean; readonly controller: AbortController },
   options?: { reuseArea?: boolean },
 ): Promise<void> {
   const expectedGeneration = seat.generation
@@ -4378,7 +4591,10 @@ async function launchTempReviewerSeatNow(
   try {
     await makeReviewerArea(area)
     if (!reusingExistingArea) {
-      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber)
+      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber, {
+        signal: cancel.controller.signal,
+        isCancelled: isSeatCancelled,
+      })
       seat.checkedOut = head
       seat.checkedOutBase = base
     }
@@ -5070,7 +5286,7 @@ async function startTempReviewersCommand(
   sessionId: string | undefined,
   request: Pick<MeetingRequest, 'pr' | 'head' | 'base' | 'text'>,
 ): Promise<MeetingResponse> {
-  if (tab.remote || tab.sideChat || tab.tempReviewer) {
+  if (tab.remote || tab.sideChat || tab.tempReviewer || tab.reviewer) {
     return { ok: false, message: 'Start temporary PR reviewers from a local foreground session.' }
   }
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
@@ -5106,7 +5322,7 @@ async function resolveMcpWorkspaceAndTab(desktopTag: string | null, folderInput?
   | { ok: false; message: string }
 > {
   const taggedTabId = desktopTag ? meetingTabTags.get(desktopTag) : undefined
-  const taggedTab = taggedTabId ? tabsState.tabs.find((t) => t.id === taggedTabId && !t.remote && !t.sideChat && !t.tempReviewer) ?? null : null
+  const taggedTab = taggedTabId ? tabsState.tabs.find((t) => t.id === taggedTabId && !t.remote && !t.sideChat && !t.tempReviewer && !t.reviewer) ?? null : null
   if (taggedTab) {
     const profile = desktopConfig.profiles.find((p) => p.id === taggedTab.workspaceProfileId && !p.general)
     if (!profile) return { ok: false, message: 'This tab is not in a Git project workspace.' }
@@ -5145,6 +5361,7 @@ async function resolveMcpWorkspaceAndTab(desktopTag: string | null, folderInput?
       && !t.remote
       && !t.sideChat
       && !t.tempReviewer
+      && !t.reviewer
     ))
     if (activeAg) return activeAg
     const agTabs = tabsState.tabs.filter((t) => (
@@ -5153,6 +5370,7 @@ async function resolveMcpWorkspaceAndTab(desktopTag: string | null, folderInput?
       && !t.remote
       && !t.sideChat
       && !t.tempReviewer
+      && !t.reviewer
     ))
     return agTabs.length === 1 ? agTabs[0]! : null
   }
@@ -5272,13 +5490,66 @@ function onMeetingReviewerJoined(guestSeatId: string): void {
   broadcastState()
 }
 
+const meetingSeatLaunchesInFlight = new Map<string, { settled: Promise<void>; controller: AbortController }>()
+const meetingSeatAreaWork = new Map<string, Promise<unknown>>()
+const meetingSeatTabCloses = new Map<string, Promise<void>>()
+
+function meetingSeatAreaKey(seat: Pick<MeetingReviewerSeat, 'groupId' | 'id'>): string {
+  return `${seat.groupId}:${seat.id}`
+}
+
+function withMeetingSeatArea<T>(seat: Pick<MeetingReviewerSeat, 'groupId' | 'id'>, work: () => Promise<T>): Promise<T> {
+  const key = meetingSeatAreaKey(seat)
+  const previous = meetingSeatAreaWork.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(work)
+  const tail = next.catch(() => {})
+  meetingSeatAreaWork.set(key, tail)
+  void tail.then(() => { if (meetingSeatAreaWork.get(key) === tail) meetingSeatAreaWork.delete(key) })
+  return next
+}
+
+function abortMeetingSeatLaunch(seat: Pick<MeetingReviewerSeat, 'generation'>): Promise<void> | null {
+  const inFlight = meetingSeatLaunchesInFlight.get(seat.generation)
+  if (!inFlight) return null
+  inFlight.controller.abort()
+  return inFlight.settled
+}
+
+function closeMeetingReviewerSeatTabOnly(seat: MeetingReviewerSeat): Promise<void> {
+  const key = meetingSeatAreaKey(seat)
+  const tabId = seat.tabId
+  seat.tabId = null
+  const previous = meetingSeatTabCloses.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(async () => {
+    if (!tabId) return
+    const managed = managedTabs.get(tabId)
+    // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
+    // here aborts that start, so its CLI is not launched for a seat that is already over.
+    void managed?.session.stop().catch(() => {})
+    const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
+    if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
+    if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  })
+  meetingSeatTabCloses.set(key, next)
+  void next.finally(() => {
+    if (meetingSeatTabCloses.get(key) === next) meetingSeatTabCloses.delete(key)
+  })
+  return next
+}
+
 /**
  * Take back what one launch of a seat holds: its meeting seat, its tab and its folder. Each part is taken once, so this
- * may be called again for the same launch (an exit, then the close of the meeting).
+ * may be called again for the same launch (an exit, then the close of the meeting). Tab closure always runs outside the
+ * per-seat area queue so `closeSessionTab` -> `releaseMeetingReviewerSeat` maintains a strict one-way lock order.
  */
-async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string, options: { keepTab?: boolean } = {}): Promise<void> {
+async function releaseMeetingReviewerSeat(
+  seat: MeetingReviewerSeat,
+  why: string,
+  options: { keepTab?: boolean; fromLaunchCatch?: boolean; fromCloseTab?: boolean } = {},
+): Promise<void> {
   clearMeetingSeatJoinTimer(seat)
   stopMeetingCopilotWatch(seat.generation)
+  const pendingLaunch = abortMeetingSeatLaunch(seat)
   const guestSeatId = seat.guestSeatId
   seat.guestSeatId = null
   // A Copilot seat is in the meeting as its tab. It leaves here, before anything is awaited, whether its tab stays for
@@ -5291,29 +5562,29 @@ async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string
     void rm(guestSeatFolder(guestRoot(), guestSeatId), { recursive: true, force: true }).catch(() => {})
   }
   if (options.keepTab) return
-  const tabId = seat.tabId
-  seat.tabId = null
-  if (tabId) {
-    const managed = managedTabs.get(tabId)
-    // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
-    // here aborts that start, so its CLI is not launched for a seat that is already over.
-    void managed?.session.stop().catch(() => {})
-    const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
-    if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
-    if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  if (!options.fromCloseTab) {
+    await closeMeetingReviewerSeatTabOnly(seat)
+    if (pendingLaunch && !options.fromLaunchCatch) {
+      await pendingLaunch
+      await closeMeetingReviewerSeatTabOnly(seat)
+    }
+  } else if (pendingLaunch && !options.fromLaunchCatch) {
+    await pendingLaunch
   }
-  const area = seat.area
-  seat.area = null
-  if (!area) return
-  const store = reviewReservations()
-  const runner = await meetingGitRunner().catch(() => null)
-  const removal = await removeReviewerAreaDetailed(area, runner).catch((error): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }))
-  if (removal.outcome === 'removed') {
-    if (seat.launchId) await store?.release(seat.launchId).catch(() => {})
-  } else {
-    if (seat.launchId) await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
-    seat.keptCheckoutPath = area.checkout
-  }
+  await withMeetingSeatArea(seat, async () => {
+    const area = seat.area
+    seat.area = null
+    if (!area) return
+    const store = reviewReservations()
+    const runner = await meetingGitRunner().catch(() => null)
+    const removal = await removeReviewerAreaDetailed(area, runner).catch((error): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }))
+    if (removal.outcome === 'removed') {
+      if (seat.launchId) await store?.release(seat.launchId).catch(() => {})
+    } else {
+      if (seat.launchId) await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+      seat.keptCheckoutPath = area.checkout
+    }
+  })
 }
 
 /**
@@ -5326,6 +5597,7 @@ function revokeMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: 
   for (const seat of seats) {
     clearMeetingSeatJoinTimer(seat)
     stopMeetingCopilotWatch(seat.generation)
+    abortMeetingSeatLaunch(seat)
     // Every session is told to stop now, also one that has not spawned yet: the teardown below takes the seats one
     // after another, and a CLI must not start for a seat that is waiting its turn to be torn down.
     if (seat.tabId) void managedTabs.get(seat.tabId)?.session.stop().catch(() => {})
@@ -5463,7 +5735,7 @@ const MEETING_ALLOW_ALL_FLAGS: Partial<Record<ReviewerCli, string>> = {
 
 /** A Copilot host's own tab: its workspace and the folder its session works in. */
 function resolveMeetingHostTab(tabId: string): { ok: true; profile: WorkspaceProfile; hostTab: DesktopSessionTab | null; checkoutFolder: string } | { ok: false; message: string } {
-  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId && !candidate.remote && !candidate.sideChat && !candidate.tempReviewer)
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId && !candidate.remote && !candidate.sideChat && !candidate.tempReviewer && !candidate.reviewer)
   const profile = tab ? desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId && !candidate.general) : undefined
   if (!tab || !profile) return { ok: false, message: 'This tab is not in a project workspace.' }
   return { ok: true, profile, hostTab: tab, checkoutFolder: managedTabs.get(tab.id)?.session.sessionCwd ?? tab.worktree?.path ?? tab.launchWorktreePath ?? profile.path }
@@ -5558,9 +5830,27 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
 }
 
 async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, profile: WorkspaceProfile): Promise<void> {
+  const controller = new AbortController()
+  const generation = seat.generation
+  const run = launchMeetingReviewerSeatNow(group, seat, profile, controller.signal)
+  const entry = { settled: run.then(() => {}, () => {}), controller }
+  meetingSeatLaunchesInFlight.set(generation, entry)
+  try {
+    await run
+  } finally {
+    if (meetingSeatLaunchesInFlight.get(generation) === entry) meetingSeatLaunchesInFlight.delete(generation)
+  }
+}
+
+async function launchMeetingReviewerSeatNow(
+  group: MeetingReviewerGroup,
+  seat: MeetingReviewerSeat,
+  profile: WorkspaceProfile,
+  signal: AbortSignal,
+): Promise<void> {
   const generation = seat.generation
   const cancelled = (): boolean => (
-    shuttingDown() || group.stage === 'ended' || group.seats.get(seat.id) !== seat || seat.generation !== generation
+    signal.aborted || shuttingDown() || group.stage === 'ended' || group.seats.get(seat.id) !== seat || seat.generation !== generation
     || seat.lifecycle !== 'starting' || !meetingHub.isOpen(group.meetingId)
   )
   const cli = seat.cli
@@ -5583,7 +5873,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
     if (group.commit) {
       if (!runner) throw new Error('Git is not available')
-      await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit)
+      await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit, { signal, isCancelled: cancelled })
     } else {
       // Plan-only: there is nothing to check out, so the reviewer starts in an empty folder of its own.
       await mkdir(area.checkout, { recursive: true, mode: 0o700 })
@@ -5704,8 +5994,8 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     // launch made since is its own to take back, or it would stay with nothing to account for it. The seat's fields
     // hold what was made after the release; the folder is no longer on the seat, so it is taken by its own name.
     if (seat.area !== area) {
-      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.').catch(() => {})
-      await discardMeetingReviewerArea(area, launchId).catch(() => {})
+      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.', { fromLaunchCatch: true }).catch(() => {})
+      await withMeetingSeatArea(seat, () => discardMeetingReviewerArea(area, launchId)).catch(() => {})
     }
     throw error
   } finally {
@@ -5937,6 +6227,9 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
   if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
   if (action === 'dismiss') {
     const removed = meetingReviewers.dismiss(group.id, payload)
+    if (group.stage === 'ended') {
+      meetingHub.release(group.meetingId)
+    }
     await releaseMeetingReviewerSeat(removed, 'The person removed this reviewer.')
     settleMeetingReviewerGate(group)
     broadcastState()
@@ -6114,13 +6407,18 @@ async function advanceGroupTempReviewers(
         const prWorkflows = bundledPrWorkflows()
         if (requiresConsent) {
           for (const seat of [...group.requiredSeats.values()]) {
-            // Behind any handover a newer round has started on this seat, and only while this round still owns it: an
-            // earlier launch still setting up is cancelled and settled first, then its tab (if any) and area go.
+            if (isStaleOrEnded()) break
+            // Close any existing tab outside the per-seat area queue so tab transitions never wait on area locks.
+            const pendingLaunch = cancelTempSeatLaunch(seat)
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (pendingLaunch) await pendingLaunch
+            if (isStaleOrEnded()) break
+            await stopAndCloseTempReviewerTabOnly(seat)
             await withTempSeatArea(seat, async () => {
               if (isStaleOrEnded()) return
               await settleTempSeatLaunch(seat)
               if (isStaleOrEnded()) return
-              await cleanupTempReviewerSeat(seat)
+              await cleanupTempReviewerAreaOnly(seat)
             })
           }
           if (isStaleOrEnded()) return
@@ -6159,18 +6457,17 @@ async function advanceGroupTempReviewers(
           // below: after each one, this round stops before it cancels or closes anything they started.
           const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.id) !== seat
             || (expectedGeneration !== undefined && seat.generation !== expectedGeneration)
-          // The teardown and handover of the seat's area run one at a time per seat (another round's cleanup included);
-          // the launch itself runs after, guarded by its cancel token.
+          // Close tabs outside the per-seat area queue (`queueTabTransition` -> `withTempSeatArea` one-way order),
+          // then serialize area refresh/removal per seat before launching the next generation.
+          if (superseded()) return
+          const pendingLaunch = cancelTempSeatLaunch(seat)
+          await stopAndCloseTempReviewerTabOnly(seat)
+          if (pendingLaunch) await pendingLaunch
+          if (superseded()) return
+          await stopAndCloseTempReviewerTabOnly(seat)
           const prepared = await withTempSeatArea(seat, async (): Promise<{ reset: TempReviewerSeat; canReuseWorktree: boolean } | null> => {
             if (superseded()) return null
-            await stopAndCloseTempReviewerTabOnly(seat)
-            if (superseded()) return null
-            // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
-            // reservation) before its area is touched.
             await settleTempSeatLaunch(seat)
-            if (superseded()) return null
-            // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
-            await stopAndCloseTempReviewerTabOnly(seat)
             if (superseded()) return null
             if (!profile) {
               tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
@@ -6192,10 +6489,10 @@ async function advanceGroupTempReviewers(
                 seat.checkedOutBase = revisions.base
                 canReuseWorktree = true
               } else {
-                await cleanupTempReviewerSeat(seat)
+                await cleanupTempReviewerAreaOnly(seat)
               }
             } else {
-              await cleanupTempReviewerSeat(seat)
+              await cleanupTempReviewerAreaOnly(seat)
             }
             if (superseded()) return null
             const reset = tempReviewers.resetSeatGeneration(group.id, seat.id, { keepArea: canReuseWorktree })
@@ -6203,6 +6500,7 @@ async function advanceGroupTempReviewers(
             return { reset, canReuseWorktree }
           })
           if (!prepared || !profile) return
+          await stopAndCloseTempReviewerTabOnly(seat)
           const { reset, canReuseWorktree } = prepared
           const launchedGeneration = reset.generation
           try {
@@ -6228,6 +6526,7 @@ async function advanceGroupTempReviewers(
               // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
               // and its area; a relaunch, if needed, runs after (it takes the queue itself).
               const refreshGeneration = plannedGenerations.get(seat.id) ?? seat.generation
+              await tempSeatTabCloses.get(`${seat.groupId}:${seat.id}`)?.catch(() => {})
               const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
                 // The generation too: a manual Retry moves it on and owns the seat from then.
                 const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.id) === seat && seat.generation === refreshGeneration
@@ -6424,7 +6723,8 @@ function meetingViews(): MeetingView[] {
   }
   const tabOfSeat = (partyId: string): string | null => {
     const tag = guests.find((guest) => guest.id === partyId)?.desktopTag
-    const tabId = tag ? meetingTabTags.get(tag) : undefined
+    const taggedTabId = tag ? meetingTabTags.get(tag) : undefined
+    const tabId = taggedTabId ?? meetingReviewers.seatByGuest(partyId)?.seat.tabId ?? undefined
     return tabId && tabsState.tabs.some((tab) => tab.id === tabId) ? tabId : null
   }
   const blocked = stalledMeetingDeliveries()
@@ -6619,6 +6919,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         return { ok: false, message: 'Unknown pr-reviewers action; expected start, status, wait, round, finish, or stop.' }
       }
       case 'pr-start': {
+        if (currentTab.tempReviewer || currentTab.reviewer) return { ok: false, message: 'Start a PR loop from a regular session tab.' }
         // Like a meeting join: only what the person typed in this conversation starts a loop.
         const binding = callerSession?.bindingDiagnostic
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
@@ -6643,7 +6944,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         const enrolling = grant ? undefined : reviewEnrollments.get(request.sessionId)
         if (enrolling) { await Promise.race([enrolling, new Promise((resolveWait) => setTimeout(resolveWait, 60_000))]); grant = findGrant() }
         if (command === 'pr-read') {
-          if (!grant) return { ok: false, message: 'This session has no active review loop.' }
+          if (!grant || !validReviewerTask(grant.taskId, currentTab)) return { ok: false, message: 'This session has no active review loop.' }
           try { return { ok: true, message: await readPrFeedbackPage(await githubCliApi(app.getPath('userData')), grant.repository, grant.number, request.page) } } catch { return { ok: false, message: 'The page could not be read. If the PR changed, restart pr-read from page one.' } }
         }
         let parsed: unknown
@@ -6673,7 +6974,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         }
         // The checkout must still be clean and at the head the desktop presented when the review is posted.
         const review = grant ? reviewerTasks.get(grant.taskId) : undefined, runner = await meetingGitRunner()
-        if (grant && review && runner) {
+        if (grant && review && validReviewerTask(grant.taskId, currentTab) && runner) {
           const checkout = await reviewCheckoutState(runner, review.area).catch(() => null)
           if (!checkout || checkout.head !== grant.checkedOut || !checkout.clean) return { ok: false, message: 'Your checkout has local changes or is not at the head the desktop prepared. Remove the files you added and restore the ones you changed (git show HEAD:<path> > <path>), then review again.' }
         } else if (grant) return { ok: false, message: 'This review loop\'s checkout is not known to the desktop; start a new review.' }
@@ -6952,12 +7253,13 @@ async function flushSessionName(tabId: string): Promise<void> {
  * its conversation, folder and browser data, and resumes when Resume (Restart) is chosen. */
 async function unloadSessionTab(tabId: string): Promise<DesktopState> {
   const requested=tabsState.tabs.find(tab=>tab.id===tabId)
-  if(requested&&!requested.remote&&!requested.tempReviewer&&requested.status!=='dormant')cancelHeldInput(tabId)
+  if(requested&&!requested.remote&&!requested.tempReviewer&&!requested.reviewer&&requested.status!=='dormant')cancelHeldInput(tabId)
   return queueTabTransition(tabId, async () => {
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab) throw new Error('This session tab no longer exists')
     if (tab.remote) throw new Error('A remote session cannot be unloaded')
     if (tab.tempReviewer) throw new Error('Temporary PR reviewer sessions cannot be unloaded; use Stop reviewers or Dismiss instead')
+    if (tab.reviewer) throw new Error('Sandboxed PR review sessions cannot be unloaded; close the tab to end the review')
     if (tab.status === 'dormant') return snapshot()
     const finishTools = await projectTools().releaseSession(tabId, true)
     if (!finishTools) return snapshot()
@@ -7007,6 +7309,22 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     const finishTools = await projectTools().releaseSession(tabId, false)
     if (!finishTools) return snapshot()
     try {
+      const closingBeforeStop = tabsState.tabs.find((tab) => tab.id === tabId)
+      const closingSessionId = managedTabs.get(tabId)?.session.lastSessionId ?? closingBeforeStop?.lastSessionId ?? null
+      if (closingBeforeStop?.reviewer) {
+        const revokedTaskIds = new Set<string>()
+        for (const [taskId, entry] of reviewerTasks) {
+          if (entry.tabId === tabId) {
+            revokedTaskIds.add(taskId)
+            reviewerTasks.delete(taskId)
+          }
+        }
+        for (const grant of followups?.list() ?? []) {
+          if (grant.enabled && grant.role === 'reviewer' && (revokedTaskIds.has(grant.taskId) || (closingSessionId !== null && grant.sessionId === closingSessionId))) {
+            try { followups?.pause(grant.id) } catch { /* Already paused or removed. */ }
+          }
+        }
+      }
       cancelHeldInput(tabId)
       await projectToolService?.stopBridge(tabId)
       const managed = managedTabs.get(tabId)
@@ -7022,6 +7340,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       terminalSizes.delete(tabId)
       forgetMeetingSession(tabId)
       meetingControl.forget(tabId)
+      for (const [tag, owner] of meetingTabTags) {
+        if (owner === tabId) {
+          meetingTabTags.delete(tag)
+          void rm(join(meetingTabTagsFolder(), `${tag}.json`), { force: true }).catch(() => {})
+        }
+      }
       // Read before the tab is dropped: its worktree is cleaned up once it is gone.
       const closing = tabsState.tabs.find((tab) => tab.id === tabId)
       const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
@@ -7056,7 +7380,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       // The same for a meeting's hidden reviewer: its seat has no tab any more, and one that was in the meeting has left.
       const closedMeetingSeat = closing?.tempReviewer?.meetingId ? meetingReviewers.tabClosed(tabId) : null
       if (closedMeetingSeat) {
-        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.').catch(() => {})
+        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.', { fromCloseTab: true }).catch(() => {})
         if (closedMeetingSeat.wasLive) settleMeetingReviewerGate(closedMeetingSeat.group)
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
@@ -7078,6 +7402,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       sessionOutputSequences.delete(tabId)
       broadcastState()
       refreshMenus()
+      if (closing?.reviewer) void sweepReviewerAreas().catch(() => {})
       if (closing) cleanUpSessionWorktree(closing)
       return snapshot()
     } finally { finishTools() }
@@ -7165,7 +7490,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   // right after the first and stopping the replacement it just started.
   const pending = pendingRestarts.get(tabId)
   if (pending) return pending
-  if(tabsState.tabs.find(tab=>tab.id===tabId)?.remote)throw new Error('A remote session cannot be restarted')
+  const initialTab = tabsState.tabs.find(tab => tab.id === tabId)
+  if (initialTab?.remote) throw new Error('A remote session cannot be restarted')
+  if (initialTab?.tempReviewer) throw new Error('Use Retry in the PR reviewers bar to restart a temporary reviewer')
+  if (initialTab?.reviewer) throw new Error('Sandboxed PR review sessions cannot be restarted; close the tab and start a new review')
   // Setup can fail while the original process remains healthy. Suspend, then either restore that exact recipient or
   // cancel before requesting its stop. A close/unload/native switch independently cancels and wins over restoration.
   const restoreInput=tabTransitionQueue.has(tabId)?undefined:suspendHeldInput(tabId)
@@ -7185,6 +7513,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // one of those entry points to a runtime error.
     if (tab.remote) throw new Error('A remote session cannot be restarted')
     if (tab.tempReviewer) throw new Error('Use Retry in the PR reviewers bar to restart a temporary reviewer')
+    if (tab.reviewer) throw new Error('Sandboxed PR review sessions cannot be restarted; close the tab and start a new review')
     const managed = managedTabs.get(tabId)
     const workspaceProfileId = tab.workspaceProfileId
     const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === workspaceProfileId)
@@ -7408,6 +7737,15 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       broadcastState()
       throw error
     }
+    if (tabsState.tabs.some((candidate) => candidate.id === tabId && candidate.withholdAutoStart)) {
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+        if (candidate.id !== tabId || !candidate.withholdAutoStart) return candidate
+        const { withholdAutoStart: _cleared, ...rest } = candidate
+        return rest
+      }) }
+      syncTabState()
+      broadcastState()
+    }
     persistProfileTabs()
     return snapshot()
   }).catch(async error=>{if(!stopRequested)restoreInput?.();else await projectToolService?.stopBridge(tabId);throw error})
@@ -7471,6 +7809,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
+    ...(candidate.withholdAutoStart ? { withholdAutoStart: true as const } : {}),
   }, MAX_MAX_SESSION_TABS)
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
@@ -7512,7 +7851,7 @@ function startDormantTab(tabId: string): Promise<void> {
   const pending = wakingTabs.get(tabId)
   if (pending) return pending
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  if (shuttingDown() || tab?.status !== 'dormant') return Promise.resolve()
+  if (shuttingDown() || tab?.status !== 'dormant' || tab.withholdAutoStart) return Promise.resolve()
   const waking = restartSessionTab(tabId).then(() => {}, (error) => {
     void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
     if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
@@ -7602,7 +7941,28 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   if (!profile || !state.resolution || state.resolution.version === null) return
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
-  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer) && !unrestoredProfileTabs.get(profile.id)?.length) return
+  const reviewerSessionIds = collectKnownReviewerSessionIds()
+  const normalSessionRoot = copilotSessionRoot(process.env)
+  const isAmbiguousUnboundReviewerTab = (saved: RestoredTab): boolean => isAmbiguousUnboundReviewerTabForProfile(profile.path, saved, normalSessionRoot)
+  const isLegacyReviewerTab = (saved: RestoredTab): boolean => (
+    Boolean(saved.lastSessionId && reviewerSessionIds.has(saved.lastSessionId))
+  )
+  let droppedLegacyReviewerTabs = false
+  if (profile.tabs.some(isLegacyReviewerTab)) {
+    profile.tabs = profile.tabs.filter((saved) => !isLegacyReviewerTab(saved))
+    droppedLegacyReviewerTabs = true
+  }
+  if (unrestoredProfileTabs.has(profile.id)) {
+    const prev = unrestoredProfileTabs.get(profile.id)!
+    const filtered = prev.filter((saved) => !isLegacyReviewerTab(saved))
+    if (filtered.length !== prev.length) droppedLegacyReviewerTabs = true
+    if (filtered.length > 0) unrestoredProfileTabs.set(profile.id, filtered)
+    else unrestoredProfileTabs.delete(profile.id)
+  }
+  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer) && !unrestoredProfileTabs.get(profile.id)?.length) {
+    if (droppedLegacyReviewerTabs) void persistConfig().catch((error) => void writeAppLog(`Failed to save session tabs: ${String(error)}`))
+    return
+  }
   if (!unrestoredProfileTabs.has(profile.id) && profile.tabs.length > 0) {
     unrestoredProfileTabs.set(profile.id, [...profile.tabs])
   }
@@ -7618,6 +7978,8 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     }
     // A fresh tab for an empty workspace is not a saved session to retain.
     if (!restored.length) {
+      if (droppedLegacyReviewerTabs) void persistConfig().catch((error) => void writeAppLog(`Failed to save session tabs: ${String(error)}`))
+      if (!activate) return
       try { await createSessionTab(profile, 'new', null, [], null, profile.name, { carryStandalonePeek: true }) }
       catch (error) { await writeAppLog(`Failed to start a session for ${profile.path}: ${String(error)}`) }
       return
@@ -7625,17 +7987,27 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     // The tab that was on screen when it was saved is shown again; a config from an older release shows the last one.
     let last: string | null = null
     let shown: string | null = null
+    let nonAmbiguousLast: string | null = null
+    let nonAmbiguousShown: string | null = null
+    const ambiguousUnboundTabIds = new Set<string>()
     for (const candidate of restored) {
       // Saved tabs come back even above a limit lowered since they were opened; only new tabs follow the setting.
       if (shuttingDown() || tabsState.tabs.length >= MAX_MAX_SESSION_TABS) break
-      try { last = addDormantSessionTab(profile, candidate) }
+      const ambiguous = candidate.withholdAutoStart === true || isAmbiguousUnboundReviewerTab(candidate)
+      try { last = addDormantSessionTab(profile, ambiguous ? { ...candidate, withholdAutoStart: true } : candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
+      if (ambiguous) {
+        ambiguousUnboundTabIds.add(last)
+      } else {
+        nonAmbiguousLast = last
+        if (candidate.active) nonAmbiguousShown = last
+      }
       if (candidate.active) shown = last
       const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(saved => saved !== candidate)
       if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
       else unrestoredProfileTabs.delete(profile.id)
     }
-    const target = shown ?? last
+    const target = nonAmbiguousShown ?? nonAmbiguousLast ?? shown ?? last
     if (activate && target) {
       tabsState = activateTab(tabsState, target)
       desktopConfig.activeProfileId = profile.id
@@ -7647,10 +8019,10 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     if (activate && target) carryStandalonePeekToHost(profile.id, target)
     refreshMenus()
     // A restore that showed its tab starts it, with its side chat on screen, and is over once they have started. One
-    // that only listed its tabs starts nothing.
+    // that only listed its tabs starts nothing. Ambiguous pre-beforePaste tabs stay dormant until the person resumes them.
     if (!activate || !target) return
     const visible = visibleSessionTabs(tabsState)
-    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [startDormantTab(id)] : []))
+    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id && !ambiguousUnboundTabIds.has(id) ? [startDormantTab(id)] : []))
   })()
   pendingProfileRestores.set(profile.id, operation)
   try {
@@ -8011,11 +8383,110 @@ async function recheckCopilotCapabilities(): Promise<void> {
  * now (a full disk, a file another program holds), the app still starts with the settings it read, and the next save
  * writes them. Without the catch, that failure ended the whole startup with "failed to start".
  */
-async function saveSettingsAtStartup(migrated: boolean): Promise<void> {
-  if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return
-  try { await persistConfig() } catch (error) {
+function sameSnapshotBytes(left: Buffer | null, right: Buffer | null): boolean {
+  return left === null ? right === null : right !== null && left.equals(right)
+}
+
+async function saveSettingsAtStartup(migrated: boolean): Promise<boolean> {
+  if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return !configWritesBlocked
+  if (configWritesBlocked) return false
+  try {
+    await persistConfig()
+    return true
+  } catch (error) {
+    if (error instanceof FallbackDestinationChangedError) {
+      // A restore created or replaced desktop.json after recovery's last read and before fallback defaults
+      // were published. Retain `configRecoveryHold`, and if the new file is valid JSON, reload and sanitize
+      // it into memory; otherwise keep `configWritesBlocked = true` so the in-progress restore stays untouched.
+      const lateSnapshot = await readDesktopConfigSnapshot(configPath()).catch(() => null)
+      if (lateSnapshot && lateSnapshot.rawBytes !== null && !lateSnapshot.unparseable) {
+        for (const message of lateSnapshot.migrations) void writeAppLog(message)
+        desktopConfig = lateSnapshot.config
+        const reSanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+        legacyTabSanitizationUnflushed = reSanitized
+        configWritesBlocked = false
+        syncWorkspaceState()
+        const versionChanged = recordDesktopVersion(desktopConfig, app.getVersion())
+        if (!versionChanged && !reSanitized && lateSnapshot.migrations.length === 0) {
+          return true
+        }
+        try {
+          await persistConfig()
+          return true
+        } catch (saveError) {
+          void writeAppLog(`Could not save restored settings at startup: ${String(saveError)}`).catch(() => {})
+          return false
+        }
+      }
+      return false
+    }
     void writeAppLog(`Could not save the settings at startup; continuing with the ones that were read: ${String(error)}`).catch(() => {})
+    return false
   }
+}
+
+async function loadDesktopConfigWithRecovery(
+  onMigrated?: (message: string) => void,
+  betweenReadAndRecovery?: () => Promise<void>,
+  recoveryOperations?: RecoveryOperations,
+): Promise<{ migrated: boolean; recovery: ConfigRecoveryOutcome }> {
+  const file = configPath()
+  const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
+  const markerExistedBeforeRead = await stat(recoveryMarker).then(
+    () => true,
+    (error) => (error as NodeJS.ErrnoException).code !== 'ENOENT',
+  )
+  let snapshot = await readDesktopConfigSnapshot(file)
+  if (betweenReadAndRecovery) await betweenReadAndRecovery()
+  let recovery = await resolveConfigRecovery(file, recoveryMarker, snapshot.unparseable, recoveryOperations)
+  // Re-read desktop.json whenever the file changed (for example, a backup restore completed after an initial
+  // partial/malformed or fallback read) or a pre-existing recovery hold lifted without preserving or blocking.
+  for (let attempt = 0; attempt < 3 && !recovery.newlyPreserved && !recovery.writesBlocked; attempt++) {
+    const latest = await readDesktopConfigSnapshot(file)
+    if (sameSnapshotBytes(latest.rawBytes, snapshot.rawBytes) && !snapshot.unparseable && !(markerExistedBeforeRead && !recovery.hold)) {
+      break
+    }
+    snapshot = latest
+    if (!snapshot.unparseable) {
+      break
+    }
+    recovery = await resolveConfigRecovery(file, recoveryMarker, true, recoveryOperations)
+  }
+  let fallbackCanCreateExclusively = false
+  if (recovery.newlyPreserved) {
+    const postPreserveSnapshot = await readDesktopConfigSnapshot(file)
+    if (postPreserveSnapshot.rawBytes === null) {
+      fallbackCanCreateExclusively = true
+    } else if (!postPreserveSnapshot.unparseable) {
+      snapshot = postPreserveSnapshot
+      recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
+    } else {
+      const confirmSnapshot = await readDesktopConfigSnapshot(file)
+      if (confirmSnapshot.rawBytes === null) {
+        fallbackCanCreateExclusively = true
+      } else if (!confirmSnapshot.unparseable) {
+        snapshot = confirmSnapshot
+        recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
+      } else {
+        // Keep `recovery.hold` and defer publishing defaults whenever an unparseable file remains at
+        // `desktop.json` (whether recreated after a move or left in place by the copy fallback).
+        recovery = { hold: recovery.hold, writesBlocked: true, newlyPreserved: false }
+      }
+    }
+  } else if (snapshot.unparseable && !recovery.writesBlocked) {
+    const finalSnapshot = await readDesktopConfigSnapshot(file)
+    if (!finalSnapshot.unparseable) {
+      snapshot = finalSnapshot
+    } else {
+      recovery = { ...recovery, writesBlocked: true }
+    }
+  }
+  pendingFallbackExclusiveCreate = fallbackCanCreateExclusively && !recovery.writesBlocked
+  for (const message of snapshot.migrations) onMigrated?.(message)
+  desktopConfig = snapshot.config
+  configRecoveryHold = Boolean(recovery.hold)
+  configWritesBlocked = recovery.writesBlocked
+  return { migrated: snapshot.migrations.length > 0, recovery }
 }
 
 const COPILOT_MAINTENANCE_BLOCKS_SESSIONS = 'Copilot CLI is being installed or updated. Start the session when that has finished.'
@@ -8200,7 +8671,7 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer && !tab.reviewer),
           click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
         },
         {
@@ -8211,7 +8682,7 @@ function installApplicationMenu(): void {
         },
         {
           label: 'Unload Active Session',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer && tab.status !== 'dormant'),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer && !tab.reviewer && tab.status !== 'dormant'),
           click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
         ...(mac ? [] : [settingsItem, { type: 'separator' as const }, quitItem]),
@@ -8619,6 +9090,7 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
   if (tab.tempReviewer) throw new Error('Temporary reviewer sessions do not have a tools panel or browser')
+  if (tab.reviewer) throw new Error('Sandboxed PR review sessions do not have a tools panel or browser')
   if (projectTools().showSessionWindow(tab.id)) return
   await activateProfile(tab.workspaceProfileId)
   lastDockedToolSession.set(tab.workspaceProfileId, tab.id)
@@ -8752,6 +9224,7 @@ async function startDesktopControl(): Promise<void> {
       if (!desktopConfig.desktopControl) return 'Allow desktop control in Settings first.'
       if (tab.remote) return 'A remote session runs on another computer, so it can’t control this one.'
       if (tab.sideChat) return 'Side chats can’t use desktop control.'
+      if (tab.tempReviewer || tab.reviewer) return 'PR reviewer sessions are sandboxed and cannot use desktop control.'
       if (tab.cli) return `Desktop control works with Copilot sessions, not ${sessionCliLabel(tab.cli)}.`
       if (!desktopControl?.isRegistered(tabId)) return 'This session started before desktop control was allowed, or it is read-only. Restart it (with shell access) to use desktop control.'
       return null
@@ -8957,7 +9430,7 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
   const session = managedTabs.get(tabId)?.session
   const idle = session?.activity === 'idle' || (session?.activity === null && session.recentOutputText.includes('open sidebar'))
   if (data === '\r' && typeof gitCursorContext === 'string' && gitCursorContext.trim() && gitCursorContext.length <= 8_000
-    && !inputTransitionPending(tabId) && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && !tab.tempReviewer && session?.bracketedPaste && idle) {
+    && !inputTransitionPending(tabId) && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && !tab.tempReviewer && !tab.reviewer && session?.bracketedPaste && idle) {
     // This Enter belongs to the person. Append one bracketed excerpt to their existing draft, then submit once it has
     // landed, holding subsequent input just as sendSessionTask does. No cursor movement or draft replacement is needed.
     const paste = taskPasteSequence(`\n\n${gitCursorContext}`)
@@ -9104,11 +9577,23 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     // progress finishes, before the area goes and the generation moves on.
     // A round that began while this Retry waited owns the seat now: it relaunches it at its own revision.
     const overtaken = (): boolean => group.stage === 'ended' || group.stage === 'starting' || !group.consentGranted || group.round !== retryRound
+    if (overtaken()) {
+      broadcastState()
+      return snapshot()
+    }
+    const pendingLaunch = cancelTempSeatLaunch(previous)
+    await stopAndCloseTempReviewerTabOnly(previous)
+    if (pendingLaunch) await pendingLaunch
+    if (overtaken()) {
+      broadcastState()
+      return snapshot()
+    }
+    await stopAndCloseTempReviewerTabOnly(previous)
     const reset = await withTempSeatArea(previous, async () => {
       if (overtaken()) return null
       await settleTempSeatLaunch(previous)
       if (overtaken()) return null
-      await cleanupTempReviewerSeat(previous)
+      await cleanupTempReviewerAreaOnly(previous)
       if (overtaken()) return null
       return tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     })
@@ -10189,6 +10674,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('child-process-gone', (_event, details) => { void writeAppLog(`Helper process ended: ${describeProcessExit(details)}`) })
 
   app.whenReady().then(async () => {
+    startupConfigPending = true
     workflows()
     try { deliveryJournal = new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite')) }
     catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.' }
@@ -10196,9 +10682,8 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     if(existsSync(join(app.getPath('userData'),'workflow-automations.sqlite')))try{openAutomations()}catch{automationError='Automation history is unavailable; automatic work is disabled.'}
     setInterval(()=>{for(const run of automaticTurns.values())if(!run.authorized())interruptAutomatic(run.grant)},1000).unref()
-    // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
-    void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
-    void sweepReviewerAreas().catch(()=>{})
+    // Snapshot persisted reviewer session IDs synchronously before sweepReviewerAreas() can release reservations.
+    collectKnownReviewerSessionIds()
     const reopen=startupReopens(name=>existsSync(join(app.getPath('userData'),name)))
     if(reopen.followups)void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
     // A queue turned on before any review ran has no follow-up database yet: it restarts from its own file.
@@ -10227,7 +10712,11 @@ if (!app.requestSingleInstanceLock()) {
         if (settingsWindow && !settingsWindow.isDestroyed() && isLauncherShellUrl(settingsWindow.webContents.getURL(), settingsUrl())) settingsWindow.webContents.send('desktop-settings:migration-progress', progress)
       },
       reloaded: async () => {
-        desktopConfig = await readDesktopConfig(configPath())
+        await loadDesktopConfigWithRecovery((message) => void writeAppLog(message))
+        if (sanitizeLegacyReviewerTabsInConfig(desktopConfig)) {
+          legacyTabSanitizationUnflushed = true
+          await persistConfig().catch(() => {})
+        }
         profilesWithSessionTabs.clear()
         unrestoredProfileTabs.clear()
         syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
@@ -10240,23 +10729,23 @@ if (!app.requestSingleInstanceLock()) {
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
-    let desktopConfigMigrated = false
-    let desktopConfigUnparseable = false
-    desktopConfig = await readDesktopConfig(configPath(), (message) => {
-      desktopConfigMigrated = true
-      void writeAppLog(message)
-    }, () => { desktopConfigUnparseable = true })
-    const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
     // Never replace the unreadable file unless an independent, verified backup exists, and keep
     // browser data (referenced only by that file) until the backup is restored or deleted.
-    const configRecovery = await resolveConfigRecovery(configPath(), recoveryMarker, desktopConfigUnparseable)
+    const { migrated: desktopConfigMigrated, recovery: configRecovery } = await loadDesktopConfigWithRecovery(
+      (message) => void writeAppLog(message),
+    )
     const recoveryHold = configRecovery.hold
-    configWritesBlocked = configRecovery.writesBlocked
     if (configRecovery.newlyPreserved && recoveryHold) {
       void writeAppLog(`desktop.json could not be parsed; defaults are in use. The original was kept at ${recoveryHold}`)
       showNotification(
         'Copilot CLI Desktop settings were reset',
         `Your settings file was unreadable. It was saved as ${basename(recoveryHold)} in the app data folder. Browser data is kept until you restore or delete that file.`,
+      )
+    } else if (configRecovery.writesBlocked && recoveryHold) {
+      void writeAppLog(`desktop.json could not be parsed; defaults are in use and settings writes are deferred while ${recoveryHold} is kept`)
+      showNotification(
+        'Copilot CLI Desktop settings recovery pending',
+        `Your unreadable settings were backed up as ${basename(recoveryHold)} in the app data folder, and desktop.json was left in place. Settings changes will not be saved this launch until desktop.json is fixed or removed.`,
       )
     } else if (configRecovery.writesBlocked) {
       void writeAppLog('desktop.json could not be parsed and could not be backed up; settings changes will not be saved this launch')
@@ -10270,7 +10759,16 @@ if (!app.requestSingleInstanceLock()) {
         `Browser data is kept while ${basename(recoveryHold)} exists. Restore or delete it when you are done.`,
       )
     }
-    await saveSettingsAtStartup(desktopConfigMigrated)
+    const legacyTabsSanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+    if (legacyTabsSanitized) legacyTabSanitizationUnflushed = true
+    await saveSettingsAtStartup(desktopConfigMigrated || legacyTabsSanitized)
+    startupConfigPending = false
+    // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
+    // Runs only after desktop.json has recorded withholdAutoStart / removed confirmed reviewer tabs (or held the reservation if saving failed or recovery is pending).
+    if (!recoveryHold && !configWritesBlocked) {
+      void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
+    }
+    void sweepReviewerAreas().catch(()=>{})
     // Keep DevTools settings from sessions closed last launch before their partitions are pruned.
     try { shareDevtoolsSettings(app.getPath('userData')) }
     catch (error) { void writeAppLog(`Could not share DevTools settings: ${String(error)}`).catch(() => {}) }

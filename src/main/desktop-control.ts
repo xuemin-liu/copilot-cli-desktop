@@ -7,8 +7,8 @@ import { validateBrowserScreenshotPath } from '../cli/browser-control.js'
 import { writeFileAtomic } from './atomic-file.js'
 import {
   appDisplayName, canStartPrograms, DESKTOP_BLOCK_MESSAGES, DESKTOP_FRAME_MAX_AGE_MS, desktopBlockReason, desktopFrameSize,
-  DesktopRateLimiter, framePointToScreen, identityKey, isFrameId, isWindowId, maskInPatch, parseDesktopChord, patchesMatch, patchRect, screenMaskRects, screenRectToFrame,
-  rectContains, sameRect, validateDesktopText,
+  DesktopRateLimiter, framePointToScreen, identityKey, intersectRect, isFrameId, isWindowId, maskInPatch, opaqueCover, parseDesktopChord, patchesMatch, patchRect, screenMaskRects, screenRectToFrame,
+  rectContains, sameRect, subtractRects, validateDesktopText,
   type DesktopAppIdentity, type DesktopBlockReason, type DesktopRect,
 } from './desktop-control-rules.js'
 import type { DesktopInputMonitor, DesktopNativeLayer } from './desktop-native.js'
@@ -76,7 +76,7 @@ interface Frame {
   bitmap: Buffer
   blank: DesktopRect[]
   /** The windows that could be under a point when the frame was taken, front to back. */
-  layout: Array<{ id: string; pid: number; bounds: DesktopRect }>
+  layout: Array<{ id: string; pid: number; bounds: DesktopRect; opaque: boolean }>
   createdAt: number
   epoch: number
 }
@@ -619,7 +619,7 @@ export class DesktopControl {
   }
 
   private layout(windows: DesktopNativeWindow[]): Frame['layout'] {
-    return windows.filter(window => !window.clickThrough && !window.minimized).map(window => ({ id: window.id, pid: window.pid, bounds: window.bounds }))
+    return windows.filter(window => !window.clickThrough && !window.minimized).map(window => ({ id: window.id, pid: window.pid, bounds: window.bounds, opaque: window.opaque === true }))
   }
 
   /**
@@ -688,6 +688,29 @@ export class DesktopControl {
     }
     if ((frame.kind === 'window' && (foreground.id !== frame.windowId || !sameRect(foreground.bounds, frame.bounds))) || (windowId !== null && foreground.id !== windowId)) {
       throw this.refuse(tabId, command, resolved.name, 'The keyboard focus moved to another window, or the window moved; take a new screenshot.', 409)
+    }
+    if (frame.kind === 'screen') {
+      const seenIndex = frame.layout.findIndex(window => window.id === foreground.id)
+      const seen = seenIndex >= 0 ? frame.layout[seenIndex] : undefined
+      if (!seen || seen.pid !== foreground.pid || !sameRect(foreground.bounds, seen.bounds)) {
+        throw this.refuse(tabId, command, resolved.name, 'The focused window opened, moved or resized since the screenshot; take a new screenshot.', 409)
+      }
+      const insideDisplay = foreground.bounds.x >= frame.bounds.x
+        && foreground.bounds.y >= frame.bounds.y
+        && foreground.bounds.x + foreground.bounds.width <= frame.bounds.x + frame.bounds.width
+        && foreground.bounds.y + foreground.bounds.height <= frame.bounds.y + frame.bounds.height
+      if (!insideDisplay) {
+        throw this.refuse(tabId, command, resolved.name, 'The focused window is not fully inside the captured display; take a screenshot of that window itself.', 409)
+      }
+      const coverCandidates = opaqueCover(foreground.bounds)
+      const cover = coverCandidates.length > 0 ? coverCandidates : [foreground.bounds]
+      if (cover.some(rect => frame.blank.some(blank => intersectRect(rect, blank) !== null))) {
+        throw this.refuse(tabId, command, resolved.name, 'The focused window was painted over in the screenshot, so what is there was not shown. Take a screenshot of the window itself.', 403)
+      }
+      const earlierOpaqueCovers = frame.layout.slice(0, seenIndex).filter(window => window.opaque).flatMap(window => opaqueCover(window.bounds))
+      if (!cover.some(rect => subtractRects(rect, earlierOpaqueCovers).length > 0)) {
+        throw this.refuse(tabId, command, resolved.name, 'The focused window was completely covered in the screenshot; take a new screenshot.', 409)
+      }
     }
     return resolved
   }

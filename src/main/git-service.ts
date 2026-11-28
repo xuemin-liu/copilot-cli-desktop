@@ -375,9 +375,35 @@ export class GitService {
 
   async rescan(subscriberId: number, profileId: string): Promise<GitProjectView> {
     const project = this.projectFor(subscriberId, profileId)
-    project.rescanNext = true
-    await this.refreshProject(project, true)
+    if (!await this.forceRefresh(project, { subscriberId, profileId, rescan: true })) {
+      throw new GitCancelledError()
+    }
     return this.viewOf(project)
+  }
+
+  /**
+   * Wait for any in-flight refresh to finish and then run a fresh forced refresh, so explicit mutations (`rescan`,
+   * `trust`, `statusAfterWrite`) never join an older refresh that started before the mutation or discovery flag.
+   */
+  private async forceRefresh(
+    project: ProjectRuntime,
+    options?: { subscriberId?: number; profileId?: string; rescan?: boolean },
+  ): Promise<boolean> {
+    const stillActive = (): boolean => {
+      if (this.disposed || this.projects.get(project.key) !== project) return false
+      if (options?.subscriberId !== undefined && options.profileId !== undefined) {
+        return this.subscriptions.get(options.subscriberId)?.get(options.profileId) === project
+      }
+      return true
+    }
+    while (project.refreshing) {
+      await project.refreshing.catch(() => undefined)
+      if (!stillActive()) return false
+    }
+    if (!stillActive()) return false
+    if (options?.rescan) project.rescanNext = true
+    await this.refreshProject(project, true)
+    return stillActive()
   }
 
   /**
@@ -828,7 +854,9 @@ export class GitService {
     } else {
       await this.options.trustStore.trust(root, configHash)
     }
-    await this.refreshProject(project, true)
+    if (!await this.forceRefresh(project, { subscriberId, profileId })) {
+      throw new GitCancelledError()
+    }
     return this.viewOf(project)
   }
 
@@ -886,9 +914,7 @@ export class GitService {
 
   /** A refresh that is certain to start after a write finished, then the repository's fresh status. */
   private async statusAfterWrite(project: ProjectRuntime, repo: RepoRuntime): Promise<GitRepoStatusView | null> {
-    if (this.disposed || this.projects.get(project.key) !== project) return null
-    if (project.refreshing) await project.refreshing.catch(() => undefined)
-    await this.refreshProject(project, true).catch(() => undefined)
+    if (!await this.forceRefresh(project).catch(() => false)) return null
     return repo.statusView
   }
 

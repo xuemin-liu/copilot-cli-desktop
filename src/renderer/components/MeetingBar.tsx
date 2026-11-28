@@ -20,11 +20,18 @@ export interface MeetingBarProps {
 }
 
 /**
- * A meeting an outside agent hosts, with no Copilot tab in it yet: it belongs to no tab, so its bar shows above every tab
- * until the person adds a session (then it shows above that one) or dismisses it.
+ * A meeting an outside agent hosts, with no foreground Desktop tab in it yet: it belongs to no foreground tab, so its bar
+ * shows above every tab until the person adds a session (or hosts/joins from a Desktop tab) or dismisses it.
  */
-export function outsideHostedWithoutTabs(meeting: MeetingView): boolean {
-  return meeting.hostTabId.startsWith('guest:') && !meeting.participants.some((participant) => !participant.guest)
+export function outsideHostedWithoutTabs(meeting: MeetingView, tabs: readonly DesktopSessionTab[] = []): boolean {
+  if (!meeting.hostTabId.startsWith('guest:')) return false
+  const isForegroundTab = (tabId: string | undefined): boolean => (
+    Boolean(tabId && tabs.some((tab) => tab.id === tabId && !tab.tempReviewer && !tab.reviewer))
+  )
+  if (isForegroundTab(meeting.hostDesktopTabId)) return false
+  if (meeting.participants.some((participant) => !participant.guest && (tabs.length === 0 || isForegroundTab(participant.tabId)))) return false
+  if (meeting.participants.some((participant) => isForegroundTab(participant.desktopTabId))) return false
+  return true
 }
 
 /** The command that gives Claude Code the meeting tools, once; other agents take the same URL in their settings. */
@@ -97,13 +104,24 @@ export function MeetingBar({ meetings, tabs, activeTabId, focusedPeekTabId = nul
   const [invited, setInvited] = useState<string | null>(null)
   const contextTabIds = [focusedPeekTabId, activeTabId].filter((id): id is string => Boolean(id))
   if (contextTabIds.length === 0) return null
+  const isHostTab = (meeting: MeetingView, tabId: string): boolean => (
+    meeting.hostTabId === tabId || meeting.hostDesktopTabId === tabId
+  )
+  const isParticipantTab = (meeting: MeetingView, tabId: string): boolean => (
+    meeting.participants.some((participant) => participant.tabId === tabId || participant.desktopTabId === tabId)
+  )
   const shown = meetings.filter((meeting) => !dismissed.has(meeting.id)
-    && (contextTabIds.includes(meeting.hostTabId)
-      || meeting.participants.some((participant) => contextTabIds.includes(participant.tabId))
-      || outsideHostedWithoutTabs(meeting)))
+    && (contextTabIds.some((id) => isHostTab(meeting, id) || isParticipantTab(meeting, id))
+      || outsideHostedWithoutTabs(meeting, tabs)))
   if (!shown.length) return null
   const busy = new Set(meetings.filter((meeting) => meeting.stage !== 'closed')
-    .flatMap((meeting) => [meeting.hostTabId, ...meeting.participants.map((participant) => participant.tabId)]))
+    .flatMap((meeting) => [
+      meeting.hostTabId,
+      ...(meeting.hostDesktopTabId ? [meeting.hostDesktopTabId] : []),
+      ...meeting.participants.flatMap((participant) => (
+        participant.desktopTabId ? [participant.tabId, participant.desktopTabId] : [participant.tabId]
+      )),
+    ]))
   const act = (meeting: MeetingView, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript' | 'use-answer', tabId?: string, role?: string): void => {
     void window.copilotDesktop.meetingAction(meeting.id, action, tabId, role).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error)))
   }
@@ -126,11 +144,11 @@ export function MeetingBar({ meetings, tabs, activeTabId, focusedPeekTabId = nul
         const pending = meeting.invited ?? []
         // Only a session whose CLI is running can take the material; a stopped one has to be resumed first.
         // A tab running another CLI joins as an outside agent, by the meeting's id, not from this list.
-        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !tab.tempReviewer && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
+        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !tab.tempReviewer && !tab.reviewer && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
         const roleFor = (tabId: string | null): 'Host' | 'Reviewer' | null => (
           !tabId ? null
-            : meeting.hostTabId === tabId ? 'Host'
-            : meeting.participants.some((participant) => participant.tabId === tabId) ? 'Reviewer'
+            : isHostTab(meeting, tabId) ? 'Host'
+            : isParticipantTab(meeting, tabId) ? 'Reviewer'
             : null
         )
         const role = roleFor(focusedPeekTabId) ?? roleFor(activeTabId) ?? `Hosted by ${meeting.hostTitle}`

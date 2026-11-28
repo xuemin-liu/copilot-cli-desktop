@@ -36,6 +36,7 @@ if (!process.versions.electron) {
     const site = createServer((request, response) => {
       response.setHeader('content-type', 'text/html')
       if (request.url === '/load-alert') return response.end('<!doctype html><title>Load alert</title><script>alert("Welcome back")</script><p id="out">loaded</p>')
+      if (request.url === '/beforeunload') return response.end('<!doctype html><title>Guarded</title><script>window.addEventListener("beforeunload", e => { e.preventDefault(); e.returnValue = "" })</script><input id="draft" value="dirty"><p id="out">guarded</p>')
       if (request.url === '/opened') return response.end('<!doctype html><title>Opened page</title><p id="out">opened</p>')
       response.end(`<!doctype html><title>Dialog fixture</title><style>button{display:block;margin:6px;padding:6px}</style>
         <button id="confirm" onclick="out.textContent = confirm('Delete item 42?') ? 'confirmed' : 'cancelled'">Delete</button>
@@ -145,6 +146,34 @@ if (!process.versions.electron) {
         assert.equal(response.status, 400, JSON.stringify(dialog))
       }
       assert.equal((await call('/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(plan([step('hover', 'Bad', { selector: '#plain', dialog: { accept: true } })])) })).status, 400)
+
+      // closePage edge cases:
+      // 1. Closing an already-destroyed or unknown page id returns true cleanly without throwing:
+      assert.equal(await browser.reader.closePage(999999, async () => true), true)
+      // 2. Closing a page while an alert/confirm dialog is holding it dismisses the dialog and closes the page:
+      browser.action('testing:off')
+      browser.action('new-page')
+      const alertPage = browser.view.webContents
+      await browser.navigate(`http://127.0.0.1:${site.address().port}/`)
+      await until(async () => !alertPage.isLoading() && await alertPage.executeJavaScript('document.readyState') === 'complete', 'alertPage loaded')
+      void alertPage.executeJavaScript("document.getElementById('alert').click()")
+      await until(() => browser.snapshot.dialog?.pageId === alertPage.id, 'alert dialog holding page')
+      assert.equal(await browser.reader.closePage(alertPage.id, async () => true), true)
+      await until(() => alertPage.isDestroyed(), 'alert-held page destroyed cleanly')
+      // 3. Closing a guarded beforeunload page returns false and preserves the page when cancelled (including when CDP is detached), then closes when accepted:
+      browser.action('new-page')
+      const guardedPage = browser.view.webContents
+      await browser.navigate(`http://127.0.0.1:${site.address().port}/beforeunload`)
+      await until(async () => !guardedPage.isLoading() && await guardedPage.executeJavaScript('document.readyState') === 'complete', 'guardedPage loaded')
+      await guardedPage.executeJavaScript("document.getElementById('draft').focus(); document.body.click()")
+      guardedPage.sendInputEvent({ type: 'mouseDown', x: 10, y: 10, button: 'left', clickCount: 1 })
+      guardedPage.sendInputEvent({ type: 'mouseUp', x: 10, y: 10, button: 'left', clickCount: 1 })
+      await delay(100)
+      assert.equal(await browser.reader.closePage(guardedPage.id, async () => false), false, 'cancelling beforeunload keeps page open')
+      assert.equal(guardedPage.isDestroyed(), false)
+      assert.equal(await browser.reader.closePage(guardedPage.id, async () => true), true, 'accepting beforeunload closes page')
+      await until(() => guardedPage.isDestroyed(), 'guardedPage destroyed after accept')
+
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true }, null, 2))
     } finally { await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
   }

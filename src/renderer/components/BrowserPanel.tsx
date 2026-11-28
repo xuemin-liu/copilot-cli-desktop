@@ -47,6 +47,28 @@ function CertificateWarning({ warning, popup, banner, answer }: { warning: Brows
   </section>
 }
 
+export function deliverBrowserPrompt(options: {
+  independent: boolean
+  currentTarget: string | null
+  tabId: string
+  detail: { text: string } | { image: true }
+  done: string
+  attachImage?: (destination: string) => boolean
+  insertText?: (destination: string, text: string) => boolean
+}): { ok: true; notice: string } | { ok: false; error: string } {
+  if (options.independent && !options.currentTarget) {
+    return { ok: false, error: 'Open or resume a session in this window to attach browser context.' }
+  }
+  const destination = options.independent ? options.currentTarget! : options.tabId
+  const delivered = 'image' in options.detail
+    ? (options.attachImage ?? attachClipboardImage)(destination)
+    : (options.insertText ?? insertIntoPrompt)(destination, options.detail.text)
+  if (!delivered) {
+    return { ok: false, error: 'Open or focus the session terminal in this window to attach browser context.' }
+  }
+  return { ok: true, notice: options.done }
+}
+
 export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessionTitle = 'Browser', independent = false, promptTargetId = null }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; sessionTitle?: string; independent?: boolean; promptTargetId?: string | null }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
@@ -156,13 +178,22 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
   useEffect(() => window.copilotDesktop.onBrowserPicked((id, text) => {
     if (id === tabId) setSelection(list => list.length >= MAX_PICKED_ELEMENTS ? list : [...list, text])
   }), [tabId])
-  const toPrompt = (detail: { text: string } | { image: true }, done: string): void => {
-    const currentTarget = promptDestination.current
-    if (independent && !currentTarget) { setError('Open or resume a session in this window to attach browser context.'); return }
-    const destination = independent ? currentTarget! : tabId
-    if ('image' in detail) attachClipboardImage(destination)
-    else insertIntoPrompt(destination, detail.text)
-    setNotice(done)
+  const toPrompt = (detail: { text: string } | { image: true }, done: string): boolean => {
+    const outcome = deliverBrowserPrompt({
+      independent: Boolean(independent),
+      currentTarget: promptDestination.current ?? null,
+      tabId,
+      detail,
+      done,
+    })
+    if (!outcome.ok) {
+      setNotice(null)
+      setError(outcome.error)
+      return false
+    }
+    setError(null)
+    setNotice(outcome.notice)
+    return true
   }
   const selectElements = (): void => {
     setError(null); setNotice(null); setPicking(true); setSelecting(true)
@@ -170,8 +201,10 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
   }
   const addSelection = (): void => {
     void window.copilotDesktop.browserPickCancel(tabId).catch(() => {})
-    toPrompt({ text: composeElementSelection(selection, note) }, 'Elements added to the prompt box. Review them and press Enter to send.')
-    setSelection([]); setNote('')
+    if (toPrompt({ text: composeElementSelection(selection, note) }, 'Elements added to the prompt box. Review them and press Enter to send.')) {
+      setSelection([])
+      setNote('')
+    }
   }
   const pickElement = (several = false): void => {
     if (picking) { void window.copilotDesktop.browserPickCancel(tabId).catch(() => {}); return }

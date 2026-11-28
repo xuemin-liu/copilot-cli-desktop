@@ -95,9 +95,9 @@ export function resolveToolPanelPromptTarget(input: {
   if (input.activeProfileId !== input.projectProfileId) return undefined
   const activeSession = input.sessions.find((tab) => tab.id === input.activeTabId)
   const candidate = activeSession?.tempReviewer
-    ? (input.visibleMain && !input.visibleMain.tempReviewer && input.visibleMain.workspaceProfileId === input.projectProfileId ? input.visibleMain : undefined)
+    ? (input.visibleMain && !input.visibleMain.tempReviewer && !input.visibleMain.reviewer && input.visibleMain.workspaceProfileId === input.projectProfileId ? input.visibleMain : undefined)
     : activeSession
-  if (!candidate || candidate.tempReviewer) return undefined
+  if (!candidate || candidate.tempReviewer || candidate.reviewer) return undefined
   if (['dormant', 'completed', 'crashed'].includes(candidate.status)) return undefined
   if ((input.poppedOutTabIds ?? []).includes(candidate.id)) return undefined
   return candidate
