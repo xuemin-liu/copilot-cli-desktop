@@ -8,6 +8,8 @@ export interface MeetingBarProps {
   meetings: readonly MeetingView[]
   tabs: readonly DesktopSessionTab[]
   activeTabId: string | null
+  /** Workspace-scoped focused temporary reviewer peek, if any, so meetings joined by a peeked reviewer stay controllable. */
+  focusedPeekTabId?: string | null
   onError(message: string): void
   /** Now, for how long ago a guest last asked for a message; tests fix it, otherwise the bar keeps its own clock. */
   now?: number
@@ -75,7 +77,7 @@ export function formatMeetingCost(cost: MeetingView['cost'], withGuests = false)
  * The meetings the active session hosts or takes part in, with the person's controls: add a session, invite an outside
  * agent, remove a guest, open the transcript, let a paused meeting go on, stop it.
  */
-export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow, toolsUrl = null, toolsFallback = false }: MeetingBarProps): JSX.Element | null {
+export function MeetingBar({ meetings, tabs, activeTabId, focusedPeekTabId = null, onError, now: fixedNow, toolsUrl = null, toolsFallback = false }: MeetingBarProps): JSX.Element | null {
   const [clock, setClock] = useState(() => Date.now())
   const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && (meeting.hostGuest || meeting.participants.some((participant) => participant.guest)))
   useEffect(() => {
@@ -93,9 +95,11 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
   const [guestName, setGuestName] = useState('Claude Code')
   const [guestRole, setGuestRole] = useState('')
   const [invited, setInvited] = useState<string | null>(null)
-  if (!activeTabId) return null
+  const contextTabIds = [focusedPeekTabId, activeTabId].filter((id): id is string => Boolean(id))
+  if (contextTabIds.length === 0) return null
   const shown = meetings.filter((meeting) => !dismissed.has(meeting.id)
-    && (meeting.hostTabId === activeTabId || meeting.participants.some((participant) => participant.tabId === activeTabId)
+    && (contextTabIds.includes(meeting.hostTabId)
+      || meeting.participants.some((participant) => contextTabIds.includes(participant.tabId))
       || outsideHostedWithoutTabs(meeting)))
   if (!shown.length) return null
   const busy = new Set(meetings.filter((meeting) => meeting.stage !== 'closed')
@@ -122,10 +126,14 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
         const pending = meeting.invited ?? []
         // Only a session whose CLI is running can take the material; a stopped one has to be resumed first.
         // A tab running another CLI joins as an outside agent, by the meeting's id, not from this list.
-        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
-        const role = meeting.hostTabId === activeTabId ? 'Host'
-          : meeting.participants.some((participant) => participant.tabId === activeTabId) ? 'Reviewer'
-          : `Hosted by ${meeting.hostTitle}`
+        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !tab.tempReviewer && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
+        const roleFor = (tabId: string | null): 'Host' | 'Reviewer' | null => (
+          !tabId ? null
+            : meeting.hostTabId === tabId ? 'Host'
+            : meeting.participants.some((participant) => participant.tabId === tabId) ? 'Reviewer'
+            : null
+        )
+        const role = roleFor(focusedPeekTabId) ?? roleFor(activeTabId) ?? `Hosted by ${meeting.hostTitle}`
         return (
           <section key={meeting.id} className={`meeting-bar meeting-bar-${meeting.stage}`} aria-label={`Meeting ${meeting.id}`}>
             <span className="meeting-bar-id">Meeting {meeting.id}</span>

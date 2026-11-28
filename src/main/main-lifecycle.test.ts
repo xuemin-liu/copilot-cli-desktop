@@ -54,6 +54,8 @@ interface Harness {
   countBroadcasts(): { count: number }
   /** Keep the usage flush that comes before a CLI install or update waiting until `work` settles. */
   holdUsageFlush(work: Promise<void>): void
+  /** Keep the next config write waiting until `work` settles. */
+  holdConfigWrite(work: Promise<void>): void
   /** Keep the next CLI install or update command running until `work` settles. */
   holdMaintenance(work: Promise<void>): void
   /** Run the startup settings save with every save failing; resolves with what was written to the app log. */
@@ -78,6 +80,8 @@ interface Harness {
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
+  addBackgroundReviewer(profileId: string, hostTabId: string | null, id?: string): Promise<string>
+  setUnresolvedCopilot(): void
   enableTasks(tabId: string,supported?:boolean): void
   captureWorkflowNotifications():{title:string;body:string}[]
   flushWorkflowNotifications():void
@@ -346,6 +350,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; holdCopilotCommand(work); },
           holdUsageFlush(work) { usageService.noteSourceChanged ??= () => {}; usageService.flush = async () => { await work; }; },
+          holdConfigWrite(work) { const original = persistConfig; persistConfig = async (...args) => { persistConfig = original; await work; return original(...args); }; },
           async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
             try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
           chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
@@ -368,6 +373,23 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
+          async addBackgroundReviewer(profileId, hostTabId, id = 'tab-' + nextTabSequence++) {
+            const session = new PtySession({ file: 'inert-pty', args: [], cwd: ${JSON.stringify(directory)}, env: process.env, spawnPty: spawnNodePty, sessionId: null, discoverSessionIdFromOutput: false, monitorSessionPermissions: false, detectApprovals: false });
+            managedTabs.set(id, { session });
+            tabsState = createBackgroundTab(tabsState, {
+              id, title: 'Review · Claude Code', cli: 'claude', workspaceProfileId: profileId,
+              sessionPermissionPreset: null, sessionPermissionMode: null, permissionWarning: null,
+              remote: false, cliVersion: '2.1.0', lastSessionId: null, canFork: false, launchWorktree: false, autoTitle: false,
+              tempReviewer: { groupId: 'g-test', hostTabId, seatId: 'claude', cli: 'claude', repository: 'o/r', prLabel: 'Meeting T1', prNumber: null, prUrl: null, meetingId: 'T1' },
+            });
+            syncTabState();
+            broadcastState();
+            refreshMenus();
+            wireSessionEvents(id, session);
+            await session.start();
+            return id;
+          },
+          setUnresolvedCopilot() { state.resolution = { ...state.resolution, version: null }; },
           enableTasks: (tabId,supported=true) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = supported?'1.0.105':null; workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite')); },
           captureWorkflowNotifications:()=>{Notification.enabled=true;desktopConfig.notifications=true;workflowNotifications.prime(attentionItems());workflowAttentionReady=true;return Notification.shown},
           flushWorkflowNotifications:()=>workflowNotifications.flush(),
@@ -4414,4 +4436,327 @@ test('an overlapping pumpMeetingOutbox call coalesces and delivers work queued w
 
   assert.ok(firstSpawn.written.some(chunk => chunk.includes('First tab delivery')), 'first pass delivered to the first tab')
   assert.ok(secondSpawn.written.some(chunk => chunk.includes('Second tab delivery queued mid-pump')), 'overlapping pump coalesced and delivered mid-pump work without a third pump')
+}))
+
+test('tempReviewer activation redirects to peek without changing activeTabId, tool panel ownership, or lastDockedToolSession, and rejects popout/browser/gitCursorContext', async () => fixture(async (h, directory) => {
+  const { profile } = configure(h, directory)
+  h.createTestWindow()
+  h.focusMainWindow(true)
+  const first = await h.createMain()
+  const tab1Id = first.activeTabId!
+  const second = await h.request('desktop:create-tab', 'new', profile.id)
+  const tab2Id = second.activeTabId!
+  const tab2BrowserProfileId = second.tabs.find(tab => tab.id === tab2Id)!.browserProfileId!
+
+  // Open a session-owned Git tool tab on tab-2:
+  await h.request('desktop:tools-state', 420)
+  const toolsBefore = await h.request<{ projects: Array<{ profileId: string; ownerId?: string; visible: boolean; tabs: Array<{ kind: string; ownerId?: string }> }> }>('desktop:tools-action', profile.id, { type: 'add', kind: 'git' })
+  const pBefore = toolsBefore.projects.find(project => project.profileId === profile.id)!
+  assert.equal(pBefore.ownerId, tab2BrowserProfileId)
+  assert.equal(pBefore.visible, true)
+
+  // Spawn a profile-scoped (hostTabId: null) temporary reviewer in the same workspace:
+  const revId = await h.addBackgroundReviewer(profile.id, null)
+  const revSpawn = h.spawns[h.spawns.length - 1]!
+  revSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+
+  // Attempting to activate the reviewer (e.g. notification click or direct IPC) must keep tab-2 active (not revId, not tab-1),
+  // preserve tab-2's right-side panel ownership, and emit desktop:peek-reviewer-request with the resolved peekKey:
+  const win = h.windowFor()
+  const beforeMessages = win.messages.length
+  const afterActivate = await h.request('desktop:activate-tab', revId)
+  assert.equal(afterActivate.activeTabId, tab2Id, 'activeTabId stays on tab-2, never moving to reviewer or tab-1')
+  assert.ok(
+    win.messages.slice(beforeMessages).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === revId && msg.payload?.peekKey === tab2Id),
+    'main sends desktop:peek-reviewer-request with tabId and resolved peekKey',
+  )
+  const toolsAfter = await h.request<{ projects: Array<{ profileId: string; ownerId?: string; visible: boolean }> }>('desktop:tools-state', 420)
+  const pAfter = toolsAfter.projects.find(project => project.profileId === profile.id)!
+  assert.equal(pAfter.ownerId, tab2BrowserProfileId, 'right-side panel stays owned by tab-2')
+  assert.equal(pAfter.visible, true)
+  assert.equal(afterActivate.tabs.find(tab => tab.id === revId)?.browserProfileId, undefined, 'tempReviewer does not allocate a browserProfileId')
+
+  // Clicking File -> Close Session Tab (non-accelerator) while a hosted peek is focused must hide the peek via
+  // desktop:hide-peek-request instead of closing the host session or routing through desktop:tab-shortcut-request,
+  // and Restart/Unload Active Session must be disabled while the reviewer peek has focus:
+  h.refreshAppMenu()
+  await h.request('desktop:focused-peek-tab', revId)
+  const findFileMenuItem = (label: string) => {
+    const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
+    const fileMenu = menu.find(item => item.label === 'File')!
+    return fileMenu.submenu!.find(item => item.label === label)!
+  }
+  assert.equal(findFileMenuItem('Restart Active Session').enabled, false, 'Restart Active Session is disabled while a temporary reviewer peek has focus')
+  assert.equal(findFileMenuItem('Unload Active Session').enabled, false, 'Unload Active Session is disabled while a temporary reviewer peek has focus')
+  // Help -> Show Active Session Log targets the focused reviewer while a peek has focus:
+  const findHelpMenuItem = (label: string) => {
+    const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: () => void }> }>
+    const helpMenu = menu.find(item => item.label === 'Help')!
+    return helpMenu.submenu!.find(item => item.label === label)!
+  }
+  const beforeLogShellCalls = h.shellCalls.length
+  const showLogItem = findHelpMenuItem('Show Active Session Log')
+  assert.equal(showLogItem.enabled, true, 'Show Active Session Log stays enabled while a temporary reviewer peek has focus')
+  showLogItem.click?.()
+  await pause(50)
+  assert.ok(
+    h.shellCalls.slice(beforeLogShellCalls).some(call => call.action === 'reveal' && call.target.endsWith(`${revId}.log`)),
+    'Show Active Session Log opens the focused reviewer log, not the host log',
+  )
+  const beforeHostedClose = win.messages.length
+  findFileMenuItem('Close Session Tab').click?.({}, {}, { triggeredByAccelerator: false })
+  await pause(50)
+  assert.ok(
+    win.messages.slice(beforeHostedClose).some(msg => msg.channel === 'desktop:hide-peek-request'),
+    'hosted focused peek menu click sends dedicated desktop:hide-peek-request',
+  )
+  assert.equal(
+    win.messages.slice(beforeHostedClose).some(msg => msg.channel === 'desktop:tab-shortcut-request'),
+    false,
+    'hosted focused peek menu click does not reuse desktop:tab-shortcut-request',
+  )
+  const afterHostedClose = await h.request('desktop:get-state')
+  assert.ok(afterHostedClose.tabs.some(tab => tab.id === tab2Id), 'host tab-2 survives File -> Close Session Tab while hosted peek is focused')
+
+  // While the peeked reviewer has focus in a focused main window, notifications from the regular host tab still fire
+  // (only the focused reviewer's own notifications are suppressed), and clicking/activating the host transfers focus
+  // back to the host in both main and renderer even when activeTabId is already tab2Id:
+  ;(win as unknown as { isFocused: () => boolean }).isFocused = () => true
+  const notices = h.captureWorkflowNotifications()
+  const beforeHostNotice = notices.length
+  const tab2Spawn = h.spawns[1]!
+  tab2Spawn.emitExit()
+  await pause(50)
+  assert.ok(notices.length > beforeHostNotice, 'regular host session completion still notifies while peeked reviewer has focus')
+  const beforeHostRefocus = win.messages.length
+  await h.request('desktop:activate-tab', tab2Id)
+  assert.ok(
+    win.messages.slice(beforeHostRefocus).some(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === tab2Id),
+    'explicit activation of the already-active host clears reviewer focus in the renderer',
+  )
+  assert.equal(findFileMenuItem('Restart Active Session').enabled, true, 'Restart Active Session re-enables once focus returns to host')
+  assert.equal(findFileMenuItem('Unload Active Session').enabled, true, 'Unload Active Session re-enables once focus returns to host')
+
+  // Even when main already saw focusedPeekTabId === null (e.g. after switching to an intervening tab), explicit
+  // regular-tab activation still emits desktop:clear-peek-focus-request so stale renderer focus cannot revive:
+  const beforeSecondSelect = win.messages.length
+  await h.request('desktop:activate-tab', tab1Id)
+  assert.ok(
+    win.messages.slice(beforeSecondSelect).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    'explicit regular-tab activation always emits desktop:clear-peek-focus-request',
+  )
+  await h.request('desktop:activate-tab', tab2Id)
+
+  // Popped-out host A + active tab B: activating A's hosted reviewer selects A in the main window (so A + peeked reviewer
+  // display in main instead of only raising A's detached window) and keeps tab-2's docked panel ownership:
+  const revOf1 = await h.addBackgroundReviewer(profile.id, tab1Id)
+  await h.request('desktop:pop-out-tab', tab1Id)
+  await h.request('desktop:activate-tab', tab2Id)
+  const beforePopoutRev = win.messages.length
+  const afterPopoutRev = await h.request('desktop:activate-tab', revOf1)
+  assert.equal(afterPopoutRev.activeTabId, tab1Id, 'activating reviewer of popped-out host A selects host A in main window')
+  assert.ok(
+    win.messages.slice(beforePopoutRev).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === revOf1 && msg.payload?.peekKey === tab1Id),
+    'main emits desktop:peek-reviewer-request anchored to popped-out host A',
+  )
+  const toolsWithPopoutHost = await h.request<{ projects: Array<{ profileId: string; ownerId?: string }> }>('desktop:tools-state', 420)
+  assert.equal(toolsWithPopoutHost.projects.find(project => project.profileId === profile.id)?.ownerId, tab2BrowserProfileId, 'docked right-side panel remains on tab-2 while popped-out host A is selected')
+  await h.request('desktop:activate-tab', tab2Id)
+
+  // Reject pop-out and show-browser-in-main for tempReviewer tabs:
+  await assert.rejects(async () => h.request('desktop:pop-out-tab', revId), /cannot be opened in a separate window/)
+  await assert.rejects(async () => h.request('desktop:browser-show-main', revId), /do not have a tools panel or browser/)
+
+  // Pressing Enter in a tempReviewer must not attach the host's gitCursorContext:
+  const writeResult = await h.request<{ gitCursorContextAttached: boolean }>('desktop:write-tab', revId, '\r', 'host diff excerpt')
+  assert.equal(writeResult.gitCursorContextAttached, false)
+  assert.equal(revSpawn.written.some(chunk => chunk.includes('host diff excerpt')), false)
+
+  // Persisted tool layouts never include the tempReviewer:
+  await h.flushToolPersistence()
+  const savedTools = JSON.parse(await readFile(join(directory, 'workspace-tool-tabs-v2.json'), 'utf8')) as {
+    projects: Array<{ profileId: string; layouts: Record<string, unknown> }>
+  }
+  const savedProject = savedTools.projects.find(project => project.profileId === profile.id)!
+  assert.equal(revId in savedProject.layouts, false, 'tempReviewer id is never persisted as a tool panel layout owner')
+  assert.equal(tab2BrowserProfileId in savedProject.layouts, true, 'host tab-2 layout is persisted')
+}))
+
+test('foreign-workspace activeTabId survives Close Session Tab menu while standalone focused peek enables shortcut, and activateProfile ignores tempReviewer when restoring', async () => fixture(async (h, directory) => {
+  const ws1Dir = join(directory, 'ws1')
+  const ws2Dir = join(directory, 'ws2')
+  const ws3Dir = join(directory, 'ws3')
+  await Promise.all([mkdir(ws1Dir, { recursive: true }), mkdir(ws2Dir, { recursive: true }), mkdir(ws3Dir, { recursive: true })])
+  const ws1 = createWorkspaceProfile(ws1Dir)
+  const ws2 = createWorkspaceProfile(ws2Dir)
+  const ws3 = createWorkspaceProfile(ws3Dir)
+  ws3.tabs = [{ title: 'Saved WS3', lastSessionId: SOURCE, active: true }]
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws1.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })
+  h.createTestWindow()
+  h.focusMainWindow(true)
+
+  const ws1State = await h.createMain()
+  const ws1TabId = ws1State.activeTabId!
+  const ws2RevId = await h.addBackgroundReviewer(ws2.id, null)
+  const ws3RevId = await h.addBackgroundReviewer(ws3.id, null)
+
+  // With Copilot unresolved, switching to ws2 (which only has a standalone reviewer) retains ws1TabId as activeTabId.
+  // activateProfile must refresh the native menu itself (no manual refreshAppMenu call here):
+  h.refreshAppMenu()
+  h.setUnresolvedCopilot()
+  await h.request('desktop:activate-profile', ws2.id)
+  const findMenuItem = (menuLabel: string, itemLabel: string) => {
+    const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
+    const top = menu.find(item => item.label === menuLabel)!
+    return top.submenu!.find(item => item.label === itemLabel)!
+  }
+  const closeBeforeFocus = findMenuItem('File', 'Close Session Tab')
+  assert.equal(closeBeforeFocus.enabled, false, 'activateProfile refreshes menu: Close Session Tab is disabled with foreign activeTabId and no focused peek')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'Restart Active Session is disabled with foreign activeTabId in an empty workspace')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false, 'Unload Active Session is disabled with foreign activeTabId in an empty workspace')
+  assert.equal(findMenuItem('Help', 'Show Active Session Log').enabled, false, 'Show Active Session Log is disabled with foreign activeTabId and no focused peek')
+  closeBeforeFocus.click?.({}, {}, { triggeredByAccelerator: false })
+  await pause(50)
+  const afterDirectClick = await h.request('desktop:get-state')
+  assert.ok(afterDirectClick.tabs.some(tab => tab.id === ws1TabId), 'retained foreign-workspace session survives Close Session Tab')
+
+  // While the main window is focused on empty workspace ws2 (retaining ws1TabId as activeTabId), a completion event from
+  // the hidden ws1 session is not treated as focused and still delivers its notification:
+  const ws2Win = h.windowFor()
+  ;(ws2Win as unknown as { isFocused: () => boolean }).isFocused = () => true
+  const ws1Notices = h.captureWorkflowNotifications()
+  const beforeWs1Complete = ws1Notices.length
+  h.spawns[0]!.emitExit()
+  await pause(50)
+  assert.ok(ws1Notices.length > beforeWs1Complete, 'completion from inactive workspace session notifies while main window is focused on an empty workspace')
+
+  // Reporting focused standalone peek enables Close Session Tab (sending desktop:hide-peek-request) and Show Active
+  // Session Log (targeting the standalone reviewer) while keeping Restart/Unload disabled and ws1TabId untouched:
+  await h.request('desktop:focused-peek-tab', ws2RevId)
+  const closeWithPeek = findMenuItem('File', 'Close Session Tab')
+  assert.equal(closeWithPeek.enabled, true, 'Close Session Tab is enabled when standalone peek is focused')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'Restart stays disabled for focused standalone peek')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false, 'Unload stays disabled for focused standalone peek')
+  const standaloneLogItem = findMenuItem('Help', 'Show Active Session Log')
+  assert.equal(standaloneLogItem.enabled, true, 'Show Active Session Log enables for focused standalone peek')
+  const beforeStandaloneLog = h.shellCalls.length
+  standaloneLogItem.click?.({}, {})
+  await pause(50)
+  assert.ok(
+    h.shellCalls.slice(beforeStandaloneLog).some(call => call.action === 'reveal' && call.target.endsWith(`${ws2RevId}.log`)),
+    'Show Active Session Log opens the focused standalone reviewer log',
+  )
+  const win = h.windowFor()
+  const beforeShortcut = win.messages.length
+  closeWithPeek.click?.({}, {}, { triggeredByAccelerator: false })
+  assert.ok(
+    win.messages.slice(beforeShortcut).some(msg => msg.channel === 'desktop:hide-peek-request'),
+    'standalone focused peek sends dedicated desktop:hide-peek-request to renderer',
+  )
+  const afterPeekShortcut = await h.request('desktop:get-state')
+  assert.ok(afterPeekShortcut.tabs.some(tab => tab.id === ws1TabId), 'foreign-workspace session still survives standalone peek close shortcut')
+
+  // Activating a ws1 reviewer while on empty ws2 switches back to ws1 and emits desktop:peek-reviewer-request
+  // without emitting desktop:clear-peek-focus-request:
+  const ws1RevId = await h.addBackgroundReviewer(ws1.id, ws1TabId)
+  const beforeCrossWsPeek = win.messages.length
+  const afterCrossWsPeek = await h.request('desktop:activate-tab', ws1RevId)
+  assert.equal(afterCrossWsPeek.activeProfileId, ws1.id, 'cross-workspace reviewer click switches activeProfileId to ws1')
+  assert.equal(afterCrossWsPeek.activeTabId, ws1TabId, 'cross-workspace reviewer click keeps ws1TabId as activeTabId')
+  assert.ok(
+    win.messages.slice(beforeCrossWsPeek).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws1RevId && msg.payload?.peekKey === ws1TabId),
+    'cross-workspace reviewer click emits desktop:peek-reviewer-request',
+  )
+  assert.equal(
+    win.messages.slice(beforeCrossWsPeek).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    false,
+    'cross-workspace reviewer click does not emit desktop:clear-peek-focus-request',
+  )
+
+  // Switching back to ws2 and deliberately selecting ws1 via activateProfile emits desktop:clear-peek-focus-request
+  // with ws1TabId (even though ws1TabId already belonged to ws1) and re-enables session menu items automatically:
+  await h.request('desktop:activate-profile', ws2.id)
+  const beforeDeliberateReturn = win.messages.length
+  await h.request('desktop:activate-profile', ws1.id)
+  assert.ok(
+    win.messages.slice(beforeDeliberateReturn).some(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === ws1TabId),
+    'deliberate activateProfile back to ws1 emits desktop:clear-peek-focus-request with ws1TabId',
+  )
+  assert.equal(findMenuItem('File', 'Close Session Tab').enabled, true, 'switching back to ws1 refreshes Close Session Tab back to enabled')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, true, 'switching back to ws1 re-enables Restart Active Session')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, true, 'switching back to ws1 re-enables Unload Active Session')
+  assert.equal(findMenuItem('Help', 'Show Active Session Log').enabled, true, 'switching back to ws1 re-enables Show Active Session Log')
+
+  // Overlap case: with a side chat retained as ws1's activeTabId, switch to empty ws2, then select ws1 while its
+  // config write is still pending and immediately click ws1's reviewer. The clear-peek-focus-request must precede
+  // desktop:peek-reviewer-request so the earlier workspace switch cannot cancel the later reviewer selection:
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws1.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true, supportedOptions: ['--resume', '--add-dir', '--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+  const ws1SideState = await h.createSide(ws1, ws1TabId)
+  const ws1SideTabId = ws1SideState.activeTabId!
+  assert.notEqual(ws1SideTabId, ws1TabId)
+  h.setUnresolvedCopilot()
+  await h.request('desktop:activate-profile', ws2.id)
+  let releaseConfigWrite!: () => void
+  h.holdConfigWrite(new Promise<void>((resolve) => { releaseConfigWrite = resolve }))
+  const beforeOverlap = win.messages.length
+  const pendingProfileSwitch = h.request('desktop:activate-profile', ws1.id)
+  await h.request('desktop:activate-tab', ws1RevId)
+  releaseConfigWrite()
+  await pendingProfileSwitch
+  const overlapMessages = win.messages.slice(beforeOverlap)
+  const clearIdx = overlapMessages.findIndex(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === ws1SideTabId)
+  const peekIdx = overlapMessages.findIndex(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws1RevId && msg.payload?.peekKey === ws1TabId)
+  assert.ok(clearIdx >= 0, 'overlap switch emits desktop:clear-peek-focus-request for retained side chat')
+  assert.ok(peekIdx > clearIdx, 'reviewer peek request arrives after the earlier workspace switch clear-peek-focus-request')
+  assert.equal(
+    overlapMessages.slice(peekIdx + 1).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    false,
+    'no delayed clear-peek-focus-request arrives after the reviewer peek request once persistConfig resolves',
+  )
+
+  // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId.
+  // If the user selects ws3's standalone reviewer while the workspace save is still pending, restoration carries that
+  // peek synchronously when the restored host tab is published (before dormant-tab startup finishes), so a second
+  // reviewer chosen via Reviewer Bar during saved-tab startup is never overwritten when startup completes:
+  const ws3Rev2Id = await h.addBackgroundReviewer(ws3.id, null)
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws2.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })
+  let releaseWs3Save!: () => void
+  h.holdConfigWrite(new Promise<void>((resolve) => { releaseWs3Save = resolve }))
+  let releaseWs3Spawn!: () => void
+  h.blockSpawnPlan(new Promise<void>((resolve) => { releaseWs3Spawn = resolve }))
+  const beforeWs3Restore = win.messages.length
+  const pendingWs3 = h.request('desktop:activate-profile', ws3.id)
+  await h.request('desktop:activate-tab', ws3RevId)
+  assert.ok(
+    win.messages.slice(beforeWs3Restore).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws3RevId && msg.payload?.peekKey === `profile:${ws3.id}`),
+    'selecting standalone reviewer while ws3 save is pending initially peeks under profile:<ws3>',
+  )
+  releaseWs3Save()
+  await pause(30)
+  const restoredHostTab = (await h.request('desktop:get-state')).tabs.find(tab => tab.workspaceProfileId === ws3.id && !tab.tempReviewer)
+  assert.equal(restoredHostTab?.title, 'Saved WS3', 'saved regular tab in ws3 is published before startup finishes')
+  assert.ok(
+    win.messages.slice(beforeWs3Restore).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws3RevId && msg.payload?.peekKey === restoredHostTab!.id),
+    'restoring ws3 saved tab carries the pending standalone reviewer peek synchronously before startup completes',
+  )
+  // User selects a second reviewer via Reviewer Bar while the restored host tab is still starting:
+  await h.request('desktop:focused-peek-tab', ws3Rev2Id)
+  const afterSecondSeat = win.messages.length
+  releaseWs3Spawn()
+  const ws3State = await pendingWs3
+  assert.notEqual(ws3State.activeTabId, ws3RevId, 'activateProfile never activates a background tempReviewer')
+  assert.equal(ws3State.activeTabId, restoredHostTab!.id, 'saved regular tab in ws3 remains active')
+  assert.equal(
+    win.messages.slice(afterSecondSeat).some(msg => msg.channel === 'desktop:peek-reviewer-request'),
+    false,
+    'completing restored host startup does not reissue desktop:peek-reviewer-request for the earlier reviewer',
+  )
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'focused second reviewer stays focused after ws3 tab startup')
+  const beforeSecondLog = h.shellCalls.length
+  findMenuItem('Help', 'Show Active Session Log').click?.({}, {})
+  await pause(50)
+  assert.ok(
+    h.shellCalls.slice(beforeSecondLog).some(call => call.action === 'reveal' && call.target.endsWith(`${ws3Rev2Id}.log`)),
+    'Show Active Session Log targets the second reviewer selected during startup',
+  )
 }))

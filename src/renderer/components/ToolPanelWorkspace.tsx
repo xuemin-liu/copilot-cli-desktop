@@ -4,6 +4,7 @@ import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
 import { dockedReorder, isTerminalKind, panelTabs } from '../../main/tool-tabs.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
+import { resolveToolPanelPromptTarget } from '../peek-state.js'
 import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
 import { BrowserPanel } from './BrowserPanel.js'
@@ -33,7 +34,9 @@ interface Props {
 
 export function ToolPanelWorkspace({ children, desktop, tools, obscured, act }: Props): JSX.Element {
   const project = tools.projects.find(project => project.profileId === desktop.activeProfileId)
-  const { side } = visibleSessionTabs({ tabs: desktop.tabs, activeTabId: desktop.activeTabId })
+  // Do not pass peekTabId here: peeking a temporary reviewer must not resize the right-side panel or force ProjectDock
+  // into full-window takeover mode. SessionWorkspace handles narrow widths with its compact switcher.
+  const { main, side } = visibleSessionTabs({ tabs: desktop.tabs, activeTabId: desktop.activeTabId }, null, desktop.activeProfileId)
   // The panel can stay open with nothing docked, after its last tab moves to its own window.
   const visible = Boolean(project?.visible)
   return <div className="tool-panel-workspace">
@@ -41,12 +44,12 @@ export function ToolPanelWorkspace({ children, desktop, tools, obscured, act }: 
       onWidthChange={width => { if (project) act(project.profileId, { type: 'width', width }) }}
       panel={({ takeover }) => <>
         {tools.projects.map(entry => <ProjectToolsHost key={entry.profileId} project={entry} desktop={desktop} tools={tools}
-          shown={entry.profileId === desktop.activeProfileId && visible} obscured={obscured} takeover={takeover} act={act} />)}
+          visibleMain={main} shown={entry.profileId === desktop.activeProfileId && visible} obscured={obscured} takeover={takeover} act={act} />)}
       </>}>{children}</ProjectDock>
   </div>
 }
 
-function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, act }: Omit<Props, 'children'> & { project: ProjectTools; shown: boolean; takeover: boolean }): JSX.Element {
+function ProjectToolsHost({ project, desktop, tools, visibleMain, shown, obscured, takeover, act }: Omit<Props, 'children'> & { project: ProjectTools; visibleMain: DesktopState['tabs'][number] | null; shown: boolean; takeover: boolean }): JSX.Element {
   const action = (value: ToolsAction): void => act(project.profileId, value)
   const selected = project.tabs.find(tab => tab.id === project.activeId)
   const profile = desktop.profiles.find(profile => profile.id === project.profileId)
@@ -57,7 +60,14 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const [gitViews, setGitViews] = useState<GitToolView[]>([])
   const nextViews = reconcileGitViews(gitViews, project, sessions)
   if (nextViews !== gitViews) setGitViews(nextViews)
-  const prompt = desktop.activeProfileId === project.profileId ? sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id)) : undefined
+  const prompt = resolveToolPanelPromptTarget({
+    projectProfileId: project.profileId,
+    activeProfileId: desktop.activeProfileId,
+    activeTabId: desktop.activeTabId,
+    sessions,
+    visibleMain,
+    poppedOutTabIds: desktop.poppedOutTabIds,
+  })
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
   const terminalProject = useMemo(() => projectTerminal(project.profileId), [project.profileId])

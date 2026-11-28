@@ -274,6 +274,54 @@ test('visibleSessionTabs supports non-destructive peekTabId without clobbering a
     { main: visibleSessionTabs(focusedReviewer, resolved.peekTabId).main?.id, side: visibleSessionTabs(focusedReviewer, resolved.peekTabId).side?.id },
     { main: 'host', side: 'rev-codex' },
   )
+  // Without peekTabId (e.g. main-process callers or Hide in flight), a focused tempReviewer still resolves to host + sideChat, never main = reviewer:
+  assert.deepEqual(
+    { main: visibleSessionTabs(focusedReviewer).main?.id, side: visibleSessionTabs(focusedReviewer).side?.id },
+    { main: 'host', side: 'side' },
+  )
+})
+
+test('resolvePeekHostAndTab preserves second host tab for profile-scoped reviewer and isolates foreign-workspace activeTabId', () => {
+  const profileMeta = { groupId: 'g-multi', hostTabId: null, seatId: 'seat-1', cli: 'claude' as const, repository: 'o/r', prLabel: 'Meeting AB12', prNumber: null, prUrl: null, meetingId: 'AB12' }
+  let state = createTab(EMPTY_TABS_STATE, { id: 'tab-1', title: 'First', workspaceProfileId: 'ws-1' })
+  state = createTab(state, { id: 'tab-2', title: 'Second', workspaceProfileId: 'ws-1' })
+  state = createBackgroundTab(state, {
+    id: 'rev-prof',
+    title: 'Meeting AB12 · Claude Code',
+    cli: 'claude',
+    workspaceProfileId: 'ws-1',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: profileMeta,
+  })
+  // tab-2 is active and peeks rev-prof; even if rev-prof were focused directly, peekKey stays on tab-2, not tab-1:
+  const peekMap = { 'tab-2': 'rev-prof' }
+  assert.deepEqual(resolvePeekHostAndTab(state, peekMap, 'ws-1'), { peekKey: 'tab-2', hostTabId: 'tab-2', peekTabId: 'rev-prof' })
+  const focusedProfRev = activateTab(state, 'rev-prof')
+  assert.deepEqual(resolvePeekHostAndTab(focusedProfRev, peekMap, 'ws-1'), { peekKey: 'tab-2', hostTabId: 'tab-2', peekTabId: 'rev-prof' })
+
+  // Foreign-workspace activeTabId: ws-2 has only a standalone reviewer while activeTabId still points at ws-1's tab-2:
+  const ws2Meta = { ...profileMeta, groupId: 'g-ws2', seatId: 'seat-ws2' }
+  const crossWsState = createBackgroundTab(state, {
+    id: 'rev-ws2',
+    title: 'Meeting AB12 · Codex CLI',
+    cli: 'codex',
+    workspaceProfileId: 'ws-2',
+    cliVersion: '0.172.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: ws2Meta,
+  })
+  const ws2Peek = { 'profile:ws-2': 'rev-ws2' }
+  assert.deepEqual(resolvePeekHostAndTab(crossWsState, ws2Peek, 'ws-2'), { peekKey: 'profile:ws-2', hostTabId: null, peekTabId: 'rev-ws2' })
+  assert.deepEqual(
+    { main: visibleSessionTabs(crossWsState, 'rev-ws2', 'ws-2').main?.id, side: visibleSessionTabs(crossWsState, 'rev-ws2', 'ws-2').side },
+    { main: 'rev-ws2', side: null },
+  )
+  assert.deepEqual(visibleSessionTabs(crossWsState, null, 'ws-2'), { main: null, side: null })
 })
 
 test('resolvePeekHostAndTab and visibleSessionTabs support profile-scoped (hostTabId: null) reviewers with or without open regular tabs', () => {

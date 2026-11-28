@@ -344,15 +344,27 @@ function projectTools(): ProjectToolService {
     project: id => desktopConfig.profiles.find(profile => profile.id === id),
     session: id => tabsState.tabs.find(tab => tab.id === id),
     currentSession: () => {
+      const profileId = desktopConfig.activeProfileId
+      const rawActive = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId) ?? null
+      if (rawActive?.tempReviewer) {
+        const lastDocked = validatedLastDockedSession(profileId)
+        if (lastDocked) return lastDocked
+        const hostId = rawActive.tempReviewer.hostTabId
+        if (hostId) {
+          const host = tabsState.tabs.find((tab) => tab.id === hostId)
+          if (host && !host.tempReviewer && host.workspaceProfileId === profileId && !sessionWindows.has(host.id)) return host.id
+        }
+        return null
+      }
       const { main } = visibleSessionTabs(tabsState)
-      if (main?.workspaceProfileId !== desktopConfig.activeProfileId) return null
-      if (main && sessionWindows.has(main.id)) return lastDockedToolSession.get(main.workspaceProfileId) ?? null
-      return main?.id ?? null
+      if (!main || main.tempReviewer || main.workspaceProfileId !== profileId) return null
+      if (sessionWindows.has(main.id)) return validatedLastDockedSession(main.workspaceProfileId)
+      return main.id
     },
     currentProject: () => desktopConfig.activeProfileId ?? null,
     activateProject: async (id, ownerId) => {
       await activateProfile(id)
-      const owner = ownerId && tabsState.tabs.find(tab => tab.workspaceProfileId === id && tab.browserProfileId === ownerId)
+      const owner = ownerId && tabsState.tabs.find(tab => tab.workspaceProfileId === id && tab.browserProfileId === ownerId && !tab.tempReviewer)
       if (owner) {
         lastDockedToolSession.set(id, owner.id)
         selectSessionInMain(owner.id)
@@ -376,7 +388,61 @@ const sharedSitePermissions = (): SitePermissions => sitePermissions ??= new Sit
 let browserZoom: BrowserZoom | null = null
 const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
 const lastDockedToolSession = new Map<string, string>()
+let focusedPeekTabId: string | null = null
 const sessionWindows = new Map<string, BrowserWindow>()
+
+function validatedLastDockedSession(profileId: string | null): string | null {
+  if (!profileId) return null
+  const cached = lastDockedToolSession.get(profileId)
+  if (!cached) return null
+  const tab = tabsState.tabs.find((candidate) => candidate.id === cached)
+  if (!tab || tab.tempReviewer || tab.workspaceProfileId !== profileId || sessionWindows.has(tab.id)) return null
+  return tab.id
+}
+
+function activeWorkspaceRegularTabId(): string | null {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
+  if (!tab || tab.tempReviewer || tab.workspaceProfileId !== desktopConfig.activeProfileId) return null
+  return tab.id
+}
+
+function activeFocusedPeekTabId(): string | null {
+  if (!focusedPeekTabId) return null
+  const valid = tabsState.tabs.some((tab) => (
+    tab.id === focusedPeekTabId && Boolean(tab.tempReviewer) && tab.workspaceProfileId === desktopConfig.activeProfileId
+  ))
+  if (!valid) { focusedPeekTabId = null; return null }
+  return focusedPeekTabId
+}
+
+function requestPeekReviewerInMain(tabId: string, peekKey: string): void {
+  if (focusedPeekTabId !== tabId) {
+    focusedPeekTabId = tabId
+    refreshMenus()
+  }
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  window.webContents.send('desktop:peek-reviewer-request', { tabId, peekKey })
+}
+
+/**
+ * Carries an active standalone (`hostTabId: null`) reviewer peek onto a newly published host tab in the same workspace
+ * synchronously right after `broadcastState()`, before any async session startup can race with later user Peek/Hide actions.
+ */
+function carryStandalonePeekToHost(profileId: string, hostCandidateId: string | null): void {
+  if (!hostCandidateId || desktopConfig.activeProfileId !== profileId) return
+  const pendingPeekId = activeFocusedPeekTabId()
+  if (!pendingPeekId) return
+  const peekTab = tabsState.tabs.find((tab) => (
+    tab.id === pendingPeekId
+    && Boolean(tab.tempReviewer)
+    && tab.tempReviewer!.hostTabId === null
+    && tab.workspaceProfileId === profileId
+  ))
+  const hostTab = tabsState.tabs.find((tab) => tab.id === hostCandidateId && !tab.tempReviewer && tab.workspaceProfileId === profileId)
+  if (!peekTab || !hostTab) return
+  requestPeekReviewerInMain(peekTab.id, hostTab.sideParentTabId ?? hostTab.id)
+}
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -1360,7 +1426,7 @@ const workflowResources=new WorkflowResources(async path=>{
 let workflowAttentionReady=false
 const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   const popout=sessionWindows.get(item.tabId),window=popout??mainWindow
-  return !window?.isFocused()||(!popout&&tabsState.activeTabId!==item.tabId)
+  return !window?.isFocused()||(!popout&&(activeFocusedPeekTabId()??activeWorkspaceRegularTabId())!==item.tabId)
 },notice=>showNotification(notice.title,notice.body,()=>{
   const item=notice.items.length===1?notice.items[0]:undefined
   if(item?.sessionId){restoreMainWindow();void openSessionFromHistory(item.sessionId).catch(()=>{workflowNotice='The task session could not be opened. Its task record is retained.';broadcastState()})}
@@ -1427,8 +1493,9 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
+  activeFocusedPeekTabId()
   const { main } = visibleSessionTabs(tabsState)
-  if (main && !sessionWindows.has(main.id)) lastDockedToolSession.set(main.workspaceProfileId, main.id)
+  if (main && !main.tempReviewer && !sessionWindows.has(main.id)) lastDockedToolSession.set(main.workspaceProfileId, main.id)
   projectToolService?.refreshConnections()
   const shared=snapshot()
   if(workflowAttentionReady)workflowNotifications.update(attentionItems(shared),desktopConfig.notifications)
@@ -1477,6 +1544,7 @@ function popOutSessionTab(tabId: string): DesktopState {
   if (shuttingDown()) throw new Error('The application is shutting down')
   const tab = tabsState.tabs.find(tab => tab.id === tabId)
   if (!tab) throw new Error('Unknown session tab')
+  if (tab.tempReviewer) throw new Error('Temporary reviewer sessions cannot be opened in a separate window')
   const existing = sessionWindows.get(tabId)
   if (existing) { focusSessionWindow(existing); return snapshot() }
   const window = new BrowserWindow({
@@ -1542,6 +1610,10 @@ async function persistConfig(change?: () => void, onFailure?: () => void): Promi
  * when this runs.
  */
 function persistProfileTabs(): void {
+  const rawActive = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)
+  const activeForPersist = rawActive?.tempReviewer
+    ? (visibleSessionTabs(tabsState).main?.id ?? null)
+    : tabsState.activeTabId
   for (const profile of desktopConfig.profiles) {
     if (!profilesWithSessionTabs.has(profile.id)) continue
     profile.tabs = tabsState.tabs
@@ -1558,7 +1630,7 @@ function persistProfileTabs(): void {
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
-          ...(tab.id === tabsState.activeTabId ? { active: true as const } : {}),
+          ...(tab.id === activeForPersist ? { active: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
           ...(tab.lastSessionId && tab.sessionPermissionMode && !tab.sideChat
@@ -1742,7 +1814,7 @@ function trayStatusLabel(): string {
 }
 
 function activeAccessLabel(): string {
-  const activeTab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
+  const activeTab = tabsState.tabs.find((candidate) => candidate.id === activeWorkspaceRegularTabId())
   if (activeTab?.remote) return 'Unknown (remote session)'
   if (activeTab?.cli) return `Set in ${sessionCliLabel(activeTab.cli)}`
   const preset = activeTab?.sessionPermissionPreset
@@ -1756,8 +1828,9 @@ function activeAccessLabel(): string {
 // the tab button) consistently disabled for one instead of only some of them
 // surfacing that as a runtime error.
 function activeTabIsRestartable(): boolean {
-  const tab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
-  return tab !== undefined && !tab.remote
+  const focusedId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
+  const tab = tabsState.tabs.find((candidate) => candidate.id === focusedId)
+  return tab !== undefined && !tab.remote && !tab.tempReviewer
 }
 
 /**
@@ -1774,7 +1847,7 @@ function refreshMenus(): void {
 
 function rebuildTrayMenu(): void {
   if (!tray || tray.isDestroyed()) return
-  const accessLabel = tabsState.activeTabId ? 'Active session access' : 'Profile startup access'
+  const accessLabel = activeWorkspaceRegularTabId() ? 'Active session access' : 'Profile startup access'
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Copilot CLI Desktop', click: restoreMainWindow },
     { label: trayStatusLabel(), enabled: false },
@@ -1788,12 +1861,18 @@ function rebuildTrayMenu(): void {
     {
       label: 'Restart Active Session',
       enabled: !shuttingDown() && activeTabIsRestartable(),
-      click: () => tabsState.activeTabId && observe(restartSessionTab(tabsState.activeTabId), 'Could not restart session tab'),
+      click: () => {
+        const targetId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
+        if (targetId && activeTabIsRestartable()) observe(restartSessionTab(targetId), 'Could not restart session tab')
+      },
     },
     {
       label: 'Show Active Session Log',
-      enabled: tabsState.activeTabId !== null,
-      click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
+      enabled: (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()) !== null,
+      click: () => {
+        const logTabId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
+        if (logTabId) observe(showSessionLog(logTabId), 'Could not show session log')
+      },
     },
     { label: 'Desktop Settings…', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
     { type: 'separator' },
@@ -1857,7 +1936,7 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const product = tab?.cli ? sessionCliLabel(tab.cli) : 'Copilot'
   const popout = sessionWindows.get(tabId)
   const window = popout ?? mainWindow
-  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || tabsState.activeTabId === tabId)
+  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()) === tabId)
   if (isFocusedOnThisTab) return
   const openTab = (): void => {
     if (tabsState.tabs.some((candidate) => candidate.id === tabId)) {
@@ -2425,7 +2504,7 @@ async function startSessionTab(
   titleOverride: string | null = null,
   /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved).
    * `worktreePath`: the existing worktree chosen there, checked against the project's worktrees before anything starts. */
-  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli; carryStandalonePeek?: true
     /** A review loop's session: sandboxed, in the desktop's own clone of the PR, with its own Copilot home (pr-review-launch.ts). */
     reviewer?: { area: ReviewerArea; policy: ReviewerPolicy } } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
@@ -2554,6 +2633,7 @@ async function startSessionTab(
   syncWorkspaceState()
   syncTabState()
   broadcastState()
+  if (sideOptions.carryStandalonePeek) carryStandalonePeekToHost(profile.id, id)
   refreshMenus()
   wireSessionEvents(id, session)
 
@@ -3030,7 +3110,47 @@ function activateSessionTab(tabId: string): DesktopState {
 }
 
 function selectSessionInMain(tabId: string): DesktopState {
+  const target = tabsState.tabs.find((tab) => tab.id === tabId)
+  if (target?.tempReviewer) {
+    const previous = tabsState.activeTabId
+    const previousProfile = desktopConfig.activeProfileId
+    const hostId = target.tempReviewer.hostTabId
+    const current = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId) ?? null
+    let realTargetId: string | null = null
+    if (hostId && tabsState.tabs.some((tab) => tab.id === hostId && !tab.tempReviewer)) {
+      const alreadyOnHost = current !== null && !current.tempReviewer
+        && (current.id === hostId || current.sideParentTabId === hostId)
+      realTargetId = alreadyOnHost ? current.id : hostId
+    } else if (current && !current.tempReviewer && current.workspaceProfileId === target.workspaceProfileId) {
+      realTargetId = current.id
+    } else {
+      realTargetId = validatedLastDockedSession(target.workspaceProfileId)
+        ?? tabsState.tabs.find((tab) => !tab.tempReviewer && !tab.sideChat && tab.workspaceProfileId === target.workspaceProfileId)?.id
+        ?? null
+    }
+    if (realTargetId && realTargetId !== tabsState.activeTabId) {
+      tabsState = activateTab(tabsState, realTargetId)
+      syncTabState()
+      if (tabsState.activeTabId !== previous) persistProfileTabs()
+      followActiveTabWorkspace()
+    } else if (desktopConfig.activeProfileId !== target.workspaceProfileId
+      && desktopConfig.profiles.some((profile) => profile.id === target.workspaceProfileId)) {
+      desktopConfig.activeProfileId = target.workspaceProfileId
+      syncWorkspaceState()
+      void persistConfig().catch((error) => void writeAppLog(`Failed to save the active workspace: ${String(error)}`))
+    }
+    if (tabsState.activeTabId !== previous || desktopConfig.activeProfileId !== previousProfile) {
+      broadcastState()
+      refreshMenus()
+    }
+    const realTarget = realTargetId ? tabsState.tabs.find((tab) => tab.id === realTargetId) : null
+    const targetPeekKey = realTarget ? (realTarget.sideParentTabId ?? realTarget.id) : `profile:${target.workspaceProfileId}`
+    restoreMainWindow()
+    requestPeekReviewerInMain(target.id, targetPeekKey)
+    return snapshot()
+  }
   const previous = tabsState.activeTabId
+  focusedPeekTabId = null
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
   // The saved tabs mark the one on screen, which a restart shows again.
@@ -3039,6 +3159,9 @@ function selectSessionInMain(tabId: string): DesktopState {
   restoreMainWindow()
   broadcastState()
   refreshMenus()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:clear-peek-focus-request', tabId)
+  }
   return snapshot()
 }
 
@@ -4361,7 +4484,6 @@ async function launchTempReviewerSeatNow(
       tabsState = createBackgroundTab(tabsState, {
         id,
         title,
-        browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
         workspaceProfileId: profile.id,
         sessionPermissionPreset: reviewerPreset,
         sessionPermissionMode: null,
@@ -4478,7 +4600,6 @@ async function launchTempReviewerSeatNow(
       id,
       title,
       cli,
-      browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
       workspaceProfileId: profile.id,
       sessionPermissionPreset: null,
       sessionPermissionMode: null,
@@ -5541,7 +5662,6 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
       id,
       title: `Meeting ${group.meetingId} · ${label}`,
       cli,
-      browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
       workspaceProfileId: profile.id,
       sessionPermissionPreset: null,
       sessionPermissionMode: null,
@@ -5683,7 +5803,6 @@ async function launchMeetingCopilotSeat(group: MeetingReviewerGroup, seat: Extra
     tabsState = createBackgroundTab(tabsState, {
     id,
     title,
-    browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map((tab) => tab.browserProfileId)),
     workspaceProfileId: profile.id,
     sessionPermissionPreset: preset,
     sessionPermissionMode: null,
@@ -6922,6 +7041,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
       catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
       tabsState = closeTab(tabsState, tabId)
+      if (focusedPeekTabId === tabId) focusedPeekTabId = null
       if (closing?.tempReviewer) {
         const seat = tempReviewers.group(closing.tempReviewer.groupId)?.requiredSeats.get(closing.tempReviewer.seatId)
         if (seat && seat.tabId === tabId) {
@@ -7482,7 +7602,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   if (!profile || !state.resolution || state.resolution.version === null) return
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
-  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id) && !unrestoredProfileTabs.get(profile.id)?.length) return
+  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer) && !unrestoredProfileTabs.get(profile.id)?.length) return
   if (!unrestoredProfileTabs.has(profile.id) && profile.tabs.length > 0) {
     unrestoredProfileTabs.set(profile.id, [...profile.tabs])
   }
@@ -7498,7 +7618,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     }
     // A fresh tab for an empty workspace is not a saved session to retain.
     if (!restored.length) {
-      try { await createSessionTab(profile, 'new', null, [], null, profile.name) }
+      try { await createSessionTab(profile, 'new', null, [], null, profile.name, { carryStandalonePeek: true }) }
       catch (error) { await writeAppLog(`Failed to start a session for ${profile.path}: ${String(error)}`) }
       return
     }
@@ -7524,6 +7644,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     syncTabState()
     persistProfileTabs()
     broadcastState()
+    if (activate && target) carryStandalonePeekToHost(profile.id, target)
     refreshMenus()
     // A restore that showed its tab starts it, with its side chat on screen, and is over once they have started. One
     // that only listed its tabs starts nothing.
@@ -7663,23 +7784,37 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
   desktopConfig.activeProfileId = profile.id
+  focusedPeekTabId = null
   syncWorkspaceState()
-  await persistConfig()
   broadcastState()
+  refreshMenus()
   // Tabs from an inactive profile keep running rather than closing, so
   // switching TO a profile that already has tabs must switch the active tab
   // to one of them — otherwise activeProfileId and activeTabId/terminal
   // input can end up pointing at two different profiles.
-  const activeTabBelongsToProfile = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId === profile.id
-  if (!activeTabBelongsToProfile) {
-    const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id)
+  // Publish workspace and focus transitions synchronously before awaiting
+  // persistence so a subsequent reviewer selection made while saving cannot be
+  // cancelled by a delayed clear-peek-focus request.
+  const activeTabBelongsToProfile = tabsState.tabs.some((tab) => tab.id === tabsState.activeTabId && !tab.tempReviewer && tab.workspaceProfileId === profile.id)
+  let needsRestore = false
+  if (activeTabBelongsToProfile) {
+    if (mainWindow && !mainWindow.isDestroyed() && tabsState.activeTabId) {
+      mainWindow.webContents.send('desktop:clear-peek-focus-request', tabsState.activeTabId)
+    }
+  } else {
+    const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)
     if (firstProfileTab) {
       selectSessionInMain(firstProfileTab.id)
       const popout = sessionWindows.get(firstProfileTab.id)
       if (popout) focusSessionWindow(popout)
-    } else if (isCopilotResolved()) {
-      await restoreTabsForProfile()
+    } else {
+      needsRestore = true
     }
+  }
+  await persistConfig()
+  if (needsRestore && desktopConfig.activeProfileId === profile.id && isCopilotResolved()
+    && !tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)) {
+    await restoreTabsForProfile()
   }
   return snapshot()
 }
@@ -7999,7 +8134,7 @@ async function runCopilotResourceMutation(args: string[]): Promise<void> {
 function installApplicationMenu(): void {
   const focusedWindow = BrowserWindow.getFocusedWindow()
   const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
-  const menuTabId = focusedPopoutId ?? tabsState.activeTabId
+  const menuTabId = focusedPopoutId ?? (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId())
   const mac = process.platform === 'darwin'
   const settingsItem = { label: mac ? 'Settings…' : 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') }
   const quitItem = { label: mac ? 'Quit Copilot CLI Desktop' : 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() }
@@ -8036,13 +8171,20 @@ function installApplicationMenu(): void {
         {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
-          enabled: tabsState.activeTabId !== null,
+          enabled: Boolean(focusedPopoutId || activeWorkspaceRegularTabId() || activeFocusedPeekTabId()),
           click: (_item: unknown, _window: unknown, event?: { triggeredByAccelerator?: boolean }) => {
             if (forwardTabShortcut('w', event?.triggeredByAccelerator)) return
             const focused = BrowserWindow.getFocusedWindow()
             const poppedOut = focused ? sessionWindowId(focused.webContents) : undefined
-            if (poppedOut) dockSessionTab(poppedOut)
-            else if (tabsState.activeTabId) observe(closeSessionTab(tabsState.activeTabId), 'Could not close session tab')
+            if (poppedOut) { dockSessionTab(poppedOut); return }
+            if (activeFocusedPeekTabId()) {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('desktop:hide-peek-request')
+              }
+              return
+            }
+            const closeTarget = activeWorkspaceRegularTabId()
+            if (closeTarget) observe(closeSessionTab(closeTarget), 'Could not close session tab')
           },
         },
         {
@@ -8058,7 +8200,7 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer),
           click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
         },
         {
@@ -8069,7 +8211,7 @@ function installApplicationMenu(): void {
         },
         {
           label: 'Unload Active Session',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && tab.status !== 'dormant'),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer && tab.status !== 'dormant'),
           click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
         ...(mac ? [] : [settingsItem, { type: 'separator' as const }, quitItem]),
@@ -8108,8 +8250,8 @@ function installApplicationMenu(): void {
       submenu: [
         {
           label: 'Show Active Session Log',
-          enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
+          enabled: menuTabId !== null,
+          click: () => menuTabId && observe(showSessionLog(menuTabId), 'Could not show session log'),
         },
         { label: 'Show Application Log', click: () => observe(showApplicationLog(), 'Could not show application log') },
         { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },
@@ -8476,6 +8618,7 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
+  if (tab.tempReviewer) throw new Error('Temporary reviewer sessions do not have a tools panel or browser')
   if (projectTools().showSessionWindow(tab.id)) return
   await activateProfile(tab.workspaceProfileId)
   lastDockedToolSession.set(tab.workspaceProfileId, tab.id)
@@ -8741,6 +8884,17 @@ ipcMain.handle('desktop:activate-tab', (event, tabId: unknown) => {
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return activateSessionTab(tabId)
 })
+ipcMain.handle('desktop:focused-peek-tab', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents) return
+  if (tabId !== null && typeof tabId !== 'string') throw new Error('Invalid peek tab')
+  const next = typeof tabId === 'string' && tabsState.tabs.some((tab) => (
+    tab.id === tabId && Boolean(tab.tempReviewer) && tab.workspaceProfileId === desktopConfig.activeProfileId
+  )) ? tabId : null
+  if (focusedPeekTabId === next) return
+  focusedPeekTabId = next
+  refreshMenus()
+})
 ipcMain.handle('desktop:navigate-session', (event, direction: unknown) => {
   assertTrustedIpcSender(event)
   if (event.sender !== mainWindow?.webContents || (direction !== 'back' && direction !== 'forward')) {
@@ -8803,7 +8957,7 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
   const session = managedTabs.get(tabId)?.session
   const idle = session?.activity === 'idle' || (session?.activity === null && session.recentOutputText.includes('open sidebar'))
   if (data === '\r' && typeof gitCursorContext === 'string' && gitCursorContext.trim() && gitCursorContext.length <= 8_000
-    && !inputTransitionPending(tabId) && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && session?.bracketedPaste && idle) {
+    && !inputTransitionPending(tabId) && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && !tab.tempReviewer && session?.bracketedPaste && idle) {
     // This Enter belongs to the person. Append one bracketed excerpt to their existing draft, then submit once it has
     // landed, holding subsequent input just as sendSessionTask does. No cursor movement or draft replacement is needed.
     const paste = taskPasteSequence(`\n\n${gitCursorContext}`)

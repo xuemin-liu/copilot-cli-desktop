@@ -138,6 +138,26 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   fanOut: (profileId, label, count) => ipcRenderer.invoke('desktop:fan-out', profileId, label, count),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
+  setFocusedPeekTab: (tabId) => ipcRenderer.invoke('desktop:focused-peek-tab', tabId ?? null),
+  onPeekReviewerRequest: (listener) => {
+    const handler = (_event, payload) => {
+      if (payload && typeof payload.tabId === 'string' && typeof payload.peekKey === 'string') {
+        listener({ tabId: payload.tabId, peekKey: payload.peekKey })
+      }
+    }
+    ipcRenderer.on('desktop:peek-reviewer-request', handler)
+    return () => ipcRenderer.removeListener('desktop:peek-reviewer-request', handler)
+  },
+  onHidePeekRequest: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('desktop:hide-peek-request', handler)
+    return () => ipcRenderer.removeListener('desktop:hide-peek-request', handler)
+  },
+  onClearPeekFocusRequest: (listener) => {
+    const handler = (_event, tabId) => listener(typeof tabId === 'string' ? tabId : null)
+    ipcRenderer.on('desktop:clear-peek-focus-request', handler)
+    return () => ipcRenderer.removeListener('desktop:clear-peek-focus-request', handler)
+  },
   navigateSession: (direction) => ipcRenderer.invoke('desktop:navigate-session', direction),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),
   dockTab: (tabId) => ipcRenderer.invoke('desktop:dock-tab', tabId),
