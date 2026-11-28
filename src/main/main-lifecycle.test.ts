@@ -117,9 +117,9 @@ interface Harness {
     tabId: string
     checkoutPath: string
   }>
-  seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null }): Promise<string>
+  seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(): Promise<void>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean }): Promise<void>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -617,7 +617,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             broadcastState();
             return { groupId: group.id, seatId: seat.id, tabId, checkoutPath: area.checkout };
           },
-          seedUnboundReviewReservationForTest: async ({ number, projectPath, isolatedSessionId = null }) => {
+          seedUnboundReviewReservationForTest: async ({ number, projectPath, isolatedSessionId = null, boundTaskSessionId = null, profileId = 'profile' }) => {
             app.isReady = () => true;
             const store = reviewReservations();
             const area = planReviewerArea(reviewerAreaBase());
@@ -626,6 +626,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             await makeReviewerArea(area);
             if (isolatedSessionId) {
               await mkdir(join(area.root, 'home', 'session-state', isolatedSessionId), { recursive: true });
+            }
+            if (boundTaskSessionId) {
+              const task = workflows().submitted(boundTaskSessionId, profileId, 'Review #' + number);
+              await store.bind(launchId, task.id);
             }
             collectKnownReviewerSessionIds();
             return launchId;
@@ -641,7 +645,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             reservations = null;
             syncTabState();
           },
-          runStartupConfigAndSweepForTest: async () => {
+          runStartupConfigAndSweepForTest: async (options = {}) => {
             app.isReady = () => true;
             collectKnownReviewerSessionIds();
             let migrated = false;
@@ -649,7 +653,15 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
             if (sanitized) legacyTabSanitizationUnflushed = true;
             syncWorkspaceState();
-            await saveSettingsAtStartup(migrated || sanitized);
+            const originalPersist = persistConfig;
+            if (options.failSave) {
+              persistConfig = async () => { throw new Error('ENOSPC: simulated settings write failure'); };
+            }
+            try {
+              await saveSettingsAtStartup(migrated || sanitized);
+            } finally {
+              persistConfig = originalPersist;
+            }
             await sweepReviewerAreas();
           },
           interruptOwnedTurn: (tabId,foreign) => {
@@ -5288,10 +5300,15 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     const ambiguousSameTitleUuid = '22222222-3333-4444-8555-666666666666'
     const genuineUserUuid = '33333333-4444-4555-8666-777777777777'
 
-    // First verify pre-sweep startup order when Copilot CLI resolution FAILS on Launch 1:
-    // desktop.json is sanitized and persisted BEFORE sweepReviewerAreas releases the unbound reservation,
-    // even though restoreTabsForProfile never runs while Copilot CLI is unresolved!
+    // First verify:
+    // - Launch 0 where saveSettingsAtStartup FAILS (ENOSPC): sweepReviewerAreas preserves BOTH a task-bound
+    //   reservation without a follow-up grant AND an unbound reservation on disk while desktop.json remains unsaved.
+    // - Launch 1 where Copilot CLI resolution FAILS (restoreSaved does nothing) and saveSettingsAtStartup succeeds:
+    //   desktop.json removes both the task-bound and isolated-home reviewer tabs and persists withholdAutoStart: true
+    //   BEFORE sweepReviewerAreas releases all three reservations!
+    const boundNoFollowupUuid = '44444444-5555-4666-8777-888888888888'
     profile.tabs = [
+      { title: 'Review #97', lastSessionId: boundNoFollowupUuid, autoTitle: false, launchWorktree: false },
       { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
       { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
     ]
@@ -5301,9 +5318,18 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       activeProfileId: profile.id,
     })
     await h.resetRuntimeForColdStartForTest()
+    await h.seedUnboundReviewReservationForTest({ number: 97, projectPath: repo, boundTaskSessionId: boundNoFollowupUuid, profileId: profile.id })
     await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
     await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
-    // Simulate Launch 1 where Copilot CLI is unresolved (restoreSaved does nothing), while startup reads desktop.json and sweeps:
+
+    // Simulate Launch 0 where saveSettingsAtStartup fails (ENOSPC) and Copilot CLI is unresolved:
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    h.setUnresolvedCopilot()
+    await h.runStartupConfigAndSweepForTest({ failSave: true })
+    assert.equal(h.reservationList().length, 3, 'failed startup settings write keeps both task-bound and unbound reviewer reservations on disk')
+
+    // Simulate Launch 1 where Copilot CLI is still unresolved (restoreSaved does nothing), and settings write succeeds:
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()
@@ -5312,8 +5338,13 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     await h.restoreSaved()
     await h.flushConfig()
     assert.equal(h.spawns.length, spawnsBeforeUnresolvedLaunch, 'unresolved Launch 1 spawns zero CLI processes')
-    assert.equal(h.reservationList().length, 0, 'Launch 1 sweep released unbound reservations on disk')
+    assert.equal(h.reservationList().length, 0, 'Launch 1 sweep released reservations after settings write succeeded')
     const savedAfterUnresolvedLaunch = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === boundNoFollowupUuid),
+      false,
+      'Launch 1 removed task-bound reviewer tab without follow-up grant after surviving Launch 0 failed save',
+    )
     assert.equal(
       savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid),
       false,

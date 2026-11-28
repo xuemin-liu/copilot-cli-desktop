@@ -1048,7 +1048,7 @@ function collectKnownReviewerSessionIds():Set<string> {
           if(entry.isDirectory()&&isValidSessionId(entry.name))knownReviewerSessionIds.add(entry.name)
         }
       }catch{/* Isolated Copilot home has not written session-state yet or was already removed. */}
-      if(record.taskId===null&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')&&record.project&&Number.isSafeInteger(record.number)){
+      if(!sessionId&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')&&record.project&&Number.isSafeInteger(record.number)){
         knownUnboundReviewerReservations.set(`${resolve(record.project)}#${record.number}`,{project:record.project,number:record.number})
       }
     }
@@ -1170,7 +1170,7 @@ async function sweepReviewerAreas():Promise<void>{
       // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
-      if(legacyTabSanitizationUnflushed&&record.taskId===null&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:'))continue
+      if((legacyTabSanitizationUnflushed||configWritesBlocked)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:'))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       if(meetingReviewers.holdsLaunch(record.launchId))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
