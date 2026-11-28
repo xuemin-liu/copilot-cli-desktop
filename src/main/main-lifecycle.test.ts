@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void>; beforeFallbackCopy?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -656,9 +656,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             if (options.earlySweepBeforeConfigRead) {
               await sweepReviewerAreas();
             }
-            const recoveryOps = (options.afterRecoveryRevalidation || options.afterBackupRename) ? (() => {
+            const recoveryOps = (options.afterRecoveryRevalidation || options.afterBackupRename || options.beforeFallbackCopy) ? (() => {
               let statFired = false;
               let renameFired = false;
+              let copyFired = false;
               return {
                 ...(options.afterRecoveryRevalidation ? {
                   stat: async (targetPath, ...rest) => {
@@ -677,6 +678,19 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
                       renameFired = true;
                       await options.afterBackupRename();
                     }
+                  },
+                } : {}),
+                ...(options.beforeFallbackCopy ? {
+                  rename: async () => {
+                    throw Object.assign(new Error('transient share lock'), { code: 'EBUSY' });
+                  },
+                  copyFile: async (srcPath, destPath, mode) => {
+                    if (!copyFired && String(srcPath) === configPath()) {
+                      copyFired = true;
+                      await options.beforeFallbackCopy();
+                    }
+                    const { copyFile: fsCopyFile } = await import('node:fs/promises');
+                    await fsCopyFile(srcPath, destPath, mode);
                   },
                 } : {}),
               };
@@ -5076,6 +5090,23 @@ test('concurrent automation runs under one rule isolate single-run cancellation 
   const sharedRule = { id: randomUUID(), revision: randomUUID(), projectId: profile.id, repository: 'owner/repo' }
   const sessionIds = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
 
+  const waitForSpawnOrLaunchError = async (expectedCount: number, launchPromise: Promise<unknown>, label: string): Promise<void> => {
+    let launchError: unknown = null
+    let failed = false
+    void launchPromise.catch((error) => {
+      failed = true
+      launchError = error
+    })
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      if (failed) throw launchError
+      if (h.spawns.length === expectedCount) return
+      await pause(20)
+    }
+    if (failed) throw launchError
+    assert.fail(`Timed out waiting for ${label}`)
+  }
+
   const startOneRun = async (idx: number, pid: number) => {
     let authorized = true
     const launch = h.launchRuleEvent(
@@ -5086,23 +5117,30 @@ test('concurrent automation runs under one rule isolate single-run cancellation 
       head,
       () => authorized,
     )
-    await waitFor(async () => h.spawns.length, (n) => n === idx + 1, `spawn ${idx + 1}`)
-    const spawn = h.spawns[idx]!
-    const stateNow = await h.request('desktop:get-state')
-    const tabId = stateNow.tabs[idx]!.id
-    const wtName = spawn.args.find((a) => a.startsWith('--worktree='))!.slice('--worktree='.length)
-    const worktree = join(`${repo}.worktrees`, wtName)
-    plain('worktree', 'add', '-q', '-b', wtName, worktree, 'HEAD')
-    const sessionId = sessionIds[idx]!
-    const log = join(directory, 'session-state', sessionId, 'events.jsonl')
-    await mkdir(dirname(log), { recursive: true })
-    await writeFile(log, JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } }) + '\n')
-    await writeFile(join(dirname(log), `inuse.${pid}.lock`), '')
-    h.configureBinding(tabId, pid, [pid])
-    spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
-    const receipt = await launch
-    await pause(350)
-    return { tabId, spawn, receipt, stopAuth: () => { authorized = false } }
+    void launch.catch(() => {})
+    try {
+      await waitForSpawnOrLaunchError(idx + 1, launch, `spawn ${idx + 1}`)
+      const spawn = h.spawns[idx]!
+      const stateNow = await h.request('desktop:get-state')
+      const tabId = stateNow.tabs[idx]!.id
+      const wtName = spawn.args.find((a) => a.startsWith('--worktree='))!.slice('--worktree='.length)
+      const worktree = join(`${repo}.worktrees`, wtName)
+      plain('worktree', 'add', '-q', '-b', wtName, worktree, 'HEAD')
+      const sessionId = sessionIds[idx]!
+      const log = join(directory, 'session-state', sessionId, 'events.jsonl')
+      await mkdir(dirname(log), { recursive: true })
+      await writeFile(log, JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } }) + '\n')
+      await writeFile(join(dirname(log), `inuse.${pid}.lock`), '')
+      h.configureBinding(tabId, pid, [pid])
+      spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+      const receipt = await launch
+      await pause(350)
+      return { tabId, spawn, receipt, stopAuth: () => { authorized = false } }
+    } catch (error) {
+      authorized = false
+      await launch.catch(() => {})
+      throw error
+    }
   }
 
   // (a) Two concurrent runs under the same rule.revision: interrupting run 1 leaves run 2 untouched.
@@ -5414,21 +5452,38 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     })
     assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
 
-    // Also verify the post-backup partial-restore transition: if a restore recreates desktop.json with
-    // partial/incomplete JSON immediately after the actual backup rename, startup blocks settings writes
-    // instead of overwriting the in-progress restore with defaults, keeps all 3 reviewer reservations,
-    // and then loads & sanitizes the restored settings once the restore finishes on the next launch:
+    // Verify BOTH post-backup partial-restore transitions when the live file matches the backup:
+    // (1) After a move (`rename`), recreating desktop.json from the backup (identical corrupt bytes) before
+    //     repairing it still blocks settings writes instead of overwriting the recreated file with defaults:
+    const corruptBeforeMove = validRawConfig + '\n<<<corrupt-tail-3>>>'
+    await writeFile(join(directory, 'desktop.json'), corruptBeforeMove)
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnMovedSameBytes = await h.runStartupConfigAndSweepForTest({
+      afterBackupRename: async () => {
+        await writeFile(join(directory, 'desktop.json'), corruptBeforeMove)
+      },
+    })
+    assert.ok(recoveryOnMovedSameBytes.hold, 'moved backup is held')
+    assert.equal(recoveryOnMovedSameBytes.writesBlocked, true, 'settings writes are blocked when desktop.json is recreated from backup after move')
+    assert.equal(recoveryOnMovedSameBytes.newlyPreserved, false)
+    assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), corruptBeforeMove, 'recreated desktop.json remains untouched on disk')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held after post-move recreation')
+    await rm(recoveryOnMovedSameBytes.hold!, { force: true })
+
+    // (2) When `rename` fails transiently (`EBUSY`) and fallback `copyFile` captures new incomplete restore
+    //     bytes (so live file == backup, yet both differ from pre-move bytes), startup still blocks writes:
     const partialPostRenameRaw = '{\n  "profiles": [\n    { "path": "incomplete'
-    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-3>>>')
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-4>>>')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest({
-      afterBackupRename: async () => {
+      beforeFallbackCopy: async () => {
         await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
       },
     })
-    assert.ok(recoveryOnCorruptLaunch3.hold, 'original unreadable config backup is held')
-    assert.equal(recoveryOnCorruptLaunch3.writesBlocked, true, 'settings writes are blocked so saveSettingsAtStartup does not overwrite partial restore')
+    assert.ok(recoveryOnCorruptLaunch3.hold, 'copied backup is held')
+    assert.equal(recoveryOnCorruptLaunch3.writesBlocked, true, 'settings writes are blocked when fallback copy captures new partial restore bytes')
     assert.equal(recoveryOnCorruptLaunch3.newlyPreserved, false)
     assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), partialPostRenameRaw, 'in-progress partial restore bytes remain untouched on disk')
     assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held while partial restore is in progress')

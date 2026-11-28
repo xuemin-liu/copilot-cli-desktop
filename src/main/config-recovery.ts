@@ -9,6 +9,29 @@ export type RecoveryOperations = Partial<PreserveOperations> & {
   writeMarker?: typeof writeFileAtomic
 }
 
+export interface PreservedFileResult {
+  path: string
+  method: 'moved' | 'copied'
+}
+
+export async function preserveUnreadableFileDetailed(
+  filename: string,
+  operations: PreserveOperations = { rename, copyFile },
+  preserved = `${filename}.corrupt-${Date.now()}`,
+): Promise<PreservedFileResult | null> {
+  try {
+    await operations.rename(filename, preserved)
+    return { path: preserved, method: 'moved' }
+  } catch { /* fall through to copy */ }
+  try {
+    await operations.copyFile(filename, preserved)
+    const [original, copy] = await Promise.all([readFile(filename), readFile(preserved)])
+    if (original.equals(copy)) return { path: preserved, method: 'copied' }
+  } catch { /* no verified backup */ }
+  await rm(preserved, { force: true }).catch(() => undefined)
+  return null
+}
+
 /**
  * Move an unreadable file aside, or, if the rename fails (for example a
  * transient share lock), copy it and confirm the copy. Returns the preserved
@@ -20,17 +43,7 @@ export async function preserveUnreadableFile(
   operations: PreserveOperations = { rename, copyFile },
   preserved = `${filename}.corrupt-${Date.now()}`,
 ): Promise<string | null> {
-  try {
-    await operations.rename(filename, preserved)
-    return preserved
-  } catch { /* fall through to copy */ }
-  try {
-    await operations.copyFile(filename, preserved)
-    const [original, copy] = await Promise.all([readFile(filename), readFile(preserved)])
-    if (original.equals(copy)) return preserved
-  } catch { /* no verified backup */ }
-  await rm(preserved, { force: true }).catch(() => undefined)
-  return null
+  return (await preserveUnreadableFileDetailed(filename, operations, preserved))?.path ?? null
 }
 
 export interface ConfigRecoveryMarkerOptions {
@@ -167,6 +180,10 @@ export interface ConfigRecoveryOutcome {
   writesBlocked: boolean
   /** True when this launch just preserved an unreadable config. */
   newlyPreserved: boolean
+  /** How `newlyPreserved` created `hold`: `'moved'` via rename or `'copied'` via fallback copy. */
+  preservedMethod?: 'moved' | 'copied'
+  /** Exact UTF-8 bytes observed in `configPath` immediately before `newlyPreserved` moved or copied it. */
+  preMoveRaw?: string
 }
 
 type ConfigFileProbe =
@@ -290,22 +307,29 @@ export async function resolveConfigRecovery(
     if (preMoveProbe.state === 'parseable' || preMoveProbe.state === 'missing') {
       return restorePriorMarkerAndResolve(false)
     }
-    const preserved = await preserveUnreadableFile(
+    const preMoveRaw = preMoveProbe.state === 'unparseable' ? preMoveProbe.raw.toString('utf8') : undefined
+    const preserved = await preserveUnreadableFileDetailed(
       configPath,
       { rename: operations.rename ?? rename, copyFile: operations.copyFile ?? copyFile },
       target,
     )
     if (preserved) {
       // Also check what landed in `preserved` in case a valid replacement arrived right at the move/copy boundary.
-      const preservedProbe = await probeConfigFile(preserved)
+      const preservedProbe = await probeConfigFile(preserved.path)
       if (preservedProbe.state === 'parseable') {
-        const restoredInPlace = await restorePreservedValidConfig(preserved, configPath)
+        const restoredInPlace = await restorePreservedValidConfig(preserved.path, configPath)
         if (!restoredInPlace) {
-          return { hold: preserved, writesBlocked: true, newlyPreserved: false }
+          return { hold: preserved.path, writesBlocked: true, newlyPreserved: false }
         }
         return restorePriorMarkerAndResolve(false)
       }
-      return { hold: preserved, writesBlocked: false, newlyPreserved: true }
+      return {
+        hold: preserved.path,
+        writesBlocked: false,
+        newlyPreserved: true,
+        preservedMethod: preserved.method,
+        ...(preMoveRaw !== undefined ? { preMoveRaw } : {}),
+      }
     }
     return restorePriorMarkerAndResolve(true)
   }

@@ -8336,18 +8336,22 @@ async function loadDesktopConfigWithRecovery(
     if (postPreserveSnapshot.raw !== null) {
       if (!postPreserveSnapshot.unparseable) {
         snapshot = postPreserveSnapshot
-        recovery = { ...recovery, newlyPreserved: false }
+        recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
       } else {
-        const preservedRaw = recovery.hold
-          ? await readFile(recovery.hold, 'utf8').catch(() => null)
-          : null
-        if (postPreserveSnapshot.raw !== preservedRaw) {
+        let staticCopiedOriginal = false
+        if (recovery.preservedMethod === 'copied' && snapshot.raw !== null && recovery.preMoveRaw === snapshot.raw) {
+          const preservedRaw = recovery.hold
+            ? await readFile(recovery.hold, 'utf8').catch(() => null)
+            : null
+          staticCopiedOriginal = preservedRaw === snapshot.raw && postPreserveSnapshot.raw === snapshot.raw
+        }
+        if (!staticCopiedOriginal) {
           const confirmSnapshot = await readDesktopConfigSnapshot(file)
           if (confirmSnapshot.raw !== null && !confirmSnapshot.unparseable) {
             snapshot = confirmSnapshot
-            recovery = { ...recovery, newlyPreserved: false }
+            recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
           } else {
-            recovery = { ...recovery, newlyPreserved: false, writesBlocked: true }
+            recovery = { hold: recovery.hold, writesBlocked: true, newlyPreserved: false }
           }
         }
       }
