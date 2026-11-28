@@ -38,6 +38,8 @@ export interface NewTabInput {
   autoTitle?: boolean
   /** A rename made in the desktop that Copilot has not confirmed yet. */
   renamePending?: boolean
+  /** Keep this saved tab dormant across cold starts until the person explicitly resumes it. */
+  withholdAutoStart?: boolean
   launchWorktree?: boolean
   launchWorktreePath?: string
   privateOverrides?: boolean
@@ -108,6 +110,7 @@ function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleSt
     ...(input.privateOverrides ? { privateOverrides: true as const } : {}),
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
+    ...(input.withholdAutoStart ? { withholdAutoStart: true as const } : {}),
     ...(input.tempReviewer ? { tempReviewer: input.tempReviewer } : {}),
     ...(input.reviewer ? { reviewer: true as const } : {}),
   }

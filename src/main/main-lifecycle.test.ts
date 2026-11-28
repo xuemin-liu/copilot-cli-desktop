@@ -118,6 +118,7 @@ interface Harness {
     checkoutPath: string
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null }): Promise<string>
+  resetRuntimeForColdStartForTest(): Promise<void>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -627,6 +628,16 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             }
             collectKnownReviewerSessionIds();
             return launchId;
+          },
+          resetRuntimeForColdStartForTest: async () => {
+            await stopAllSessions();
+            tabsState = { tabs: [], activeTabId: null };
+            profilesWithSessionTabs.clear();
+            unrestoredProfileTabs.clear();
+            knownReviewerSessionIds.clear();
+            knownUnboundReviewerReservations.clear();
+            reservations = null;
+            syncTabState();
           },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
@@ -5283,15 +5294,42 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(h.spawns.length, spawnsBeforeSoleAmbiguous, 'withholding automatic launch spawns zero CLI processes')
     const savedAfterSoleAmbiguous = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
     assert.equal(
-      savedAfterSoleAmbiguous.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid),
+      savedAfterSoleAmbiguous.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
       true,
-      'ambiguous same-title tab remains persisted in desktop.json',
+      'ambiguous same-title tab persists withholdAutoStart: true in desktop.json',
+    )
+
+    // Second cold start AFTER sweepReviewerAreas removes the unbound reservation on disk:
+    // the persisted withholdAutoStart restriction keeps the tab dormant with zero CLI spawns,
+    // until the person explicitly clicks Resume (desktop:restart-tab), which clears withholdAutoStart!
+    await h.sweepReviewerAreasForTest()
+    assert.equal(h.reservationList().length, 0, 'sweep released unbound reservations on disk')
+    await h.resetRuntimeForColdStartForTest()
+    const reloadedConfig = await (await import('./desktop-config.js')).readDesktopConfig(join(directory, 'desktop.json'))
+    h.configure(reloadedConfig, capabilities)
+    const spawnsBeforeSecondColdStart = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+    const afterSecondColdStart = await h.request('desktop:get-state')
+    const secondColdTab = afterSecondColdStart.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)
+    assert.ok(secondColdTab, 'ambiguous tab remains listed on second cold start after reservation sweep')
+    assert.equal(secondColdTab?.status, 'dormant', 'second cold start keeps tab dormant even after reservation was swept')
+    assert.equal(h.spawns.length, spawnsBeforeSecondColdStart, 'second cold start spawns zero CLI processes without explicit Resume')
+    await h.request('desktop:restart-tab', secondColdTab!.id)
+    await h.flushConfig()
+    assert.equal(h.spawns.length - spawnsBeforeSecondColdStart, 1, 'explicit Resume launches the session')
+    const savedAfterExplicitResume = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterExplicitResume.profiles.find((p) => p.id === profile.id)?.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)?.withholdAutoStart,
+      undefined,
+      'explicit Resume clears withholdAutoStart in desktop.json',
     )
 
     // Next verify mixed restore alongside a genuine stored user session named "Review #99":
-    for (const openTab of afterSoleAmbiguous.tabs) {
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
       await h.request('desktop:close-tab', openTab.id)
     }
+    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
     const genuineLog = join(directory, 'session-state', genuineUserUuid, 'events.jsonl')
     await mkdir(dirname(genuineLog), { recursive: true })
     await writeFile(genuineLog, JSON.stringify({ type: 'session.start', data: { sessionId: genuineUserUuid, startTime: new Date().toISOString(), context: { cwd: repo } } }) + '\n')

@@ -1677,6 +1677,7 @@ function persistProfileTabs(): void {
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
+          ...(tab.withholdAutoStart ? { withholdAutoStart: true as const } : {}),
           ...(tab.id === activeForPersist ? { active: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
@@ -7602,6 +7603,15 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       broadcastState()
       throw error
     }
+    if (tabsState.tabs.some((candidate) => candidate.id === tabId && candidate.withholdAutoStart)) {
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+        if (candidate.id !== tabId || !candidate.withholdAutoStart) return candidate
+        const { withholdAutoStart: _cleared, ...rest } = candidate
+        return rest
+      }) }
+      syncTabState()
+      broadcastState()
+    }
     persistProfileTabs()
     return snapshot()
   }).catch(async error=>{if(!stopRequested)restoreInput?.();else await projectToolService?.stopBridge(tabId);throw error})
@@ -7665,6 +7675,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
+    ...(candidate.withholdAutoStart ? { withholdAutoStart: true as const } : {}),
   }, MAX_MAX_SESSION_TABS)
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
@@ -7706,7 +7717,7 @@ function startDormantTab(tabId: string): Promise<void> {
   const pending = wakingTabs.get(tabId)
   if (pending) return pending
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  if (shuttingDown() || tab?.status !== 'dormant') return Promise.resolve()
+  if (shuttingDown() || tab?.status !== 'dormant' || tab.withholdAutoStart) return Promise.resolve()
   const waking = restartSessionTab(tabId).then(() => {}, (error) => {
     void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
     if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
@@ -7857,8 +7868,8 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     for (const candidate of restored) {
       // Saved tabs come back even above a limit lowered since they were opened; only new tabs follow the setting.
       if (shuttingDown() || tabsState.tabs.length >= MAX_MAX_SESSION_TABS) break
-      const ambiguous = isAmbiguousUnboundReviewerTab(candidate)
-      try { last = addDormantSessionTab(profile, candidate) }
+      const ambiguous = candidate.withholdAutoStart === true || isAmbiguousUnboundReviewerTab(candidate)
+      try { last = addDormantSessionTab(profile, ambiguous ? { ...candidate, withholdAutoStart: true } : candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
       if (ambiguous) {
         ambiguousUnboundTabIds.add(last)

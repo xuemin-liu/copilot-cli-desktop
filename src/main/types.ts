@@ -48,6 +48,8 @@ export interface RestoredTab {
   autoTitle?: boolean
   /** A rename made in the desktop that had not reached Copilot when the tab was saved. */
   renamePending?: true
+  /** Keep this saved tab dormant across cold starts until the person explicitly resumes it. */
+  withholdAutoStart?: true
   /** The tab on screen when it was saved: a restart shows it again instead of the project's last tab. */
   active?: true
 }
@@ -125,6 +127,8 @@ export interface DesktopSessionTab {
   /** Renamed in the desktop; `/rename` is typed into the session at the next safe moment, until Copilot reports the
    * name. Saved, so a rename made just before quitting reaches Copilot after the next start. */
   renamePending?: true
+  /** Keep this saved tab dormant across cold starts until the person explicitly resumes it. Saved. */
+  withholdAutoStart?: true
   /** Ephemeral PR reviewer session owned by `hostTabId`; hidden from the main sidebar list and never persisted. */
   tempReviewer?: TempReviewerTabInfo
   /** Sandboxed PR review loop session (`startPrReview`); runtime-only and never persisted. */

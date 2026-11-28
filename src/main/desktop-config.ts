@@ -316,6 +316,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
         : {}),
       ...(typeof tab.autoTitle === 'boolean' ? { autoTitle: tab.autoTitle } : {}),
       ...(tab.renamePending === true ? { renamePending: true as const } : {}),
+      ...(!isOtherCli(tab.cli) && tab.withholdAutoStart === true ? { withholdAutoStart: true as const } : {}),
       ...(typeof tab.launchWorktree === 'boolean' ? { launchWorktree: tab.launchWorktree } : {}),
       ...(typeof tab.launchWorktreePath === 'string' && tab.launchWorktreePath.length > 0 && tab.launchWorktreePath.length <= 4_096
         ? { launchWorktreePath: tab.launchWorktreePath } : {}),
