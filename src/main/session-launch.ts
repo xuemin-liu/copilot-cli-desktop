@@ -32,6 +32,7 @@ export const DEFAULT_SESSION_LAUNCH_CONFIG: SessionLaunchConfig = {
 }
 
 export const REASONING_EFFORTS: readonly ReasoningEffort[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max']
+const COPILOT_EFFORT_OPTIONS = ['--reasoning-effort', '--effort'] as const
 const CONTEXT_TIERS: readonly ContextTier[] = ['default', 'long_context']
 const SESSION_MODES: readonly SessionMode[] = ['interactive', 'plan', 'autopilot', 'plan-autopilot']
 const REMOTE_PREFERENCES: readonly RemotePreference[] = ['inherit', 'enable', 'disable']
@@ -81,15 +82,25 @@ export function normalizeSessionLaunchConfig(value: unknown): SessionLaunchConfi
   }
 }
 
+export function copilotEffortOption(supportedOptions: readonly string[]): string | undefined {
+  return COPILOT_EFFORT_OPTIONS.find((option) => supportedOptions.includes(option))
+}
+
 /**
  * The workspace's model and effort are only where a session starts: Copilot stores the model and effort a session
  * uses (including a later `/model` change) and restores them on `--resume`, so passing them again would reset it.
  */
-export function buildSessionLaunchArgs(config: SessionLaunchConfig, freshSession: boolean): string[] {
+export function buildSessionLaunchArgs(
+  config: SessionLaunchConfig,
+  freshSession: boolean,
+  supportedOptions: readonly string[] = [],
+): string[] {
   const normalized = normalizeSessionLaunchConfig(config)
   const args: string[] = []
   if (normalized.model && freshSession) args.push('--model', normalized.model)
-  if (normalized.reasoningEffort !== 'default' && freshSession) args.push('--effort', normalized.reasoningEffort)
+  if (normalized.reasoningEffort !== 'default' && freshSession) {
+    args.push(copilotEffortOption(supportedOptions) ?? COPILOT_EFFORT_OPTIONS[0], normalized.reasoningEffort)
+  }
   if (normalized.contextTier !== 'default') args.push('--context', normalized.contextTier)
   if (normalized.agent) args.push('--agent', normalized.agent)
   if (normalized.mode === 'plan-autopilot') args.push('--plan', '--mode', 'autopilot')

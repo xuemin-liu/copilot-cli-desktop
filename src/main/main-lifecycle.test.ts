@@ -533,7 +533,7 @@ test('resuming a stored session keeps its own model and effort; a new session ge
   const tabId = (await harness.request('desktop:get-state')).activeTabId!
   for (const spawn of [harness.spawns[0]!, (await harness.request('desktop:restart-tab', tabId), harness.spawns.at(-1)!)]) {
     assert.ok(spawn.args.includes(`--resume=${SOURCE}`), spawn.args.join(' '))
-    assert.ok(!spawn.args.includes('--model') && !spawn.args.includes('--effort'), spawn.args.join(' '))
+    assert.ok(!['--model', '--effort', '--reasoning-effort'].some((flag) => spawn.args.includes(flag)), spawn.args.join(' '))
   }
   await harness.request('desktop:create-tab', 'new', profile.id)
   const fresh = harness.spawns.at(-1)!.args

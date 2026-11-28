@@ -34,6 +34,12 @@ test('parseCopilotCapabilities detects supported integration surfaces', () => {
   assert.deepEqual(parseCopilotCapabilities('old copilot help'), EMPTY_COPILOT_CAPABILITIES)
 })
 
+test('launch profiles are supported when Copilot help only lists the long reasoning effort option', () => {
+  const capabilities = parseCopilotCapabilities('--model MODEL --mode MODE --reasoning-effort LEVEL')
+  assert.equal(capabilities.launchProfiles, true)
+  assert.equal(parseCopilotCapabilities('--model MODEL --mode MODE').launchProfiles, false)
+})
+
 test('parseCopilotCapabilities does not mistake --model for --mode', () => {
   assert.equal(parseCopilotCapabilities('--model MODEL --effort LEVEL').launchProfiles, false)
 })

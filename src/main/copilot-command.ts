@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { CopilotResolution } from './types.js'
 import { withCopilotPathAdditions } from './resolve-copilot.js'
+import { copilotEffortOption } from './session-launch.js'
 
 const execFileAsync = promisify(execFile)
 // Help loads the same CLI runtime as --version, which can take longer on a
@@ -83,7 +84,7 @@ export function parseCopilotCapabilities(helpText: string): CopilotCapabilities 
   return {
     sessionIdentity: hasOption('--session-id') && hasOption('--name'),
     toolAllowlist: hasOption('--available-tools'),
-    launchProfiles: hasOption('--model') && hasOption('--mode') && hasOption('--effort'),
+    launchProfiles: hasOption('--model') && hasOption('--mode') && copilotEffortOption(supportedOptions) !== undefined,
     remoteSessions: hasOption('--remote') && hasOption('--connect'),
     plugins: /\bcopilot plugins?\b|--plugin-dir|\/plugins/.test(helpText),
     acp: hasOption('--acp'),

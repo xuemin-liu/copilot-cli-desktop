@@ -21,7 +21,7 @@ test('buildSessionLaunchArgs maps a complete launch profile to supported Copilot
     remoteExport: 'disable',
   }, true), [
     '--model', 'gpt-5.3-codex',
-    '--effort', 'high',
+    '--reasoning-effort', 'high',
     '--context', 'long_context',
     '--agent', 'code-review',
     '--plan', '--mode', 'autopilot',
@@ -32,6 +32,13 @@ test('buildSessionLaunchArgs maps a complete launch profile to supported Copilot
     '--remote',
     '--no-remote-export',
   ])
+})
+
+test('reasoning effort uses the advertised Copilot option, including the legacy alias', () => {
+  const launch = { ...DEFAULT_SESSION_LAUNCH_CONFIG, reasoningEffort: 'high' as const }
+  assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--reasoning-effort']), ['--reasoning-effort', 'high'])
+  assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--effort']), ['--effort', 'high'])
+  assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--effort', '--reasoning-effort']), ['--reasoning-effort', 'high'])
 })
 
 test('worktree launch is omitted for resume and remote-connect sessions', () => {
