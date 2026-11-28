@@ -8,6 +8,7 @@ import { build } from 'esbuild'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReviewerBar } from '../renderer/components/ReviewerBar.js'
 import { Sidebar } from '../renderer/components/Sidebar.js'
+import { resolvePeekHostAndTab } from './session-tab-machine.js'
 import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 import type { DesktopSessionTab, TempReviewerGroupView, WorkspaceProfile } from './types.js'
 
@@ -167,6 +168,22 @@ test('ReviewerBar renders per-CLI chips, needs-approval indicator, and Peek/Hide
   )
   assert.match(endedHtml, /<span class="reviewer-bar-pr"[^>]*>MR !7<\/span>/)
   assert.match(endedHtml, /Approved on PR/)
+
+  // Passing workspace-scoped hostTabId from resolvePeekHostAndTab keeps ReviewerBar visible when the host's sideChat is
+  // active, and hides a foreign workspace's hosted reviewer group when an empty workspace is selected:
+  const hostTab = makeTab('tab-1', 'Host')
+  const sideTab = makeTab('tab-side', 'Side', { sideChat: true, sideParentTabId: 'tab-1' })
+  const sideResolved = resolvePeekHostAndTab({ tabs: [hostTab, sideTab], activeTabId: 'tab-side' }, {}, PROFILE.id)
+  const sideHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[group]} activeTabId={sideResolved.hostTabId} activeProfileId={PROFILE.id} peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+  )
+  assert.match(sideHtml, /PR #42/, 'hosted ReviewerBar stays visible when host sideChat is active')
+
+  const foreignResolved = resolvePeekHostAndTab({ tabs: [hostTab], activeTabId: 'tab-1' }, {}, 'fedcba9876543210')
+  const foreignHtml = renderToStaticMarkup(
+    <ReviewerBar groups={[group]} activeTabId={foreignResolved.hostTabId} activeProfileId="fedcba9876543210" peekTabId={null} onPeek={() => {}} onError={() => {}} />,
+  )
+  assert.equal(foreignHtml, '', 'foreign workspace hosted ReviewerBar is hidden in an empty workspace')
 })
 
 test('Sidebar hides tempReviewer tabs from main session lists and tucks them into a Reviewers disclosure under the host tab', () => {

@@ -86,7 +86,7 @@ export function App(): JSX.Element {
   const [focusedPeekTabId, setFocusedPeekTabId] = useState<string | null>(null)
   const openRegularTabCount = regularTabCount(state)
   const canOpenTab = canOpenSessionTab(state.resolution, openRegularTabCount, state.maxSessionTabs)
-  const { peekKey, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost, state.activeProfileId)
+  const { peekKey, hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost, state.activeProfileId)
   const effectiveFocusedPeekTabId = focusedPeekTabId && focusedPeekTabId === activePeekTabId ? focusedPeekTabId : null
   const activeWorkspaceTabId = activeWorkspaceRegularTab(state.tabs, state.activeTabId, state.activeProfileId)?.id ?? null
   useEffect(() => {
@@ -552,7 +552,7 @@ export function App(): JSX.Element {
           <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} toolsFallback={state.meetingToolsFallback === true} />
           <ReviewerBar
             groups={state.tempReviewerGroups ?? []}
-            activeTabId={state.activeTabId}
+            activeTabId={peekHostTabId}
             activeProfileId={state.activeProfileId}
             peekTabId={activePeekTabId}
             onPeek={updatePeekReviewer}

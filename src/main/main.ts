@@ -1804,7 +1804,7 @@ function activeAccessLabel(): string {
 // the tab button) consistently disabled for one instead of only some of them
 // surfacing that as a runtime error.
 function activeTabIsRestartable(): boolean {
-  const focusedId = activeFocusedPeekTabId() ?? tabsState.activeTabId
+  const focusedId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
   const tab = tabsState.tabs.find((candidate) => candidate.id === focusedId)
   return tab !== undefined && !tab.remote && !tab.tempReviewer
 }
@@ -1837,13 +1837,16 @@ function rebuildTrayMenu(): void {
     {
       label: 'Restart Active Session',
       enabled: !shuttingDown() && activeTabIsRestartable(),
-      click: () => tabsState.activeTabId && observe(restartSessionTab(tabsState.activeTabId), 'Could not restart session tab'),
+      click: () => {
+        const targetId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
+        if (targetId && activeTabIsRestartable()) observe(restartSessionTab(targetId), 'Could not restart session tab')
+      },
     },
     {
       label: 'Show Active Session Log',
-      enabled: (activeFocusedPeekTabId() ?? tabsState.activeTabId) !== null,
+      enabled: (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()) !== null,
       click: () => {
-        const logTabId = activeFocusedPeekTabId() ?? tabsState.activeTabId
+        const logTabId = activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()
         if (logTabId) observe(showSessionLog(logTabId), 'Could not show session log')
       },
     },
@@ -8079,7 +8082,7 @@ async function runCopilotResourceMutation(args: string[]): Promise<void> {
 function installApplicationMenu(): void {
   const focusedWindow = BrowserWindow.getFocusedWindow()
   const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
-  const menuTabId = focusedPopoutId ?? (activeFocusedPeekTabId() ?? tabsState.activeTabId)
+  const menuTabId = focusedPopoutId ?? (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId())
   const mac = process.platform === 'darwin'
   const settingsItem = { label: mac ? 'Settings…' : 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') }
   const quitItem = { label: mac ? 'Quit Copilot CLI Desktop' : 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() }

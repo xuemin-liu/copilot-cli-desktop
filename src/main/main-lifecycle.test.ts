@@ -4542,22 +4542,37 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   h.refreshAppMenu()
   h.setUnresolvedCopilot()
   await h.request('desktop:activate-profile', ws2.id)
-  const findCloseItem = () => {
+  const findMenuItem = (menuLabel: string, itemLabel: string) => {
     const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
-    const fileMenu = menu.find(item => item.label === 'File')!
-    return fileMenu.submenu!.find(item => item.label === 'Close Session Tab')!
+    const top = menu.find(item => item.label === menuLabel)!
+    return top.submenu!.find(item => item.label === itemLabel)!
   }
-  const closeBeforeFocus = findCloseItem()
+  const closeBeforeFocus = findMenuItem('File', 'Close Session Tab')
   assert.equal(closeBeforeFocus.enabled, false, 'activateProfile refreshes menu: Close Session Tab is disabled with foreign activeTabId and no focused peek')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'Restart Active Session is disabled with foreign activeTabId in an empty workspace')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false, 'Unload Active Session is disabled with foreign activeTabId in an empty workspace')
+  assert.equal(findMenuItem('Help', 'Show Active Session Log').enabled, false, 'Show Active Session Log is disabled with foreign activeTabId and no focused peek')
   closeBeforeFocus.click?.({}, {}, { triggeredByAccelerator: false })
   await pause(50)
   const afterDirectClick = await h.request('desktop:get-state')
   assert.ok(afterDirectClick.tabs.some(tab => tab.id === ws1TabId), 'retained foreign-workspace session survives Close Session Tab')
 
-  // Reporting focused standalone peek enables Close Session Tab and sends desktop:hide-peek-request without closing ws1TabId:
+  // Reporting focused standalone peek enables Close Session Tab (sending desktop:hide-peek-request) and Show Active
+  // Session Log (targeting the standalone reviewer) while keeping Restart/Unload disabled and ws1TabId untouched:
   await h.request('desktop:focused-peek-tab', ws2RevId)
-  const closeWithPeek = findCloseItem()
+  const closeWithPeek = findMenuItem('File', 'Close Session Tab')
   assert.equal(closeWithPeek.enabled, true, 'Close Session Tab is enabled when standalone peek is focused')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'Restart stays disabled for focused standalone peek')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false, 'Unload stays disabled for focused standalone peek')
+  const standaloneLogItem = findMenuItem('Help', 'Show Active Session Log')
+  assert.equal(standaloneLogItem.enabled, true, 'Show Active Session Log enables for focused standalone peek')
+  const beforeStandaloneLog = h.shellCalls.length
+  standaloneLogItem.click?.({}, {})
+  await pause(50)
+  assert.ok(
+    h.shellCalls.slice(beforeStandaloneLog).some(call => call.action === 'reveal' && call.target.endsWith(`${ws2RevId}.log`)),
+    'Show Active Session Log opens the focused standalone reviewer log',
+  )
   const win = h.windowFor()
   const beforeShortcut = win.messages.length
   closeWithPeek.click?.({}, {}, { triggeredByAccelerator: false })
@@ -4568,9 +4583,12 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   const afterPeekShortcut = await h.request('desktop:get-state')
   assert.ok(afterPeekShortcut.tabs.some(tab => tab.id === ws1TabId), 'foreign-workspace session still survives standalone peek close shortcut')
 
-  // Switching back to ws1 with unresolved Copilot re-enables Close Session Tab automatically:
+  // Switching back to ws1 with unresolved Copilot re-enables session menu items automatically:
   await h.request('desktop:activate-profile', ws1.id)
-  assert.equal(findCloseItem().enabled, true, 'switching back to ws1 refreshes Close Session Tab back to enabled')
+  assert.equal(findMenuItem('File', 'Close Session Tab').enabled, true, 'switching back to ws1 refreshes Close Session Tab back to enabled')
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, true, 'switching back to ws1 re-enables Restart Active Session')
+  assert.equal(findMenuItem('File', 'Unload Active Session').enabled, true, 'switching back to ws1 re-enables Unload Active Session')
+  assert.equal(findMenuItem('Help', 'Show Active Session Log').enabled, true, 'switching back to ws1 re-enables Show Active Session Log')
 
   // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId:
   h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws2.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })
