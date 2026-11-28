@@ -119,6 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
+  runStartupConfigAndSweepForTest(): Promise<void>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -636,8 +637,20 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             unrestoredProfileTabs.clear();
             knownReviewerSessionIds.clear();
             knownUnboundReviewerReservations.clear();
+            legacyTabSanitizationUnflushed = false;
             reservations = null;
             syncTabState();
+          },
+          runStartupConfigAndSweepForTest: async () => {
+            app.isReady = () => true;
+            collectKnownReviewerSessionIds();
+            let migrated = false;
+            desktopConfig = await readDesktopConfig(configPath(), () => { migrated = true; });
+            const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
+            if (sanitized) legacyTabSanitizationUnflushed = true;
+            syncWorkspaceState();
+            await saveSettingsAtStartup(migrated || sanitized);
+            await sweepReviewerAreas();
           },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
@@ -5274,37 +5287,49 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     const isolatedUnboundUuid = '11111111-2222-4333-8444-555555555555'
     const ambiguousSameTitleUuid = '22222222-3333-4444-8555-666666666666'
     const genuineUserUuid = '33333333-4444-4555-8666-777777777777'
-    await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
-    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
 
-    // First verify sole active ambiguous same-title tab without events.jsonl: retained in profile.tabs, not auto-launched!
+    // First verify pre-sweep startup order when Copilot CLI resolution FAILS on Launch 1:
+    // desktop.json is sanitized and persisted BEFORE sweepReviewerAreas releases the unbound reservation,
+    // even though restoreTabsForProfile never runs while Copilot CLI is unresolved!
     profile.tabs = [
       { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
       { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
     ]
-    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
-    const spawnsBeforeSoleAmbiguous = h.spawns.length
+    await (await import('./desktop-config.js')).writeDesktopConfig(join(directory, 'desktop.json'), {
+      ...DEFAULT_DESKTOP_CONFIG,
+      profiles: [profile],
+      activeProfileId: profile.id,
+    })
+    await h.resetRuntimeForColdStartForTest()
+    await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
+    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+    // Simulate Launch 1 where Copilot CLI is unresolved (restoreSaved does nothing), while startup reads desktop.json and sweeps:
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    h.setUnresolvedCopilot()
+    const spawnsBeforeUnresolvedLaunch = h.spawns.length
+    await h.runStartupConfigAndSweepForTest()
     await h.restoreSaved()
     await h.flushConfig()
-    const afterSoleAmbiguous = await h.request('desktop:get-state')
-    assert.equal(afterSoleAmbiguous.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid), false, 'unbound isolated-home reviewer session is removed')
-    const retainedAmbiguous = afterSoleAmbiguous.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)
-    assert.ok(retainedAmbiguous, 'ambiguous same-title tab without events.jsonl is retained rather than deleted')
-    assert.equal(retainedAmbiguous?.status, 'dormant', 'ambiguous same-title tab withholds automatic startup launch')
-    assert.equal(h.spawns.length, spawnsBeforeSoleAmbiguous, 'withholding automatic launch spawns zero CLI processes')
-    const savedAfterSoleAmbiguous = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(h.spawns.length, spawnsBeforeUnresolvedLaunch, 'unresolved Launch 1 spawns zero CLI processes')
+    assert.equal(h.reservationList().length, 0, 'Launch 1 sweep released unbound reservations on disk')
+    const savedAfterUnresolvedLaunch = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
     assert.equal(
-      savedAfterSoleAmbiguous.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid),
+      false,
+      'unresolved Launch 1 removed confirmed isolated-home reviewer tab before sweep',
+    )
+    assert.equal(
+      savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid && t.withholdAutoStart === true),
       true,
-      'ambiguous same-title tab persists withholdAutoStart: true in desktop.json',
+      'unresolved Launch 1 persisted withholdAutoStart: true onto desktop.json before sweep',
     )
 
-    // Second cold start AFTER sweepReviewerAreas removes the unbound reservation on disk:
+    // Cold Launch 2 when Copilot CLI resolution SUCCEEDS (after reservations are already gone on disk):
     // the persisted withholdAutoStart restriction keeps the tab dormant with zero CLI spawns,
     // until the person explicitly clicks Resume (desktop:restart-tab), which clears withholdAutoStart!
-    await h.sweepReviewerAreasForTest()
-    assert.equal(h.reservationList().length, 0, 'sweep released unbound reservations on disk')
     await h.resetRuntimeForColdStartForTest()
+    await h.runStartupConfigAndSweepForTest()
     const reloadedConfig = await (await import('./desktop-config.js')).readDesktopConfig(join(directory, 'desktop.json'))
     h.configure(reloadedConfig, capabilities)
     const spawnsBeforeSecondColdStart = h.spawns.length
@@ -5313,7 +5338,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     const afterSecondColdStart = await h.request('desktop:get-state')
     const secondColdTab = afterSecondColdStart.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)
     assert.ok(secondColdTab, 'ambiguous tab remains listed on second cold start after reservation sweep')
-    assert.equal(secondColdTab?.status, 'dormant', 'second cold start keeps tab dormant even after reservation was swept')
+    assert.equal(secondColdTab?.status, 'dormant', 'second cold start keeps tab dormant even after reservation was swept on unresolved Launch 1')
     assert.equal(h.spawns.length, spawnsBeforeSecondColdStart, 'second cold start spawns zero CLI processes without explicit Resume')
     await h.request('desktop:restart-tab', secondColdTab!.id)
     await h.flushConfig()

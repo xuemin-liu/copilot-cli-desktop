@@ -1025,6 +1025,7 @@ function followupViews(): FollowupGrant[] {
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number;tabId:string;session:PtySession}>()
 const knownReviewerSessionIds=new Set<string>()
 const knownUnboundReviewerReservations=new Map<string,{project:string;number:number}>()
+let legacyTabSanitizationUnflushed=false
 function isReviewerTask(taskId:string):boolean {
   if(reviewerTasks.has(taskId))return true
   if(followups?.list().some(g=>g.taskId===taskId&&g.role==='reviewer'))return true
@@ -1061,6 +1062,42 @@ function collectKnownReviewerSessionIds():Set<string> {
     }
   }
   return new Set(knownReviewerSessionIds)
+}
+function isAmbiguousUnboundReviewerTabForProfile(profilePath:string,saved:RestoredTab,normalSessionRoot:string):boolean {
+  return (
+    !saved.cli
+    &&!saved.sideChat
+    &&!saved.launchWorktreePath
+    &&saved.launchWorktree!==true
+    &&saved.autoTitle!==true
+    &&saved.renamePending!==true
+    &&[...knownUnboundReviewerReservations.values()].some(r=>sameRealPath(r.project,profilePath)&&saved.title===`Review #${r.number}`)
+    &&(!saved.lastSessionId||!existsSync(join(normalSessionRoot,saved.lastSessionId,'events.jsonl')))
+  )
+}
+function sanitizeLegacyReviewerTabsInConfig(config:DesktopConfig=desktopConfig):boolean {
+  const reviewerSessionIds=collectKnownReviewerSessionIds()
+  const normalSessionRoot=copilotSessionRoot(process.env)
+  let changed=false
+  for(const profile of config.profiles){
+    const nextTabs:RestoredTab[]=[]
+    for(const saved of profile.tabs){
+      if(saved.lastSessionId&&reviewerSessionIds.has(saved.lastSessionId)){
+        changed=true
+        continue
+      }
+      if(!saved.withholdAutoStart&&isAmbiguousUnboundReviewerTabForProfile(profile.path,saved,normalSessionRoot)){
+        nextTabs.push({...saved,withholdAutoStart:true})
+        changed=true
+        continue
+      }
+      nextTabs.push(saved)
+    }
+    if(nextTabs.length!==profile.tabs.length||nextTabs.some((tab,index)=>tab!==profile.tabs[index])){
+      profile.tabs=nextTabs
+    }
+  }
+  return changed
 }
 /** Review loops seen running in this run: when one ends, the person is told how the PR left review. */
 const runningReviews=new Set<string>()
@@ -1133,6 +1170,7 @@ async function sweepReviewerAreas():Promise<void>{
       // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
+      if(legacyTabSanitizationUnflushed&&record.taskId===null&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:'))continue
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       if(meetingReviewers.holdsLaunch(record.launchId))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
@@ -1643,6 +1681,7 @@ async function persistConfig(change?: () => void, onFailure?: () => void): Promi
   )
   configWriteQueue = queue
   await operation
+  legacyTabSanitizationUnflushed = false
 }
 
 /**
@@ -7809,16 +7848,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   if (pending) return pending
   const reviewerSessionIds = collectKnownReviewerSessionIds()
   const normalSessionRoot = copilotSessionRoot(process.env)
-  const isAmbiguousUnboundReviewerTab = (saved: RestoredTab): boolean => (
-    !saved.cli
-    && !saved.sideChat
-    && !saved.launchWorktreePath
-    && saved.launchWorktree !== true
-    && saved.autoTitle !== true
-    && saved.renamePending !== true
-    && [...knownUnboundReviewerReservations.values()].some((r) => sameRealPath(r.project, profile.path) && saved.title === `Review #${r.number}`)
-    && (!saved.lastSessionId || !existsSync(join(normalSessionRoot, saved.lastSessionId, 'events.jsonl')))
-  )
+  const isAmbiguousUnboundReviewerTab = (saved: RestoredTab): boolean => isAmbiguousUnboundReviewerTabForProfile(profile.path, saved, normalSessionRoot)
   const isLegacyReviewerTab = (saved: RestoredTab): boolean => (
     Boolean(saved.lastSessionId && reviewerSessionIds.has(saved.lastSessionId))
   )
@@ -8258,10 +8288,12 @@ async function recheckCopilotCapabilities(): Promise<void> {
  * now (a full disk, a file another program holds), the app still starts with the settings it read, and the next save
  * writes them. Without the catch, that failure ended the whole startup with "failed to start".
  */
-async function saveSettingsAtStartup(migrated: boolean): Promise<void> {
-  if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return
-  try { await persistConfig() } catch (error) {
+async function saveSettingsAtStartup(migrated: boolean): Promise<boolean> {
+  if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return !configWritesBlocked
+  if (configWritesBlocked) return false
+  try { await persistConfig(); return true } catch (error) {
     void writeAppLog(`Could not save the settings at startup; continuing with the ones that were read: ${String(error)}`).catch(() => {})
+    return false
   }
 }
 
@@ -10459,9 +10491,6 @@ if (!app.requestSingleInstanceLock()) {
     setInterval(()=>{for(const run of automaticTurns.values())if(!run.authorized())interruptAutomatic(run.grant)},1000).unref()
     // Snapshot persisted reviewer session IDs synchronously before sweepReviewerAreas() can release reservations.
     collectKnownReviewerSessionIds()
-    // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
-    void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
-    void sweepReviewerAreas().catch(()=>{})
     const reopen=startupReopens(name=>existsSync(join(app.getPath('userData'),name)))
     if(reopen.followups)void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
     // A queue turned on before any review ran has no follow-up database yet: it restarts from its own file.
@@ -10491,6 +10520,10 @@ if (!app.requestSingleInstanceLock()) {
       },
       reloaded: async () => {
         desktopConfig = await readDesktopConfig(configPath())
+        if (sanitizeLegacyReviewerTabsInConfig(desktopConfig)) {
+          legacyTabSanitizationUnflushed = true
+          await persistConfig().catch(() => {})
+        }
         profilesWithSessionTabs.clear()
         unrestoredProfileTabs.clear()
         syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
@@ -10533,7 +10566,13 @@ if (!app.requestSingleInstanceLock()) {
         `Browser data is kept while ${basename(recoveryHold)} exists. Restore or delete it when you are done.`,
       )
     }
-    await saveSettingsAtStartup(desktopConfigMigrated)
+    const legacyTabsSanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+    if (legacyTabsSanitized) legacyTabSanitizationUnflushed = true
+    await saveSettingsAtStartup(desktopConfigMigrated || legacyTabsSanitized)
+    // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
+    // Runs only after desktop.json has recorded withholdAutoStart / removed confirmed reviewer tabs (or held the reservation if saving failed).
+    void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
+    void sweepReviewerAreas().catch(()=>{})
     // Keep DevTools settings from sessions closed last launch before their partitions are pruned.
     try { shareDevtoolsSettings(app.getPath('userData')) }
     catch (error) { void writeAppLog(`Could not share DevTools settings: ${String(error)}`).catch(() => {}) }
