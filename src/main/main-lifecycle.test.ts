@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean }>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -656,7 +656,19 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             if (options.earlySweepBeforeConfigRead) {
               await sweepReviewerAreas();
             }
-            const { migrated, recovery } = await loadDesktopConfigWithRecovery(undefined, options.betweenReadAndRecovery);
+            const recoveryOps = options.afterRecoveryRevalidation ? (() => {
+              let fired = false;
+              return {
+                stat: async (targetPath, ...rest) => {
+                  if (!fired && String(targetPath).includes('desktop.json.corrupt-') && !existsSync(String(targetPath))) {
+                    fired = true;
+                    await options.afterRecoveryRevalidation();
+                  }
+                  return stat(targetPath, ...rest);
+                },
+              };
+            })() : undefined;
+            const { migrated, recovery } = await loadDesktopConfigWithRecovery(undefined, options.betweenReadAndRecovery, recoveryOps);
             const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
             if (sanitized) legacyTabSanitizationUnflushed = true;
             syncWorkspaceState();
@@ -5390,8 +5402,8 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
 
     // Also re-stage recovery hold and test mid-startup overlap starting from incomplete/malformed JSON
-    // (simulating an in-progress restore during the first read that completes before resolveConfigRecovery)
-    // where settings write SUCCEEDS on unresolved Launch 1:
+    // where the restore completes AFTER resolveConfigRecovery's initial revalidation (during backup preparation)
+    // and settings write SUCCEEDS on unresolved Launch 1:
     await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-3>>>')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
@@ -5404,7 +5416,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     h.setUnresolvedCopilot()
     const spawnsBeforeUnresolvedLaunch = h.spawns.length
     const recoveryAfterCompletedRestore = await h.runStartupConfigAndSweepForTest({
-      betweenReadAndRecovery: async () => {
+      afterRecoveryRevalidation: async () => {
         await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
         await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
       },

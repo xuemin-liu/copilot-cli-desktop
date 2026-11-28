@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
 import { copyFile, readFile, rename, rm, stat } from 'node:fs/promises'
 import { writeFileAtomic } from './atomic-file.js'
 
 type PreserveOperations = { rename: typeof rename; copyFile: typeof copyFile }
-type RecoveryOperations = Partial<PreserveOperations> & { stat?: typeof stat }
+export type RecoveryOperations = Partial<PreserveOperations> & { stat?: typeof stat }
 
 /**
  * Move an unreadable file aside, or, if the rename fails (for example a
@@ -69,40 +71,107 @@ export interface ConfigRecoveryOutcome {
   newlyPreserved: boolean
 }
 
-async function isConfigUnparseableOnDisk(configPath: string): Promise<boolean> {
+type ConfigFileProbe =
+  | { state: 'parseable' }
+  | { state: 'missing' }
+  | { state: 'unparseable'; raw: Buffer }
+  | { state: 'io-error' }
+
+function isParseableConfigBuffer(raw: Buffer): boolean {
   try {
-    JSON.parse((await readFile(configPath, 'utf8')).replace(/^\uFEFF/, ''))
-    return false
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    if (error instanceof SyntaxError) return true
+    JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, ''))
     return true
+  } catch {
+    return false
   }
 }
 
-async function readExistingHoldPath(markerPath: string, statPath: typeof stat = stat): Promise<string | null> {
+async function probeConfigFile(configPath: string): Promise<ConfigFileProbe> {
+  try {
+    const raw = await readFile(configPath)
+    return isParseableConfigBuffer(raw) ? { state: 'parseable' } : { state: 'unparseable', raw }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'missing' }
+      : { state: 'io-error' }
+  }
+}
+
+async function restorePreservedValidConfig(preserved: string, configPath: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await copyFile(preserved, configPath, fsConstants.COPYFILE_EXCL)
+      await rm(preserved, { force: true }).catch(() => undefined)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        return false
+      }
+    }
+    const currentOnDisk = await probeConfigFile(configPath)
+    if (currentOnDisk.state === 'parseable') {
+      await rm(preserved, { force: true }).catch(() => undefined)
+      return true
+    }
+    if (currentOnDisk.state !== 'missing') {
+      return false
+    }
+  }
+  return false
+}
+
+interface ExistingHoldSnapshot {
+  hold: string | null
+  rawMarker: string | null
+  markerUnreadable: boolean
+}
+
+async function snapshotExistingHold(markerPath: string, statPath: typeof stat = stat): Promise<ExistingHoldSnapshot> {
+  let rawMarker: string
+  try {
+    rawMarker = await readFile(markerPath, 'utf8')
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'EISDIR') {
+      return { hold: null, rawMarker: null, markerUnreadable: false }
+    }
+    return { hold: markerPath, rawMarker: null, markerUnreadable: true }
+  }
   let preserved: unknown
   try {
-    preserved = (JSON.parse(await readFile(markerPath, 'utf8')) as { preserved?: unknown }).preserved
+    preserved = (JSON.parse(rawMarker) as { preserved?: unknown }).preserved
   } catch {
-    return null
+    return { hold: markerPath, rawMarker, markerUnreadable: false }
   }
-  if (typeof preserved !== 'string') return null
+  if (typeof preserved !== 'string') {
+    return { hold: null, rawMarker: null, markerUnreadable: false }
+  }
   try {
     await statPath(preserved)
-    return preserved
+    return { hold: preserved, rawMarker, markerUnreadable: false }
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : preserved
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { hold: null, rawMarker: null, markerUnreadable: false }
+      : { hold: preserved, rawMarker, markerUnreadable: false }
   }
 }
 
-async function nextCorruptBackupPath(configPath: string, statPath: typeof stat = stat): Promise<string> {
+async function nextCorruptBackupPath(configPath: string, statPath: typeof stat = stat): Promise<string | null> {
   const base = `${configPath}.corrupt-${Date.now()}`
-  let candidate = base
-  for (let suffix = 1; ; suffix++) {
-    const exists = await statPath(candidate).then(() => true, (error) => (error as NodeJS.ErrnoException).code !== 'ENOENT')
-    if (!exists) return candidate
-    candidate = `${base}-${suffix}`
+  for (let suffix = 0; suffix < 16; suffix++) {
+    const candidate = suffix === 0 ? base : `${base}-${suffix}`
+    try {
+      await statPath(candidate)
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? candidate : null
+    }
+  }
+  const fallback = `${base}-${randomUUID()}`
+  try {
+    await statPath(fallback)
+    return null
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? fallback : null
   }
 }
 
@@ -114,29 +183,66 @@ export async function resolveConfigRecovery(
   operations: RecoveryOperations = {},
 ): Promise<ConfigRecoveryOutcome> {
   if (unparseable) {
-    unparseable = await isConfigUnparseableOnDisk(configPath)
+    const initialProbe = await probeConfigFile(configPath)
+    if (initialProbe.state === 'parseable' || initialProbe.state === 'missing') {
+      unparseable = false
+    }
   }
   if (!unparseable) {
     return { hold: await activeConfigRecovery(markerPath, operations.stat), writesBlocked: false, newlyPreserved: false }
   }
-  const previousHold = await readExistingHoldPath(markerPath, operations.stat)
+  const existing = await snapshotExistingHold(markerPath, operations.stat)
+  if (existing.markerUnreadable) {
+    return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
+  }
   // Publish the hold BEFORE touching the original. If the marker cannot be written the original stays
   // in place untouched; if we are interrupted after the move, the marker already names the backup.
   const target = await nextCorruptBackupPath(configPath, operations.stat)
+  if (!target) {
+    return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
+  }
+  const restorePriorMarkerAndResolveHold = async (): Promise<ConfigRecoveryOutcome> => {
+    if (existing.rawMarker !== null) {
+      const restoredMarker = await writeFileAtomic(markerPath, existing.rawMarker).then(() => true, () => false)
+      if (!restoredMarker) {
+        return { hold: existing.hold, writesBlocked: false, newlyPreserved: false }
+      }
+      return { hold: await activeConfigRecovery(markerPath, operations.stat), writesBlocked: false, newlyPreserved: false }
+    }
+    await rm(markerPath, { force: true }).catch(() => undefined)
+    return { hold: null, writesBlocked: false, newlyPreserved: false }
+  }
   const held = await beginConfigRecovery(markerPath, target).then(() => true, () => false)
   if (held) {
+    // Revalidate immediately before moving: a settings restore may have completed while the existing hold,
+    // candidate backup path, or recovery marker was being prepared.
+    const preMoveProbe = await probeConfigFile(configPath)
+    if (preMoveProbe.state === 'parseable' || preMoveProbe.state === 'missing') {
+      return restorePriorMarkerAndResolveHold()
+    }
     const preserved = await preserveUnreadableFile(
       configPath,
       { rename: operations.rename ?? rename, copyFile: operations.copyFile ?? copyFile },
       target,
     )
-    if (preserved) return { hold: preserved, writesBlocked: false, newlyPreserved: true }
-    // Nothing was preserved: the original is intact, so restore any prior backup hold or remove the new marker.
-    if (previousHold) {
-      await beginConfigRecovery(markerPath, previousHold).catch(() => undefined)
-      return { hold: previousHold, writesBlocked: true, newlyPreserved: false }
+    if (preserved) {
+      // Also check what landed in `preserved` in case a valid replacement arrived right at the move/copy boundary.
+      const preservedProbe = await probeConfigFile(preserved)
+      if (preservedProbe.state === 'parseable') {
+        const restoredInPlace = await restorePreservedValidConfig(preserved, configPath)
+        if (!restoredInPlace) {
+          return { hold: preserved, writesBlocked: true, newlyPreserved: false }
+        }
+        return restorePriorMarkerAndResolveHold()
+      }
+      return { hold: preserved, writesBlocked: false, newlyPreserved: true }
+    }
+    // Nothing was preserved: the original is intact, so restore any prior marker hold or remove the new marker.
+    if (existing.hold && existing.rawMarker !== null) {
+      await writeFileAtomic(markerPath, existing.rawMarker).catch(() => undefined)
+      return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
     }
     await rm(markerPath, { force: true }).catch(() => undefined)
   }
-  return { hold: previousHold, writesBlocked: true, newlyPreserved: false }
+  return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
 }

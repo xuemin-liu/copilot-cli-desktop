@@ -19,7 +19,7 @@ import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, set
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { resolveConfigRecovery, type ConfigRecoveryOutcome } from './config-recovery.js'
+import { resolveConfigRecovery, type ConfigRecoveryOutcome, type RecoveryOperations } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
@@ -8307,6 +8307,7 @@ async function saveSettingsAtStartup(migrated: boolean): Promise<boolean> {
 async function loadDesktopConfigWithRecovery(
   onMigrated?: (message: string) => void,
   betweenReadAndRecovery?: () => Promise<void>,
+  recoveryOperations?: RecoveryOperations,
 ): Promise<{ migrated: boolean; recovery: ConfigRecoveryOutcome }> {
   const file = configPath()
   const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
@@ -8316,7 +8317,7 @@ async function loadDesktopConfigWithRecovery(
   )
   let snapshot = await readDesktopConfigSnapshot(file)
   if (betweenReadAndRecovery) await betweenReadAndRecovery()
-  let recovery = await resolveConfigRecovery(file, recoveryMarker, snapshot.unparseable)
+  let recovery = await resolveConfigRecovery(file, recoveryMarker, snapshot.unparseable, recoveryOperations)
   // Re-read desktop.json whenever the file changed (for example, a backup restore completed after an initial
   // partial/malformed or fallback read) or a pre-existing recovery hold lifted without preserving or blocking.
   for (let attempt = 0; attempt < 3 && !recovery.newlyPreserved && !recovery.writesBlocked; attempt++) {
@@ -8328,9 +8329,15 @@ async function loadDesktopConfigWithRecovery(
     if (!snapshot.unparseable) {
       break
     }
-    recovery = await resolveConfigRecovery(file, recoveryMarker, true)
+    recovery = await resolveConfigRecovery(file, recoveryMarker, true, recoveryOperations)
   }
-  if (snapshot.unparseable && !recovery.newlyPreserved && !recovery.writesBlocked) {
+  if (recovery.newlyPreserved) {
+    const postPreserveSnapshot = await readDesktopConfigSnapshot(file)
+    if (postPreserveSnapshot.raw !== null && !postPreserveSnapshot.unparseable) {
+      snapshot = postPreserveSnapshot
+      recovery = { ...recovery, newlyPreserved: false }
+    }
+  } else if (snapshot.unparseable && !recovery.writesBlocked) {
     const finalSnapshot = await readDesktopConfigSnapshot(file)
     if (!finalSnapshot.unparseable) {
       snapshot = finalSnapshot
