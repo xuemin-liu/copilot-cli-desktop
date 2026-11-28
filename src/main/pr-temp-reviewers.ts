@@ -1202,6 +1202,49 @@ export class TempReviewerRegistry {
   }
 }
 
+const receiptChecks = new WeakMap<TempReviewerSeat, { receipt: TempReviewerSeatReceipt; result: Promise<{ ok: boolean; message: string }> }>()
+
+function sameReceipt(a: TempReviewerSeatReceipt, b: TempReviewerSeatReceipt): boolean {
+  return a.kind === b.kind && a.remoteId === b.remoteId && (a.itemType ?? 'any') === (b.itemType ?? 'any')
+}
+
+/**
+ * Holds a seat's receipt while `check` verifies it on the PR host, which can wait behind the group's other forge reads.
+ * The helper that sent it gives up after its own deadline and tells the reviewer to send the same receipt again, so
+ * a repeat is answered by the check already running, or once the receipt was accepted, by that result; only a
+ * different receipt is refused while one is being checked.
+ */
+export function submitSeatReceipt(
+  seat: TempReviewerSeat,
+  receipt: TempReviewerSeatReceipt,
+  check: () => Promise<{ ok: boolean; message: string }>,
+): Promise<{ ok: boolean; message: string }> {
+  const held = seat.submittedReceipt
+  if (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running') {
+    if (held && sameReceipt(held, receipt) && (seat.lifecycle === 'approved' || seat.lifecycle === 'findings')) {
+      return Promise.resolve({ ok: true, message: `This receipt was already accepted: the reviewer's result for this round is ${seat.lifecycle}.` })
+    }
+    return Promise.resolve({ ok: false, message: 'This reviewer already has a result for the current round.' })
+  }
+  if (held) {
+    const running = receiptChecks.get(seat)
+    if (running && running.receipt === held && sameReceipt(held, receipt)) return running.result
+    return Promise.resolve({ ok: false, message: 'A receipt is already being checked for this reviewer.' })
+  }
+  seat.submittedReceipt = receipt
+  const result = check().then((answer) => {
+    if (!answer.ok && seat.submittedReceipt === receipt) seat.submittedReceipt = null
+    return answer
+  }, (error: unknown) => {
+    if (seat.submittedReceipt === receipt) seat.submittedReceipt = null
+    throw error
+  }).finally(() => {
+    if (receiptChecks.get(seat)?.receipt === receipt) receiptChecks.delete(seat)
+  })
+  receiptChecks.set(seat, { receipt, result })
+  return result
+}
+
 /**
  * Reconciles a temporary reviewer seat's completion or receipt against remote forge evidence while guarding against
  * concurrent round advances, retries, or timeout transitions (`timed-out`) that occur while `loadEvidence` is in flight.

@@ -34,7 +34,9 @@ import {
   resolveOtherCliReviewerArgs,
   reviewerHelperDirAccess,
   shutdownActiveReviewerSeats,
+  submitSeatReceipt,
   TempReviewerRegistry,
+  type TempReviewerSeat,
   discloseAgentConfigs,
   undisclosedAgentConfigs,
 } from './pr-temp-reviewers.js'
@@ -937,4 +939,46 @@ test('prepareAgnosticReviewWorktree, refreshAgnosticReviewWorktree, and inspectR
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('a repeated seat receipt waits for the check already running, and is answered once the receipt was accepted', async () => {
+  const seat = { lifecycle: 'running', submittedReceipt: null } as unknown as TempReviewerSeat
+  const receipt = { kind: 'approved' as const, remoteId: 7, itemType: 'review' }
+  let checks = 0
+  let finish!: (answer: { ok: boolean; message: string }) => void
+  const slowCheck = () => { checks += 1; return new Promise<{ ok: boolean; message: string }>((resolve) => { finish = resolve }) }
+
+  // The helper gave up on a slow but successful check and sent the same receipt again: both get the one check's answer.
+  const first = submitSeatReceipt(seat, receipt, slowCheck)
+  const repeat = submitSeatReceipt(seat, { ...receipt }, slowCheck)
+  const other = await submitSeatReceipt(seat, { ...receipt, remoteId: 8 }, slowCheck)
+  assert.deepEqual(other, { ok: false, message: 'A receipt is already being checked for this reviewer.' })
+  seat.lifecycle = 'approved'
+  finish({ ok: true, message: 'Verified approved on PR (review:7).' })
+  assert.deepEqual(await first, { ok: true, message: 'Verified approved on PR (review:7).' })
+  assert.deepEqual(await repeat, await first)
+  assert.equal(checks, 1)
+
+  // Sent again after it was accepted: the result stands instead of an error.
+  const later = await submitSeatReceipt(seat, { ...receipt }, slowCheck)
+  assert.equal(later.ok, true)
+  assert.match(later.message, /already accepted.*approved/)
+  assert.equal(checks, 1)
+  const different = await submitSeatReceipt(seat, { ...receipt, remoteId: 9 }, slowCheck)
+  assert.deepEqual(different, { ok: false, message: 'This reviewer already has a result for the current round.' })
+})
+
+test('a seat receipt that fails its check, or whose check throws, is released for the next try', async () => {
+  const seat = { lifecycle: 'running', submittedReceipt: null } as unknown as TempReviewerSeat
+  const receipt = { kind: 'findings' as const, remoteId: 11, itemType: 'inline' }
+  const failed = await submitSeatReceipt(seat, receipt, async () => ({ ok: false, message: 'Could not verify.' }))
+  assert.equal(failed.ok, false)
+  assert.equal(seat.submittedReceipt, null)
+  await assert.rejects(submitSeatReceipt(seat, receipt, async () => { throw new Error('forge read failed') }), /forge read failed/)
+  assert.equal(seat.submittedReceipt, null)
+  let ran = false
+  const retried = await submitSeatReceipt(seat, receipt, async () => { ran = true; return { ok: true, message: 'Recorded.' } })
+  assert.equal(ran, true)
+  assert.equal(retried.ok, true)
+  assert.deepEqual(seat.submittedReceipt, receipt)
 })
