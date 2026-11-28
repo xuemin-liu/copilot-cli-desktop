@@ -4468,7 +4468,7 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   const beforeHostRefocus = win.messages.length
   await h.request('desktop:activate-tab', tab2Id)
   assert.ok(
-    win.messages.slice(beforeHostRefocus).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    win.messages.slice(beforeHostRefocus).some(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === tab2Id),
     'explicit activation of the already-active host clears reviewer focus in the renderer',
   )
   assert.equal(findFileMenuItem('Restart Active Session').enabled, true, 'Restart Active Session re-enables once focus returns to host')

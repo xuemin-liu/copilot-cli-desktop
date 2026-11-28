@@ -3118,7 +3118,7 @@ function selectSessionInMain(tabId: string): DesktopState {
   broadcastState()
   refreshMenus()
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('desktop:clear-peek-focus-request')
+    mainWindow.webContents.send('desktop:clear-peek-focus-request', tabId)
   }
   return snapshot()
 }

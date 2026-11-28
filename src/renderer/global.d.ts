@@ -114,7 +114,7 @@ export interface CopilotDesktopBridge {
   setFocusedPeekTab(tabId: string | null): Promise<void>
   onPeekReviewerRequest(listener: (payload: { tabId: string; peekKey: string }) => void): () => void
   onHidePeekRequest(listener: () => void): () => void
-  onClearPeekFocusRequest(listener: () => void): () => void
+  onClearPeekFocusRequest(listener: (tabId: string | null) => void): () => void
   navigateSession(direction: SessionNavigationDirection): Promise<DesktopState>
   popOutTab(tabId: string): Promise<DesktopState>
   dockTab(tabId: string): Promise<DesktopState>

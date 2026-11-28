@@ -30,6 +30,34 @@ export function resolveCloseShortcutAction(input: {
 }
 
 /**
+ * Clears any host-anchored reviewer peek that would otherwise keep an explicitly activated side chat hidden behind
+ * the peek pane (in both split and compact layouts).
+ */
+export function clearPeekForActivatedTab(
+  peekByHost: Readonly<Record<string, string | null>>,
+  tabs: readonly DesktopSessionTab[],
+  tabId: string,
+): Readonly<Record<string, string | null>> {
+  const tab = tabs.find((candidate) => candidate.id === tabId)
+  if (!tab?.sideChat || !tab.sideParentTabId) return peekByHost
+  if (!peekByHost[tab.sideParentTabId]) return peekByHost
+  return { ...peekByHost, [tab.sideParentTabId]: null }
+}
+
+/**
+ * Resolves which terminal is visible in SessionWorkspace's single-pane compact layout.
+ */
+export function resolveCompactVisibleTabId(input: {
+  main: DesktopSessionTab | null
+  side: DesktopSessionTab | null
+  focusedTabId: string | null
+  single: boolean
+}): string | null {
+  if (!input.side || !input.single) return null
+  return input.focusedTabId === input.side.id ? input.side.id : input.main?.id ?? null
+}
+
+/**
  * Resolves which session tab in a project workspace receives "Add to prompt" / Git resolve actions from the tools
  * panel. Preserves regular tabs and focused side chats, excludes temporary reviewers (falling back to the non-reviewer
  * visible host when activeTabId were ever a tempReviewer), and respects live / not-popped-out eligibility checks.

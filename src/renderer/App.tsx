@@ -15,7 +15,7 @@ import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { ReviewerBar } from './components/ReviewerBar.js'
 import { regularTabCount, resolvePeekHostAndTab } from '../main/session-tab-machine.js'
-import { activeWorkspaceRegularTab, resolveCloseShortcutAction } from './peek-state.js'
+import { activeWorkspaceRegularTab, clearPeekForActivatedTab, resolveCloseShortcutAction } from './peek-state.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -109,15 +109,31 @@ export function App(): JSX.Element {
     setPeekReviewerByHost((prev) => ({ ...prev, [requestedKey]: tabId }))
     setFocusedPeekTabId(tabId)
   }), [])
+  const tabsRef = useRef(state.tabs)
+  tabsRef.current = state.tabs
+  const activeTabIdRef = useRef(state.activeTabId)
+  activeTabIdRef.current = state.activeTabId
+  useEffect(() => {
+    const current = activeWorkspaceRegularTab(tabsRef.current, activeTabIdRef.current, state.activeProfileId)
+    if (current?.sideChat && current.sideParentTabId) {
+      setPeekReviewerByHost((prev) => clearPeekForActivatedTab(prev, tabsRef.current, current.id))
+    }
+  }, [state.activeProfileId])
   useEffect(() => window.copilotDesktop.onHidePeekRequest(() => {
     updatePeekReviewerRef.current(null)
   }), [])
-  useEffect(() => window.copilotDesktop.onClearPeekFocusRequest(() => {
+  useEffect(() => window.copilotDesktop.onClearPeekFocusRequest((selectedTabId) => {
     setFocusedPeekTabId(null)
+    if (selectedTabId) {
+      setPeekReviewerByHost((prev) => clearPeekForActivatedTab(prev, tabsRef.current, selectedTabId))
+    }
   }), [])
   const handleActivateTab = useCallback((tabId: string): void => {
     const tab = state.tabs.find((candidate) => candidate.id === tabId)
-    if (!tab?.tempReviewer) setFocusedPeekTabId(null)
+    if (!tab?.tempReviewer) {
+      setFocusedPeekTabId(null)
+      setPeekReviewerByHost((prev) => clearPeekForActivatedTab(prev, state.tabs, tabId))
+    }
     setOperationError(null)
     void window.copilotDesktop.activateTab(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))
   }, [state.tabs])

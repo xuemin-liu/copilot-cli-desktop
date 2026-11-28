@@ -5,6 +5,7 @@ import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionCliLabel } from '../../main/session-cli.js'
 import { SessionTerminal } from './SessionTerminal.js'
 import { terminalLayout } from '../tool-dock-state.js'
+import { resolveCompactVisibleTabId } from '../peek-state.js'
 import { BrowserIcon, GitBranchIcon, SideChatIcon } from './Icons.js'
 import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
 import type { DesktopControlTabView } from '../../main/types.js'
@@ -88,9 +89,7 @@ export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, ca
   const showSplit = side !== null && !layout.single
   const standaloneReviewer = Boolean(main?.tempReviewer && !side)
   const hasTopBar = Boolean((side && layout.single) || (standaloneReviewer && toolsControl))
-  const compactActiveId = side && layout.single
-    ? (focusedTabId === side.id ? side.id : main?.id ?? null)
-    : null
+  const compactActiveId = resolveCompactVisibleTabId({ main, side, focusedTabId, single: layout.single })
   const dragging = useRef<number | null>(null)
   const updateSplit = (value: number): void => {
     const next = Math.min(75, Math.max(25, value))

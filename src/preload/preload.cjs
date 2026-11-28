@@ -154,7 +154,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     return () => ipcRenderer.removeListener('desktop:hide-peek-request', handler)
   },
   onClearPeekFocusRequest: (listener) => {
-    const handler = () => listener()
+    const handler = (_event, tabId) => listener(typeof tabId === 'string' ? tabId : null)
     ipcRenderer.on('desktop:clear-peek-focus-request', handler)
     return () => ipcRenderer.removeListener('desktop:clear-peek-focus-request', handler)
   },

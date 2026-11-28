@@ -2,9 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   activeWorkspaceRegularTab,
+  clearPeekForActivatedTab,
   resolveCloseShortcutAction,
+  resolveCompactVisibleTabId,
   resolveToolPanelPromptTarget,
 } from '../renderer/peek-state.js'
+import { resolvePeekHostAndTab, visibleSessionTabs } from './session-tab-machine.js'
+import { terminalLayout } from '../renderer/tool-dock-state.js'
 import type { DesktopSessionTab } from './types.js'
 
 function makeTab(id: string, workspaceProfileId: string, extra: Partial<DesktopSessionTab> = {}): DesktopSessionTab {
@@ -100,4 +104,51 @@ test('resolveToolPanelPromptTarget preserves sideChat targeting, excludes tempRe
     resolveToolPanelPromptTarget({ projectProfileId: 'ws-1', activeProfileId: 'ws-1', activeTabId: 'tab-host', sessions: [dormantHost], visibleMain: dormantHost }),
     undefined,
   )
+})
+
+test('reselecting a side chat during a reviewer peek clears the host peek so compact layout shows the side chat and closes it', () => {
+  const host = makeTab('tab-host', 'ws-1')
+  const side = makeTab('tab-side', 'ws-1', { sideChat: true, sideParentTabId: 'tab-host' })
+  const reviewer = makeTab('tab-rev', 'ws-1', {
+    cli: 'claude',
+    tempReviewer: { groupId: 'g1', hostTabId: 'tab-host', seatId: 's1', cli: 'claude', repository: 'o/r', prLabel: 'PR #1', prNumber: 1, prUrl: null },
+  })
+  const tabs = [host, side, reviewer]
+  const compact = terminalLayout(760, true, 55)
+  assert.equal(compact.single, true, '760px uses compact single-pane layout')
+
+  // While side chat is active and reviewer is peeked + focused, compact view shows reviewer and Ctrl+W hides the peek:
+  const peekedByHost: Readonly<Record<string, string | null>> = { 'tab-host': 'tab-rev' }
+  const before = resolvePeekHostAndTab({ tabs, activeTabId: 'tab-side' }, peekedByHost, 'ws-1')
+  assert.equal(before.peekTabId, 'tab-rev')
+  const beforeVisible = visibleSessionTabs({ tabs, activeTabId: 'tab-side' }, before.peekTabId, 'ws-1')
+  assert.equal(
+    resolveCompactVisibleTabId({ main: beforeVisible.main, side: beforeVisible.side, focusedTabId: 'tab-rev', single: compact.single }),
+    'tab-rev',
+  )
+  assert.deepEqual(
+    resolveCloseShortcutAction({ activeWorkspaceTabId: 'tab-side', effectiveFocusedPeekTabId: 'tab-rev' }),
+    { kind: 'hide-peek', tabId: 'tab-rev' },
+  )
+
+  // Reselecting the side chat clears its host's peek so Side becomes the visible pane at 760px and Ctrl+W targets Side:
+  const afterSideSelect = clearPeekForActivatedTab(peekedByHost, tabs, 'tab-side')
+  const resolvedAfterSide = resolvePeekHostAndTab({ tabs, activeTabId: 'tab-side' }, afterSideSelect, 'ws-1')
+  assert.equal(resolvedAfterSide.peekTabId, null)
+  const visibleAfterSide = visibleSessionTabs({ tabs, activeTabId: 'tab-side' }, resolvedAfterSide.peekTabId, 'ws-1')
+  assert.equal(visibleAfterSide.main?.id, 'tab-host')
+  assert.equal(visibleAfterSide.side?.id, 'tab-side')
+  assert.equal(
+    resolveCompactVisibleTabId({ main: visibleAfterSide.main, side: visibleAfterSide.side, focusedTabId: 'tab-side', single: compact.single }),
+    'tab-side',
+    'compact single-pane view displays the reselected side chat instead of falling back to host',
+  )
+  assert.deepEqual(
+    resolveCloseShortcutAction({ activeWorkspaceTabId: 'tab-side', effectiveFocusedPeekTabId: null }),
+    { kind: 'close-tab', tabId: 'tab-side' },
+    'Ctrl+W closes the visible side chat',
+  )
+
+  // Selecting the host itself preserves the host's peek entry:
+  assert.equal(clearPeekForActivatedTab(peekedByHost, tabs, 'tab-host')['tab-host'], 'tab-rev')
 })
