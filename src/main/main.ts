@@ -19,7 +19,7 @@ import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, set
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { resolveConfigRecovery } from './config-recovery.js'
+import { activeConfigRecovery, resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
@@ -1025,7 +1025,9 @@ function followupViews(): FollowupGrant[] {
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number;tabId:string;session:PtySession}>()
 const knownReviewerSessionIds=new Set<string>()
 const knownUnboundReviewerReservations=new Map<string,{project:string;number:number}>()
+let startupConfigPending=false
 let legacyTabSanitizationUnflushed=false
+let configRecoveryHold=false
 function isReviewerTask(taskId:string):boolean {
   if(reviewerTasks.has(taskId))return true
   if(followups?.list().some(g=>g.taskId===taskId&&g.role==='reviewer'))return true
@@ -1129,6 +1131,8 @@ async function reportEndedReviews():Promise<void>{
 const missingChecks=new Map<string,string>()
 /** Reviews starting now, by launch id: the sweep leaves them alone. */
 const reviewLaunches=new Set<string>()
+/** Sandboxed PR reviews reserved in this process run (whose tabs are never persisted to desktop.json). */
+const currentRunReviewLaunchIds=new Set<string>()
 let reservations:ReviewReservations|null=null
 /** Which review owns which reviewer folder and worktree (pr-review-reservations.ts). */
 function reviewReservations():ReviewReservations|null{
@@ -1170,7 +1174,13 @@ async function sweepReviewerAreas():Promise<void>{
       // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
-      if((legacyTabSanitizationUnflushed||configWritesBlocked)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:'))continue
+      if(!currentRunReviewLaunchIds.has(record.launchId)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')){
+        if(startupConfigPending||legacyTabSanitizationUnflushed||configWritesBlocked)continue
+        if(configRecoveryHold){
+          configRecoveryHold=Boolean(await activeConfigRecovery(join(app.getPath('userData'),'config-recovery.json')))
+          if(configRecoveryHold)continue
+        }
+      }
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       if(meetingReviewers.holdsLaunch(record.launchId))continue
       const grant=record.taskId?followups?.list().find(g=>g.taskId===record.taskId&&g.role==='reviewer'):undefined
@@ -1223,6 +1233,7 @@ async function startPrReview(url:string,profileId?:string):Promise<{profileId:st
   await clearDetachedReviewHold(store,pull.repository,pull.number,String(me.id))
   await store.reserve({launchId,repository:pull.repository,number:pull.number,reviewer:String(me.id),project:resolve(profile.path),root:area.root,checkout:area.checkout,ref:area.ref})
   reviewLaunches.add(launchId)
+  currentRunReviewLaunchIds.add(launchId)
   let tabId:string|null=null
   try{
     await makeReviewerArea(area)
@@ -10482,6 +10493,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('child-process-gone', (_event, details) => { void writeAppLog(`Helper process ended: ${describeProcessExit(details)}`) })
 
   app.whenReady().then(async () => {
+    startupConfigPending = true
     workflows()
     try { deliveryJournal = new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite')) }
     catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.' }
@@ -10519,7 +10531,11 @@ if (!app.requestSingleInstanceLock()) {
         if (settingsWindow && !settingsWindow.isDestroyed() && isLauncherShellUrl(settingsWindow.webContents.getURL(), settingsUrl())) settingsWindow.webContents.send('desktop-settings:migration-progress', progress)
       },
       reloaded: async () => {
-        desktopConfig = await readDesktopConfig(configPath())
+        let reloadUnparseable = false
+        desktopConfig = await readDesktopConfig(configPath(), undefined, () => { reloadUnparseable = true })
+        const reloadRecovery = await resolveConfigRecovery(configPath(), join(app.getPath('userData'), 'config-recovery.json'), reloadUnparseable)
+        configRecoveryHold = Boolean(reloadRecovery.hold)
+        configWritesBlocked = reloadRecovery.writesBlocked
         if (sanitizeLegacyReviewerTabsInConfig(desktopConfig)) {
           legacyTabSanitizationUnflushed = true
           await persistConfig().catch(() => {})
@@ -10547,6 +10563,7 @@ if (!app.requestSingleInstanceLock()) {
     // browser data (referenced only by that file) until the backup is restored or deleted.
     const configRecovery = await resolveConfigRecovery(configPath(), recoveryMarker, desktopConfigUnparseable)
     const recoveryHold = configRecovery.hold
+    configRecoveryHold = Boolean(recoveryHold)
     configWritesBlocked = configRecovery.writesBlocked
     if (configRecovery.newlyPreserved && recoveryHold) {
       void writeAppLog(`desktop.json could not be parsed; defaults are in use. The original was kept at ${recoveryHold}`)
@@ -10569,9 +10586,12 @@ if (!app.requestSingleInstanceLock()) {
     const legacyTabsSanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig)
     if (legacyTabsSanitized) legacyTabSanitizationUnflushed = true
     await saveSettingsAtStartup(desktopConfigMigrated || legacyTabsSanitized)
+    startupConfigPending = false
     // Week-old folders no record owns (from an older version); recorded ones are the sweep's, which checks their worktree.
-    // Runs only after desktop.json has recorded withholdAutoStart / removed confirmed reviewer tabs (or held the reservation if saving failed).
-    void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
+    // Runs only after desktop.json has recorded withholdAutoStart / removed confirmed reviewer tabs (or held the reservation if saving failed or recovery is pending).
+    if (!recoveryHold && !configWritesBlocked) {
+      void pruneReviewerAreas(reviewerAreaBase(),new Set(reviewReservations()?.list().map(r=>r.root)??[]),Date.now()).catch(()=>{})
+    }
     void sweepReviewerAreas().catch(()=>{})
     // Keep DevTools settings from sessions closed last launch before their partitions are pruned.
     try { shareDevtoolsSettings(app.getPath('userData')) }

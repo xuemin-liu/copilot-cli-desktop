@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean }): Promise<void>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean }): Promise<{ hold: string | null; writesBlocked: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -641,15 +641,27 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             unrestoredProfileTabs.clear();
             knownReviewerSessionIds.clear();
             knownUnboundReviewerReservations.clear();
+            currentRunReviewLaunchIds.clear();
+            startupConfigPending = false;
             legacyTabSanitizationUnflushed = false;
+            configRecoveryHold = false;
+            configWritesBlocked = false;
             reservations = null;
             syncTabState();
           },
           runStartupConfigAndSweepForTest: async (options = {}) => {
             app.isReady = () => true;
+            startupConfigPending = true;
             collectKnownReviewerSessionIds();
+            if (options.earlySweepBeforeConfigRead) {
+              await sweepReviewerAreas();
+            }
             let migrated = false;
-            desktopConfig = await readDesktopConfig(configPath(), () => { migrated = true; });
+            let unparseable = false;
+            desktopConfig = await readDesktopConfig(configPath(), () => { migrated = true; }, () => { unparseable = true; });
+            const recovery = await resolveConfigRecovery(configPath(), join(app.getPath('userData'), 'config-recovery.json'), unparseable);
+            configRecoveryHold = Boolean(recovery.hold);
+            configWritesBlocked = recovery.writesBlocked;
             const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
             if (sanitized) legacyTabSanitizationUnflushed = true;
             syncWorkspaceState();
@@ -661,8 +673,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
               await saveSettingsAtStartup(migrated || sanitized);
             } finally {
               persistConfig = originalPersist;
+              startupConfigPending = false;
             }
             await sweepReviewerAreas();
+            return recovery;
           },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
@@ -5321,6 +5335,22 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     await h.seedUnboundReviewReservationForTest({ number: 97, projectPath: repo, boundTaskSessionId: boundNoFollowupUuid, profileId: profile.id })
     await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
     await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+
+    // Simulate a corrupt desktop.json launch WITH an early periodic sweep before readDesktopConfig:
+    // resolveConfigRecovery preserves the corrupt config (hold !== null, writesBlocked === false) and saves defaults,
+    // while both the early pre-read sweep and post-save sweep keep all 3 reviewer reservations intact!
+    const validRawConfig = await readFile(join(directory, 'desktop.json'), 'utf8')
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch = await h.runStartupConfigAndSweepForTest({ earlySweepBeforeConfigRead: true })
+    assert.ok(recoveryOnCorruptLaunch.hold, 'corrupt desktop.json was preserved under a settings recovery hold')
+    assert.equal(recoveryOnCorruptLaunch.writesBlocked, false, 'settings writes are allowed while recovery hold is active')
+    assert.equal(h.reservationList().length, 3, 'early pre-read sweep and recovery-hold launch both preserve all reviewer reservations')
+
+    // User repairs the preserved backup and restores it to desktop.json (removing the preserved backup file):
+    await writeFile(join(directory, 'desktop.json'), validRawConfig)
+    await rm(recoveryOnCorruptLaunch.hold!, { force: true })
 
     // Simulate Launch 0 where saveSettingsAtStartup fails (ENOSPC) and Copilot CLI is unresolved:
     await h.resetRuntimeForColdStartForTest()
