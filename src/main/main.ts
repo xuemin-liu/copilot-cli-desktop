@@ -388,6 +388,7 @@ let browserZoom: BrowserZoom | null = null
 const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
 const lastDockedToolSession = new Map<string, string>()
 let focusedPeekTabId: string | null = null
+let mainNavigationSeq = 0
 const sessionWindows = new Map<string, BrowserWindow>()
 
 function validatedLastDockedSession(profileId: string | null): string | null {
@@ -415,6 +416,10 @@ function activeFocusedPeekTabId(): string | null {
 }
 
 function requestPeekReviewerInMain(tabId: string, peekKey: string): void {
+  if (focusedPeekTabId !== tabId) {
+    focusedPeekTabId = tabId
+    refreshMenus()
+  }
   const window = mainWindow
   if (!window || window.isDestroyed()) return
   window.webContents.send('desktop:peek-reviewer-request', { tabId, peekKey })
@@ -3068,6 +3073,7 @@ function activateSessionTab(tabId: string): DesktopState {
 }
 
 function selectSessionInMain(tabId: string): DesktopState {
+  mainNavigationSeq += 1
   const target = tabsState.tabs.find((tab) => tab.id === tabId)
   if (target?.tempReviewer) {
     const previous = tabsState.activeTabId
@@ -7744,6 +7750,7 @@ async function openAddedWorkspace(profile: WorkspaceProfile): Promise<DesktopSta
 async function activateProfile(profileId: string): Promise<DesktopState> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
+  mainNavigationSeq += 1
   desktopConfig.activeProfileId = profile.id
   focusedPeekTabId = null
   syncWorkspaceState()
@@ -7775,7 +7782,22 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   await persistConfig()
   if (needsRestore && desktopConfig.activeProfileId === profile.id && isCopilotResolved()
     && !tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)) {
+    const pendingStandalonePeekId = activeFocusedPeekTabId()
+    const seqBeforeRestore = mainNavigationSeq
     await restoreTabsForProfile()
+    if (pendingStandalonePeekId && desktopConfig.activeProfileId === profile.id && mainNavigationSeq === seqBeforeRestore) {
+      const peekTab = tabsState.tabs.find((tab) => (
+        tab.id === pendingStandalonePeekId
+        && Boolean(tab.tempReviewer)
+        && tab.tempReviewer!.hostTabId === null
+        && tab.workspaceProfileId === profile.id
+      ))
+      const restoredId = activeWorkspaceRegularTabId()
+      const restoredTab = restoredId ? tabsState.tabs.find((tab) => tab.id === restoredId) : null
+      if (peekTab && restoredTab) {
+        requestPeekReviewerInMain(peekTab.id, restoredTab.sideParentTabId ?? restoredTab.id)
+      }
+    }
   }
   return snapshot()
 }

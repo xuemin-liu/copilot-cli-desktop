@@ -4654,9 +4654,26 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
     'no delayed clear-peek-focus-request arrives after the reviewer peek request once persistConfig resolves',
   )
 
-  // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId:
+  // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId.
+  // If the user selects ws3's standalone reviewer while the workspace save is still pending, restoration carries that
+  // peek and its focus from profile:<ws3> over to the restored host tab:
   h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws2.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })
-  const ws3State = await h.request('desktop:activate-profile', ws3.id)
+  let releaseWs3Save!: () => void
+  h.holdConfigWrite(new Promise<void>((resolve) => { releaseWs3Save = resolve }))
+  const beforeWs3Restore = win.messages.length
+  const pendingWs3 = h.request('desktop:activate-profile', ws3.id)
+  await h.request('desktop:activate-tab', ws3RevId)
+  assert.ok(
+    win.messages.slice(beforeWs3Restore).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws3RevId && msg.payload?.peekKey === `profile:${ws3.id}`),
+    'selecting standalone reviewer while ws3 save is pending initially peeks under profile:<ws3>',
+  )
+  releaseWs3Save()
+  const ws3State = await pendingWs3
   assert.notEqual(ws3State.activeTabId, ws3RevId, 'activateProfile never activates a background tempReviewer')
   assert.equal(ws3State.tabs.find(tab => tab.id === ws3State.activeTabId)?.title, 'Saved WS3', 'saved regular tab in ws3 is restored')
+  assert.ok(
+    win.messages.slice(beforeWs3Restore).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws3RevId && msg.payload?.peekKey === ws3State.activeTabId),
+    'restoring ws3 saved tab carries the pending standalone reviewer peek onto the restored host tab',
+  )
+  assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false, 'focused standalone reviewer stays focused after ws3 tab restoration')
 }))
