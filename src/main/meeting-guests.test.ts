@@ -235,7 +235,7 @@ function meeting(): {
     notify: () => {},
     sessionIdOf: (tabId) => tabId === 'tab-host' ? HOST_SESSION : tabId,
   }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), timers, () => 'K7QF')
-  mailbox = new GuestMailbox(timers, () => {}, (seat, item) => guestDeliveryText(seat, item, hub.folderOf(item.meetingId), GUESTS))
+  mailbox = new GuestMailbox(timers, () => {}, (seat, item) => guestDeliveryText(seat, item, hub.folderOf(item.meetingId), GUESTS), (seatId, item) => !hub.awaits(seatId, item))
   const deps: GuestDeps = {
     ready: () => true,
     isOpen: (id) => hub.isOpen(id),
@@ -614,4 +614,95 @@ test('a seat the desktop made for a hidden reviewer is over after a restart; oth
   const again = new GuestMailbox(clock(), () => {})
   again.restore(JSON.parse(saved.serialize()))
   assert.equal(again.seat(managed.id)!.closed, 'The person removed this reviewer.')
+})
+
+test('GuestMailbox skips superseded host notices and stale reviewer prompts, preserves late replies and agreed notices, and never consumes items on aborted next', async () => {
+  // 1. Host stale digest replaced by Remind (resume), plus round/propose-close dropping unread queued digest/reminder:
+  const m = meeting()
+  const host = m.mailbox.invite('', 'Claude Code', null, { kind: 'host' }).seat
+  const reviewer = m.mailbox.invite('K7QF', 'Codex', null).seat
+  await m.call(host, 'start', { topic: 'race', text: 'Plan v1' })
+  await m.call(reviewer, 'next')
+  await m.call(reviewer, 'reply', { text: 'Finding 1' })
+
+  // Aborted `next` (both pre-aborted and aborted after arrival) never promotes queued items into `given`:
+  const preAbort = new AbortController()
+  preAbort.abort()
+  const deps: GuestDeps = {
+    ready: () => true,
+    isOpen: (id) => m.hub.isOpen(id),
+    join: () => null,
+    leave: (s) => m.hub.leave(s.id),
+    turnCompleted: (s, item, reply) => m.hub.turnCompleted(s.id, item, reply),
+    material: async () => null,
+    start: () => ({ error: 'unused' }),
+    post: (s, kind, text, changes) => {
+      try { return { ok: true, message: m.hub.post(s.id, kind, text, changes) } }
+      catch (error) { return { ok: false, message: (error as Error).message } }
+    },
+    end: (s) => { m.hub.end(s.id); return { ok: true, message: 'The meeting is closed.' } },
+    status: () => '',
+    waitingOn: () => null,
+    changes: async () => '',
+    checkFolder: async () => null,
+  }
+  await handleGuestRequest(m.mailbox, deps, host, 'next', { wait: 5 }, preAbort.signal, 'mcp')
+  assert.equal(m.mailbox.given(host.id), null, 'pre-aborted next does not move digest into given')
+
+  // Host answers round 2 BEFORE calling `next`: queued round-1 digest is dropped and never replayed as stale!
+  assert.match(await m.call(host, 'round', { text: 'Plan v2' }, 'mcp'), /^Sent round 2/)
+  assert.equal(await m.call(host, 'next', { wait: 1 }, 'mcp'), 'Nothing yet. Call meeting_next again; do not end your turn until the meeting is closed, unless the person tells you to.')
+  assert.equal(m.hub.views()[0]!.stage, 'reviewing', 'meeting stays in round 2 reviewing instead of reminding/pausing on stale round 1 digest')
+
+  // Mid-wait abort when digest arrives also leaves digest in queue.items, not given:
+  const postEnqueueAbort = new AbortController()
+  const waitingHost = handleGuestRequest(m.mailbox, deps, host, 'next', { wait: 30 }, postEnqueueAbort.signal, 'mcp')
+  await m.call(reviewer, 'next')
+  postEnqueueAbort.abort()
+  await m.call(reviewer, 'reply', { text: 'Finding 2' })
+  await waitingHost
+  assert.equal(m.mailbox.given(host.id), null, 'aborted next after enqueue does not consume digest into given')
+  const round2Digest = await m.call(host, 'next', { wait: 5 }, 'mcp')
+  assert.match(round2Digest, /round 2 · replies/, 'next live call receives round 2 digest without false silence')
+
+  // Suppose a stale digest remained in `given` when the meeting paused and the user clicked Remind the host (`resume`):
+  await m.call(host, 'next', { wait: 1 }, 'mcp') // reminder
+  await m.call(host, 'next', { wait: 1 }, 'mcp') // pauses meeting
+  assert.equal(m.hub.views()[0]!.stage, 'paused')
+  // Seed an older digest with a stale id into `given` before `resume()` queues the fresh reminder:
+  const staleTimers = clock()
+  let staleIds = new Set<string>(['stale-d1', 'stale-p1', 'stale-disc1'])
+  const box = new GuestMailbox(staleTimers, () => {}, (_s, d) => d.text, (_id, d) => Boolean(d.id && staleIds.has(d.id)))
+  const hSeat = box.invite('K7QF', 'Host', null, { kind: 'host' }).seat
+  box.started(hSeat, 'K7QF')
+  box.enqueue(hSeat.id, { meetingId: 'K7QF', round: 1, kind: 'digest', text: 'stale digest', id: 'stale-d1' })
+  assert.equal(box.take(hSeat.id), null, 'stale host digest is skipped by take() even when nothing is behind it')
+  // If `given` became stale after being handed out, views().holding and wakeDue() ignore it without mutating until take/prune:
+  staleIds = new Set()
+  box.enqueue(hSeat.id, { meetingId: 'K7QF', round: 1, kind: 'digest', text: 'initially live digest', id: 'd-live-then-stale' })
+  assert.equal(box.take(hSeat.id)?.id, 'd-live-then-stale')
+  staleIds = new Set(['d-live-then-stale'])
+  assert.equal(box.views().find((v) => v.id === hSeat.id)?.holding, false, 'views().holding ignores stale host given without side effects')
+  box.enqueue(hSeat.id, { meetingId: 'K7QF', round: 1, kind: 'reminder', text: 'fresh reminder', id: 'r-fresh' })
+  assert.equal(box.take(hSeat.id)?.text, 'fresh reminder', 'fresh reminder replaces stale digest in given')
+  box.answer(hSeat.id)
+
+  // `'agreed'` is never treated as stale even if stale() returns true:
+  staleIds = new Set(['agreed-1'])
+  box.enqueue(hSeat.id, { meetingId: 'K7QF', round: 3, kind: 'agreed', text: 'All agreed!', id: 'agreed-1' })
+  assert.equal(box.take(hSeat.id)?.text, 'All agreed!')
+
+  // 2. Reviewer `take()` loops past multiple consecutive stale items when a newer round is queued,
+  //    but still delivers a single stale item when nothing newer is queued so late replies work:
+  staleIds = new Set(['stale-p1', 'stale-disc1'])
+  const rSeat = box.invite('K7QF', 'Reviewer', null).seat
+  box.enqueue(rSeat.id, { meetingId: 'K7QF', round: 1, kind: 'post', text: 'stale round 1 post', id: 'stale-p1' })
+  box.enqueue(rSeat.id, { meetingId: 'K7QF', round: 1, kind: 'discussion', text: 'stale round 1 discussion', id: 'stale-disc1' })
+  box.enqueue(rSeat.id, { meetingId: 'K7QF', round: 2, kind: 'post', text: 'fresh round 2 post', id: 'fresh-p2' })
+  assert.equal(box.take(rSeat.id)?.text, 'fresh round 2 post', 'take() loops past all consecutive stale reviewer items')
+  box.answer(rSeat.id)
+
+  const lateSeat = box.invite('K7QF', 'Late Reviewer', null).seat
+  box.enqueue(lateSeat.id, { meetingId: 'K7QF', round: 1, kind: 'post', text: 'late round 1 post', id: 'stale-p1' })
+  assert.equal(box.take(lateSeat.id)?.text, 'late round 1 post', 'single stale reviewer post with nothing newer is still delivered for late reply')
 })

@@ -639,9 +639,13 @@ export class MeetingHub {
   }
 
   /** What this message asked of the session is still wanted now: the host's answer to its round, or a reviewer's reply to it. */
-  private owes(meeting: Meeting, tabId: string, { round, kind }: { round: number; kind: MeetingDeliveryKind }): boolean {
+  private owes(meeting: Meeting, tabId: string, { round, kind, id }: { round: number; kind: MeetingDeliveryKind; id?: string | undefined }): boolean {
     if (round !== meeting.round) return false
-    if (meeting.host.tabId === tabId) return meeting.stage === 'host' && (kind === 'digest' || kind === 'reminder')
+    if (meeting.host.tabId === tabId) {
+      if (meeting.stage !== 'host' || (kind !== 'digest' && kind !== 'reminder')) return false
+      const currentId = meeting.outstanding.get(tabId)?.id
+      return id === undefined || currentId === undefined || id === currentId
+    }
     const expected: MeetingDeliveryKind = meeting.discussing ? 'discussion' : meeting.vote ? 'vote' : 'post'
     return meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && kind === expected
   }

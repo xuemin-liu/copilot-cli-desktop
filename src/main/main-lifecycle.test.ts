@@ -103,6 +103,15 @@ interface Harness {
   readHeldInputForTest(tabId:string):string[]|undefined
   reviewerTaskHas(taskId:string):boolean
   reservationList():import('./pr-review-reservations.js').ReviewReservation[]
+  setupHiddenMeetingReviewerForTest(options: { profileId: string; projectPath: string; commit: string | null; cli?: 'claude' | 'codex' }): Promise<{
+    meetingId: string
+    groupId: string
+    seatId: string
+    guestSeatId: string
+    tabId: string | null
+    checkoutPath: string | null
+  }>
+  meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   holdMeetingWrite(predicate:(path:string)=>boolean,work:()=>Promise<void>,started?:()=>void):void
@@ -473,6 +482,71 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           readHeldInputForTest: (tabId) => heldInput.get(tabId),
           reviewerTaskHas: (taskId) => reviewerTasks.has(taskId),
           reservationList: () => { app.isReady = () => true; return reviewReservations()?.list() ?? []; },
+          meetingIsGathering: (meetingId) => meetingHub.isGathering(meetingId),
+          setupHiddenMeetingReviewerForTest: async ({ profileId, projectPath, commit, cli = 'claude' }) => {
+            app.isReady = () => true;
+            guestsReady = true;
+            const hostInvite = guestMailbox.invite('', 'Outside Host', null, { kind: 'host', folder: projectPath });
+            const started = meetingHub.start({ tabId: hostInvite.seat.id, title: 'Outside Host (guest)', folder: projectPath }, { topic: 'audit', post: 'Plan v1', changes: null });
+            guestMailbox.started(hostInvite.seat, started.id);
+            meetingHub.hold(started.id);
+            const group = meetingReviewers.create({
+              meetingId: started.id,
+              hostTabId: null,
+              profileId,
+              projectPath,
+              reviewers: [{ id: cli, name: cli, label: 'Claude Code', cli, config: {} }],
+              allowAll: false,
+              ask: false,
+            });
+            const seat = group.seats.get(cli);
+            if (!commit) {
+              return { meetingId: started.id, groupId: group.id, seatId: seat.id, guestSeatId: '', tabId: null, checkoutPath: null };
+            }
+            group.stage = 'starting';
+            group.commit = commit;
+            const store = reviewReservations();
+            const runner = await meetingGitRunner();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            seat.launchId = launchId;
+            seat.area = area;
+            await store.reserve({ launchId, repository: 'meeting/' + started.id, number: 1, reviewer: 'meeting:' + group.id + ':' + seat.id + ':' + seat.generation, project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            await prepareMeetingReviewWorktree(runner, projectPath, area, commit);
+            const { seat: guest } = guestMailbox.invite(started.id, 'Claude Code', null, { managed: true });
+            seat.guestSeatId = guest.id;
+            guestMailbox.joined(guest);
+            meetingHub.join({ tabId: guest.id, title: 'Claude Code (guest)', folder: null }, started.id, { role: null });
+            meetingReviewers.seatJoined(guest.id);
+            const tabId = 'tab-' + (nextTabSequence++);
+            const session = new PtySession({ file: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: area.checkout, env: process.env, spawnPty: spawnNodePty, discoverSessionIdFromOutput: false, monitorSessionPermissions: false, detectApprovals: false });
+            tabsState = createBackgroundTab(tabsState, {
+              id: tabId,
+              title: 'Meeting ' + started.id + ' · Claude Code',
+              cli,
+              workspaceProfileId: profileId,
+              sessionPermissionPreset: null,
+              sessionPermissionMode: null,
+              permissionWarning: null,
+              remote: false,
+              cliVersion: '1.0.0',
+              lastSessionId: null,
+              privateOverrides: true,
+              canFork: false,
+              launchWorktree: false,
+              autoTitle: false,
+              tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: null, cli, repository: 'local', prLabel: 'Meeting ' + started.id, prNumber: null, prUrl: null, meetingId: started.id },
+            });
+            managedTabs.set(tabId, { session });
+            seat.tabId = tabId;
+            wireSessionEvents(tabId, session);
+            await queueTabTransition(tabId, () => session.start());
+            settleMeetingReviewerGate(group);
+            syncTabState();
+            broadcastState();
+            return { meetingId: started.id, groupId: group.id, seatId: seat.id, guestSeatId: guest.id, tabId, checkoutPath: area.checkout };
+          },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
             const grant={id:randomUUID(),sessionId:tab.lastSessionId,projectId:tab.workspaceProfileId};
@@ -5097,4 +5171,55 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     h.setGithubApi(null)
     h.setProjectOriginOverride(null)
   }
+}))
+
+test('hidden meeting reviewers link desktopTabId without tab tags, release held Round 1 on 0-seat dismiss, and serialize overlapping close-tab + stop teardown', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const repo = join(directory, 'meeting-repo')
+  await mkdir(repo, { recursive: true })
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'doc.md'), 'v1\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'init')
+  const head = plain('rev-parse', 'HEAD').trim()
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  h.createTestWindow()
+
+  // 1. Dismissing the last remaining seat during `'consent'` ends the group, releases Round 1 (`isGathering === false`),
+  //    and leaves the meeting itself open!
+  const consentRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: null })
+  assert.equal(h.meetingIsGathering(consentRun.meetingId), true, 'Round 1 starts held while hidden reviewers are in consent')
+  const afterDismissConsent = await h.request('desktop:temp-reviewer-action', consentRun.groupId, 'dismiss', consentRun.seatId)
+  assert.equal(h.meetingIsGathering(consentRun.meetingId), false, 'dismissing last seat releases held Round 1 immediately')
+  const endedGroupView = afterDismissConsent.tempReviewerGroups?.find((g) => g.id === consentRun.groupId)
+  assert.equal(endedGroupView?.stage, 'ended')
+  assert.equal(endedGroupView?.outcome, 'stopped')
+  assert.equal(afterDismissConsent.meetings?.find((m) => m.id === consentRun.meetingId)?.stage, 'waiting', 'meeting stays open after all hidden reviewers are dismissed')
+  await h.request('desktop:meeting-action', consentRun.meetingId, 'stop')
+  await h.request('desktop:temp-reviewer-action', consentRun.groupId, 'dismiss-ended')
+
+  // 2. Live hidden non-Copilot reviewer links `participant.desktopTabId` via `meetingReviewers.seatByGuest`,
+  //    and overlapping `desktop:close-tab` + `desktop:temp-reviewer-action` `'stop'` completes without deadlock or orphaned worktrees:
+  const liveRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  const liveState = await h.request('desktop:get-state')
+  const meetingView = liveState.meetings!.find((m) => m.id === liveRun.meetingId)!
+  const participantView = meetingView.participants.find((p) => p.tabId === liveRun.guestSeatId)!
+  assert.equal(participantView.desktopTabId, liveRun.tabId, 'tabOfSeat falls back to meetingReviewers.seatByGuest(partyId)?.seat.tabId')
+  assert.equal(existsSync(liveRun.checkoutPath!), true)
+
+  // Fire manual tab close AND ReviewerBar Stop concurrently:
+  await Promise.all([
+    h.request('desktop:close-tab', liveRun.tabId!),
+    h.request('desktop:temp-reviewer-action', liveRun.groupId, 'stop'),
+  ])
+  const afterOverlap = await h.request('desktop:get-state')
+  assert.equal(afterOverlap.tabs.some((t) => t.id === liveRun.tabId), false, 'reviewer tab closed cleanly')
+  assert.equal(existsSync(liveRun.checkoutPath!), false, 'reviewer worktree removed cleanly without race failure')
+  assert.equal(h.reservationList().length, 0, 'reviewer reservation released cleanly')
+  await h.request('desktop:meeting-action', liveRun.meetingId, 'stop')
 }))

@@ -242,9 +242,36 @@ export async function writeReviewerPolicy(area: ReviewerArea, roots: Omit<Review
 }
 export const verifyReviewerPolicy = (area: ReviewerArea, policy: ReviewerPolicy): Promise<void> => verifyReviewerHome(area.home, policy.denied, policy.readonly)
 
-async function git(runner: GitRunner, cwd: string, args: readonly string[], kind: 'read' | 'write' | 'network' = 'write'): Promise<string> {
-  const result = await runner.run({ cwd, args, kind, disableHooks: true, timeoutMs: 10 * 60_000, maxStdoutBytes: 1_000_000 })
-  if (result.exitCode !== 0 || result.timedOut || result.cancelled) throw new Error(`Git could not ${args[0]}: ${result.stderr.trim().split('\n').at(-1) ?? 'failed'}`)
+export interface ReviewLaunchAbortOptions {
+  signal?: AbortSignal | undefined
+  isCancelled?: (() => boolean) | undefined
+}
+
+function throwIfLaunchCancelled(options?: ReviewLaunchAbortOptions): void {
+  if (options?.signal?.aborted || options?.isCancelled?.()) {
+    throw new Error('Reviewer launch cancelled')
+  }
+}
+
+async function git(
+  runner: GitRunner,
+  cwd: string,
+  args: readonly string[],
+  kind: 'read' | 'write' | 'network' = 'write',
+  signal?: AbortSignal,
+): Promise<string> {
+  const result = await runner.run({
+    cwd,
+    args,
+    kind,
+    disableHooks: true,
+    timeoutMs: 10 * 60_000,
+    maxStdoutBytes: 1_000_000,
+    ...(signal ? { signal } : {}),
+  })
+  if (result.exitCode !== 0 || result.timedOut || result.cancelled) {
+    throw new Error(`Git could not ${args[0]}: ${result.stderr.trim().split('\n').at(-1) ?? (result.cancelled ? 'cancelled' : 'failed')}`)
+  }
   return result.stdout.toString('utf8').trim()
 }
 
@@ -357,12 +384,14 @@ async function isOnOriginBranch(
   cwd: string,
   prefix: readonly string[],
   sha: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const refs = await git(
     runner,
     cwd,
     [...prefix, 'for-each-ref', `--contains=${sha}`, '--format=%(refname)', 'refs/remotes/origin'],
     'read',
+    signal,
   ).catch(() => '')
   return refs.split(/\r?\n/).some((line) => line.startsWith('refs/remotes/origin/'))
 }
@@ -378,8 +407,14 @@ async function ensureOriginBranchCommit(
   prefix: readonly string[],
   origin: string,
   sha: string,
+  options?: ReviewLaunchAbortOptions,
 ): Promise<void> {
-  if (await isOnOriginBranch(runner, cwd, prefix, sha)) return
+  throwIfLaunchCancelled(options)
+  if (await isOnOriginBranch(runner, cwd, prefix, sha, options?.signal)) {
+    throwIfLaunchCancelled(options)
+    return
+  }
+  throwIfLaunchCancelled(options)
   const trimmedOrigin = origin.trim()
   if (trimmedOrigin) {
     await git(
@@ -387,9 +422,12 @@ async function ensureOriginBranchCommit(
       cwd,
       [...prefix, 'fetch', '--quiet', '--no-tags', '--', trimmedOrigin, '+refs/heads/*:refs/remotes/origin/*'],
       'network',
+      options?.signal,
     ).catch(() => {})
   }
-  if (!await isOnOriginBranch(runner, cwd, prefix, sha)) {
+  throwIfLaunchCancelled(options)
+  if (!await isOnOriginBranch(runner, cwd, prefix, sha, options?.signal)) {
+    throwIfLaunchCancelled(options)
     throw new Error(
       `Commit ${sha.slice(0, 12)} is not on any branch of origin. Push the pull request branch to origin first; pull requests from external forks cannot be reviewed here.`,
     )
@@ -465,15 +503,19 @@ export async function prepareAgnosticReviewWorktree(
   head: string,
   base: string,
   _prNumber: number | null = null,
+  options?: ReviewLaunchAbortOptions,
 ): Promise<void> {
   if (!SHA.test(head) || !SHA.test(base)) throw new Error('Invalid pull request revision')
+  throwIfLaunchCancelled(options)
   area.project = resolve(project)
-  await ensureOriginBranchCommit(runner, area.project, [], origin, head)
-  await ensureOriginBranchCommit(runner, area.project, [], origin, base)
-  await git(runner, area.project, ['update-ref', area.ref, head], 'write')
-  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, head])
-  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read')
-  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read')
+  await ensureOriginBranchCommit(runner, area.project, [], origin, head, options)
+  await ensureOriginBranchCommit(runner, area.project, [], origin, base, options)
+  throwIfLaunchCancelled(options)
+  await git(runner, area.project, ['update-ref', area.ref, head], 'write', options?.signal)
+  throwIfLaunchCancelled(options)
+  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, head], 'write', options?.signal)
+  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read', options?.signal)
+  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read', options?.signal)
 }
 
 /**
@@ -481,13 +523,21 @@ export async function prepareAgnosticReviewWorktree(
  * is the project's own HEAD. Like every reviewer checkout it shares the project's Git directory, so it keeps a
  * reviewer out of the person's working files by convention only.
  */
-export async function prepareMeetingReviewWorktree(runner: GitRunner, project: string, area: ReviewerArea, commit: string): Promise<void> {
+export async function prepareMeetingReviewWorktree(
+  runner: GitRunner,
+  project: string,
+  area: ReviewerArea,
+  commit: string,
+  options?: ReviewLaunchAbortOptions,
+): Promise<void> {
   if (!SHA.test(commit)) throw new Error('Invalid commit')
+  throwIfLaunchCancelled(options)
   area.project = resolve(project)
-  await git(runner, area.project, ['update-ref', area.ref, commit], 'write')
-  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, commit])
-  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read')
-  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read')
+  await git(runner, area.project, ['update-ref', area.ref, commit], 'write', options?.signal)
+  throwIfLaunchCancelled(options)
+  await git(runner, area.project, ['worktree', 'add', '--quiet', '--detach', '--', area.checkout, commit], 'write', options?.signal)
+  area.gitdir = await git(runner, area.project, ['-C', area.checkout, 'rev-parse', '--absolute-git-dir'], 'read', options?.signal)
+  area.commonDir = await git(runner, area.project, ['rev-parse', '--path-format=absolute', '--git-common-dir'], 'read', options?.signal)
 }
 
 /**

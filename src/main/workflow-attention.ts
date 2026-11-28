@@ -32,7 +32,7 @@ export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: 
     const reasons: AttentionReason[] = []
     if (tab.status === 'crashed') reasons.push('Session stopped unexpectedly')
     if (tab.status === 'approval-needed') reasons.push('Needs approval')
-    const paused = meetings.filter(m => m.hostTabId === tab.id && m.stage === 'paused')
+    const paused = meetings.filter(m => (m.hostTabId === tab.id || m.hostDesktopTabId === tab.id) && m.stage === 'paused')
     if (paused.length) reasons.push('Review meeting paused')
     const task = tasks.find(t => t.sessionId === tab.lastSessionId && t.outcome !== 'completed' && t.outcome !== 'cancelled')
     if(task?.origin==='automation'&&task.outcome==='unknown'&&!task.awaitingSubmission)reasons.push('Task outcome needs review')

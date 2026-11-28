@@ -165,3 +165,87 @@ test('a focused temporary Copilot reviewer joined to an outside-hosted meeting s
   assert.match(hostWithPrPeekHtml, /Host · round 1 of 6/)
   assert.doesNotMatch(hostWithPrPeekHtml, /<option value="tab-pr-rev">/, 'tempReviewer tabs are not offered in Add session')
 })
+
+test('MCP-hosted and MCP-joined Desktop tabs anchor the meeting bar to their own tab and peeked hidden non-Copilot reviewers show Reviewer', () => {
+  const agHost = tab('tab-ag-host', 'Antigravity Host', { cli: 'antigravity', workspaceProfileId: 'ws-a' })
+  const claudeRev = tab('tab-claude-rev', 'Claude Desktop', { cli: 'claude', workspaceProfileId: 'ws-a' })
+  const unrelated = tab('tab-unrelated', 'Unrelated Copilot', { workspaceProfileId: 'ws-a' })
+  const hiddenClaude = tab('tab-hidden-claude', 'Meeting K7QF · Claude Code', {
+    cli: 'claude',
+    workspaceProfileId: 'ws-a',
+    tempReviewer: {
+      groupId: '22222222-2222-4222-8222-222222222222',
+      hostTabId: 'tab-ag-host',
+      seatId: 'claude',
+      cli: 'claude',
+      prLabel: 'Meeting K7QF',
+      prNumber: null,
+      repository: 'local',
+      prUrl: null,
+      meetingId: 'K7QF',
+    },
+  })
+  const mcpHosted: MeetingView = {
+    ...meeting,
+    hostTabId: 'guest:aaaaaaaaaaaaaaaa',
+    hostDesktopTabId: 'tab-ag-host',
+    hostTitle: 'Antigravity (guest)',
+    hostGuest: { lastSeenAt: 1_000, waiting: true, holding: false },
+    participants: [
+      {
+        tabId: 'guest:bbbbbbbbbbbbbbbb',
+        desktopTabId: 'tab-claude-rev',
+        title: 'Claude Code (guest)',
+        role: 'security',
+        replied: false,
+        guest: { lastSeenAt: 1_000, waiting: true, holding: false },
+      },
+      {
+        tabId: 'guest:cccccccccccccccc',
+        desktopTabId: 'tab-hidden-claude',
+        title: 'Claude Hidden (guest)',
+        role: null,
+        replied: false,
+        guest: { lastSeenAt: 1_000, waiting: true, holding: false },
+      },
+    ],
+    waitingFor: ['guest:bbbbbbbbbbbbbbbb'],
+  }
+  const allTabs = [agHost, claudeRev, unrelated, hiddenClaude]
+
+  // Shows as Host on the hosting Desktop tab:
+  const hostHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[mcpHosted]} tabs={allTabs} activeTabId="tab-ag-host" onError={() => undefined} now={1_500} />,
+  )
+  assert.match(hostHtml, /Host · round 1 of 6/)
+  assert.match(hostHtml, /<option value="tab-unrelated">Unrelated Copilot<\/option>/)
+
+  // Shows as Reviewer on the foreground Desktop tab that joined via MCP:
+  const participantHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[mcpHosted]} tabs={allTabs} activeTabId="tab-claude-rev" onError={() => undefined} now={1_500} />,
+  )
+  assert.match(participantHtml, /Reviewer · round 1 of 6/)
+
+  // Does NOT leak onto an unrelated tab because hostDesktopTabId is a foreground Desktop tab:
+  const unrelatedHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[mcpHosted]} tabs={allTabs} activeTabId="tab-unrelated" onError={() => undefined} now={1_500} />,
+  )
+  assert.equal(unrelatedHtml, '')
+
+  // Peeking a hidden non-Copilot reviewer tab linked via desktopTabId renders as Reviewer:
+  const peekHiddenHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[mcpHosted]} tabs={allTabs} activeTabId="tab-unrelated" focusedPeekTabId="tab-hidden-claude" onError={() => undefined} now={1_500} />,
+  )
+  assert.match(peekHiddenHtml, /Reviewer · round 1 of 6/)
+
+  // External outside-Desktop host with ONLY hidden tempReviewer participants still shows on foreground tabs when unpeeked:
+  const { hostDesktopTabId: _omitted, ...externalBase } = mcpHosted
+  const externalWithHiddenOnly: MeetingView = {
+    ...externalBase,
+    participants: [mcpHosted.participants[1]!],
+  }
+  const externalUnpeekedHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[externalWithHiddenOnly]} tabs={[unrelated, hiddenClaude]} activeTabId="tab-unrelated" onError={() => undefined} now={1_500} />,
+  )
+  assert.match(externalUnpeekedHtml, /Hosted by Antigravity \(guest\) · round 1 of 6/)
+})

@@ -146,6 +146,20 @@ test('dismissing a seat takes it out of the run; ending a run stops what is left
   assert.equal(registry.group(group.id), null)
 })
 
+test('dismissing the last remaining seat ends the meeting reviewer group immediately and frees the workspace', () => {
+  const registry = new MeetingReviewerRegistry()
+  const single = run(registry, 'K7QF', 'p1', ['claude'])
+  assert.equal(single.stage, 'consent')
+  const removed = registry.dismiss(single.id, 'claude')
+  assert.equal(removed.lifecycle, 'stopped')
+  assert.equal(single.stage, 'ended')
+  assert.equal(single.outcome, 'stopped')
+  assert.match(single.notice ?? '', /All hidden reviewers were dismissed/)
+  assert.equal(registry.activeForProfile('p1'), null, 'workspace is no longer blocked by a 0-seat group')
+  assert.equal(registry.forMeeting('K7QF'), null, 'meeting has no active hidden-reviewer group')
+  assert.equal(registry.view(single).stage, 'ended')
+})
+
 test('the sweep leaves the folder of a live seat alone and takes it once the run is over', () => {
   const registry = new MeetingReviewerRegistry()
   const group = run(registry)

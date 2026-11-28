@@ -5,7 +5,7 @@ import { basename, join, resolve } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
 import { ReviewReservations } from './pr-review-reservations.js'
-import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
+import { cloneForReview, createReviewerArea, endedReviewNote, firstReviewPrompt, planReviewerArea, prepareAgnosticReviewWorktree, prepareMeetingReviewWorktree, projectCredentialSettings, projectOrigin, pruneReviewerAreas, refreshReviewCheckout, removeReviewerArea, removeReviewerAreaDetailed, reviewCandidateReason, reviewCheckoutState, verifyReviewerPolicy, writeReviewerPolicy } from './pr-review-launch.js'
 
 /** "GitHub" (upstream, with refs/pull/<n>/head) and the person's project, a clone of it on its own branch. */
 function repos(f: GitFixture, number = 7): { upstream: string; project: string; base: string; head: string } {
@@ -544,5 +544,58 @@ test('removeReviewerAreaDetailed removes worktrees with gitignored build/depende
       assert.match(resFailed.detail ?? '', /locked by external process/)
     }
     assert.equal(await removeReviewerArea(dirtyArea, f.runner), 'removed')
+  } finally { f.cleanup() }
+})
+
+test('prepareAgnosticReviewWorktree and prepareMeetingReviewWorktree abort mid-fetch before creating refs or worktrees', async (t) => {
+  const f = await createGitFixture(); if (!f) { t.skip('Git unavailable'); return }
+  try {
+    const { upstream, project, base } = repos(f)
+    // Create a new commit on an upstream branch that `project` has not fetched yet so `ensureOriginBranchCommit` runs `git fetch`:
+    f.plain(upstream, 'checkout', '-q', 'feature')
+    writeFileSync(join(upstream, 'a.txt'), 'unfetched branch commit\n')
+    f.plain(upstream, 'commit', '-qam', 'unfetched')
+    const unfetchedHead = f.plain(upstream, 'rev-parse', 'HEAD').trim()
+
+    const area = await createReviewerArea(join(f.root, 'reviewers'))
+    const controller = new AbortController()
+    const seenSubcommands: string[] = []
+    const abortingRunner = {
+      run: async (req: Parameters<typeof f.runner.run>[0]) => {
+        seenSubcommands.push(req.args[0] ?? '')
+        if (req.args[0] === 'fetch') {
+          controller.abort()
+          return {
+            exitCode: null,
+            stdout: Buffer.alloc(0),
+            stderr: '',
+            stdoutTruncated: false,
+            timedOut: false,
+            cancelled: true,
+            durationMs: 1,
+          }
+        }
+        return f.runner.run(req)
+      },
+    } as unknown as typeof f.runner
+
+    await assert.rejects(
+      prepareAgnosticReviewWorktree(abortingRunner, project, upstream, area, unfetchedHead, base, 7, {
+        signal: controller.signal,
+      }),
+      /Reviewer launch cancelled/,
+    )
+    assert.equal(seenSubcommands.includes('update-ref'), false, 'aborted fetch never runs update-ref')
+    assert.equal(seenSubcommands.includes('worktree'), false, 'aborted fetch never runs worktree add')
+    assert.equal(existsSync(area.checkout), false, 'no worktree directory was created after abort')
+
+    const meetingArea = await createReviewerArea(join(f.root, 'reviewers'))
+    const preAborted = new AbortController()
+    preAborted.abort()
+    await assert.rejects(
+      prepareMeetingReviewWorktree(f.runner, project, meetingArea, base, { signal: preAborted.signal }),
+      /Reviewer launch cancelled/,
+    )
+    assert.equal(existsSync(meetingArea.checkout), false)
   } finally { f.cleanup() }
 })

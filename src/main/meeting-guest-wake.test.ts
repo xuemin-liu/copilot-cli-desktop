@@ -77,6 +77,23 @@ test('one holding a message gets longer: it may be working on it', () => {
   assert.deepEqual(mailbox.wakeDue(now()), [seat])
 })
 
+test('a host with only a superseded digest or reminder is neither reported as holding nor woken', () => {
+  const time = clock()
+  let isStale = false
+  const mailbox = new GuestMailbox(time.timers, () => {}, (_s, d) => d.text, () => isStale)
+  const { seat } = mailbox.invite('', 'Codex', null, { kind: 'host' })
+  mailbox.started(seat, 'K7QF')
+  mailbox.seen(seat, 'mcp')
+  mailbox.setCodexThread(seat, THREAD)
+  mailbox.enqueue(seat.id, delivery(1, 'digest'))
+  assert.equal(mailbox.take(seat.id)?.kind, 'digest')
+  isStale = true
+  mailbox.enqueue(seat.id, delivery(1, 'reminder'))
+  time.advance(GUEST_QUIET_MS + 10_000)
+  assert.equal(mailbox.views()[0]?.holding, false)
+  assert.deepEqual(mailbox.wakeDue(time.timers.now()), [])
+})
+
 test('after its meeting closed, only a host with a last message to read is woken', () => {
   const reviewer = seated()
   reviewer.mailbox.enqueue(reviewer.seat.id, delivery())
@@ -473,13 +490,24 @@ test('a message its meeting stopped waiting for gives way to the next one when t
   over.add(2)
   assert.equal(mailbox.take(seat.id)?.round, 3, 'round 2 is over: it reviews the round being collected')
 
-  const host = new GuestMailbox(time.timers, () => {}, (_seat, item) => item.text, () => true)
+  let digestSuperseded = false
+  let reminderSuperseded = false
+  const host = new GuestMailbox(
+    time.timers,
+    () => {},
+    (_seat, item) => item.text,
+    (_seatId, item) => (item.kind === 'digest' && digestSuperseded) || (item.kind === 'reminder' && reminderSuperseded),
+  )
   const hosting = host.invite('', 'Codex', null, { kind: 'host' }).seat
   host.started(hosting, 'K7QF')
   host.enqueue(hosting.id, delivery(1, 'digest'))
   host.enqueue(hosting.id, delivery(1, 'reminder'))
   assert.equal(host.take(hosting.id)?.kind, 'digest')
-  assert.equal(host.take(hosting.id)?.kind, 'digest', 'a host is never passed over: asking again is how it is counted as silent')
+  assert.equal(host.take(hosting.id)?.kind, 'digest', 'while still awaited, a host keeps its digest so asking again counts it as silent')
+  digestSuperseded = true
+  assert.equal(host.take(hosting.id)?.kind, 'reminder', 'once superseded (e.g. after pause + Remind), stale digest gives way to fresh reminder')
+  reminderSuperseded = true
+  assert.equal(host.take(hosting.id), null, 'once no longer awaited at all, stale host reminder is cleared')
 })
 
 test('the request to start the wake-up again says the old one ended', () => {

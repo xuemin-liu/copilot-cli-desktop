@@ -34,6 +34,11 @@ test('paused meetings add one reason to their host and clear on resume', () => {
   assert.deepEqual(items[0]!.reasons, ['Needs approval', 'Review meeting paused'])
   assert.equal(workflowAttention([tab], [{ ...meeting, stage: 'reviewing' }]).length, 0)
   assert.notEqual(items[0]!.key, workflowAttention([{ ...tab, status: 'approval-needed' }], [{ ...meeting, round: 3 }])[0]!.key)
+
+  const mcpHostedPaused = { id: 'm2', hostTabId: 'guest:0123456789abcdef', hostDesktopTabId: 'a', stage: 'paused', round: 1, pauseReason: 'host-silent' } as MeetingView
+  const mcpItems = workflowAttention([tab], [mcpHostedPaused])
+  assert.equal(mcpItems.length, 1)
+  assert.deepEqual(mcpItems[0]!.reasons, ['Review meeting paused'])
 })
 test('attention titles mask credentials and controls before presentation', () => {
   assert.equal(attentionTitle('to\u200bken=synthetic-private-value'), 'token=[REDACTED]')

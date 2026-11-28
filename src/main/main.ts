@@ -4041,8 +4041,7 @@ async function stopAndCloseTempReviewerTabOnly(seat: TempReviewerSeat): Promise<
   }
 }
 
-async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
-  await stopAndCloseTempReviewerTabOnly(seat)
+async function cleanupTempReviewerAreaOnly(seat: TempReviewerSeat): Promise<void> {
   const area = seat.area
   seat.area = null
   const store = reviewReservations()
@@ -4069,6 +4068,14 @@ async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
     if (group) group.notice = group.notice ? `${group.notice} ${msg}` : msg
     workflowNotice = msg
   }
+}
+
+async function cleanupTempReviewerSeat(seat: TempReviewerSeat): Promise<void> {
+  const pendingLaunch = cancelTempSeatLaunch(seat)
+  await stopAndCloseTempReviewerTabOnly(seat)
+  if (pendingLaunch) await pendingLaunch
+  await stopAndCloseTempReviewerTabOnly(seat)
+  await withTempSeatArea(seat, () => cleanupTempReviewerAreaOnly(seat))
 }
 
 async function teardownTempReviewerSeats(seats: readonly TempReviewerSeat[]): Promise<void> {
@@ -4289,7 +4296,12 @@ function startTempSeatRoundTimer(group: TempReviewerGroup, seat: TempReviewerSea
  * Each seat's launch still in flight, settled either way, with the token that cancels it: a round that reuses or
  * replaces the seat cancels it and waits for it first.
  */
-const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: { cancelled: boolean } }>()
+interface TempSeatLaunchControl {
+  cancelled: boolean
+  controller: AbortController
+}
+
+const tempSeatLaunchesInFlight = new WeakMap<TempReviewerSeat, { settled: Promise<void>; cancel: TempSeatLaunchControl }>()
 
 /**
  * The generation of each seat whose takeover (by a round or a Retry) has begun. It stays recorded through the teardown
@@ -4328,7 +4340,7 @@ async function launchTempReviewerSeat(
   profile: WorkspaceProfile,
   options?: { reuseArea?: boolean },
 ): Promise<void> {
-  const cancel = { cancelled: false }
+  const cancel: TempSeatLaunchControl = { cancelled: false, controller: new AbortController() }
   const run = launchTempReviewerSeatNow(group, seat, profile, cancel, options)
   const entry = { settled: run.then(() => {}, () => {}), cancel }
   tempSeatLaunchesInFlight.set(seat, entry)
@@ -4356,23 +4368,28 @@ function withTempSeatArea<T>(seat: TempReviewerSeat, work: () => Promise<T>): Pr
   return next
 }
 
+function cancelTempSeatLaunch(seat: TempReviewerSeat): Promise<void> | null {
+  supersededTempSeatGenerations.set(seat, seat.generation)
+  const inFlight = tempSeatLaunchesInFlight.get(seat)
+  if (!inFlight) return null
+  inFlight.cancel.cancelled = true
+  inFlight.cancel.controller.abort()
+  return inFlight.settled
+}
+
 /**
  * Cancel a seat's earlier launch and wait for it, cleanup and reservation release included, to finish. It stops at its
  * next cancellation check; every wait before that is bounded (Git runs time out), so this ends.
  */
 async function settleTempSeatLaunch(seat: TempReviewerSeat): Promise<void> {
-  supersededTempSeatGenerations.set(seat, seat.generation)
-  const inFlight = tempSeatLaunchesInFlight.get(seat)
-  if (!inFlight) return
-  inFlight.cancel.cancelled = true
-  await inFlight.settled
+  await cancelTempSeatLaunch(seat)
 }
 
 async function launchTempReviewerSeatNow(
   group: TempReviewerGroup,
   seat: TempReviewerSeat,
   profile: WorkspaceProfile,
-  cancel: { readonly cancelled: boolean },
+  cancel: { readonly cancelled: boolean; readonly controller: AbortController },
   options?: { reuseArea?: boolean },
 ): Promise<void> {
   const expectedGeneration = seat.generation
@@ -4419,7 +4436,10 @@ async function launchTempReviewerSeatNow(
   try {
     await makeReviewerArea(area)
     if (!reusingExistingArea) {
-      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber)
+      await prepareAgnosticReviewWorktree(runner, group.projectPath, seat.origin, area, head, base, group.prNumber, {
+        signal: cancel.controller.signal,
+        isCancelled: isSeatCancelled,
+      })
       seat.checkedOut = head
       seat.checkedOutBase = base
     }
@@ -5315,13 +5335,56 @@ function onMeetingReviewerJoined(guestSeatId: string): void {
   broadcastState()
 }
 
+const meetingSeatLaunchesInFlight = new Map<string, { settled: Promise<void>; controller: AbortController }>()
+const meetingSeatAreaWork = new Map<string, Promise<unknown>>()
+
+function meetingSeatAreaKey(seat: Pick<MeetingReviewerSeat, 'groupId' | 'id'>): string {
+  return `${seat.groupId}:${seat.id}`
+}
+
+function withMeetingSeatArea<T>(seat: Pick<MeetingReviewerSeat, 'groupId' | 'id'>, work: () => Promise<T>): Promise<T> {
+  const key = meetingSeatAreaKey(seat)
+  const previous = meetingSeatAreaWork.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(work)
+  const tail = next.catch(() => {})
+  meetingSeatAreaWork.set(key, tail)
+  void tail.then(() => { if (meetingSeatAreaWork.get(key) === tail) meetingSeatAreaWork.delete(key) })
+  return next
+}
+
+function abortMeetingSeatLaunch(seat: Pick<MeetingReviewerSeat, 'generation'>): Promise<void> | null {
+  const inFlight = meetingSeatLaunchesInFlight.get(seat.generation)
+  if (!inFlight) return null
+  inFlight.controller.abort()
+  return inFlight.settled
+}
+
+async function closeMeetingReviewerSeatTabOnly(seat: MeetingReviewerSeat): Promise<void> {
+  const tabId = seat.tabId
+  seat.tabId = null
+  if (!tabId) return
+  const managed = managedTabs.get(tabId)
+  // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
+  // here aborts that start, so its CLI is not launched for a seat that is already over.
+  void managed?.session.stop().catch(() => {})
+  const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
+  if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
+  if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+}
+
 /**
  * Take back what one launch of a seat holds: its meeting seat, its tab and its folder. Each part is taken once, so this
- * may be called again for the same launch (an exit, then the close of the meeting).
+ * may be called again for the same launch (an exit, then the close of the meeting). Tab closure always runs outside the
+ * per-seat area queue so `closeSessionTab` -> `releaseMeetingReviewerSeat` maintains a strict one-way lock order.
  */
-async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string, options: { keepTab?: boolean } = {}): Promise<void> {
+async function releaseMeetingReviewerSeat(
+  seat: MeetingReviewerSeat,
+  why: string,
+  options: { keepTab?: boolean; fromLaunchCatch?: boolean } = {},
+): Promise<void> {
   clearMeetingSeatJoinTimer(seat)
   stopMeetingCopilotWatch(seat.generation)
+  const pendingLaunch = abortMeetingSeatLaunch(seat)
   const guestSeatId = seat.guestSeatId
   seat.guestSeatId = null
   // A Copilot seat is in the meeting as its tab. It leaves here, before anything is awaited, whether its tab stays for
@@ -5334,29 +5397,25 @@ async function releaseMeetingReviewerSeat(seat: MeetingReviewerSeat, why: string
     void rm(guestSeatFolder(guestRoot(), guestSeatId), { recursive: true, force: true }).catch(() => {})
   }
   if (options.keepTab) return
-  const tabId = seat.tabId
-  seat.tabId = null
-  if (tabId) {
-    const managed = managedTabs.get(tabId)
-    // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
-    // here aborts that start, so its CLI is not launched for a seat that is already over.
-    void managed?.session.stop().catch(() => {})
-    const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
-    if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
-    if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  await closeMeetingReviewerSeatTabOnly(seat)
+  if (pendingLaunch && !options.fromLaunchCatch) {
+    await pendingLaunch
+    await closeMeetingReviewerSeatTabOnly(seat)
   }
-  const area = seat.area
-  seat.area = null
-  if (!area) return
-  const store = reviewReservations()
-  const runner = await meetingGitRunner().catch(() => null)
-  const removal = await removeReviewerAreaDetailed(area, runner).catch((error): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }))
-  if (removal.outcome === 'removed') {
-    if (seat.launchId) await store?.release(seat.launchId).catch(() => {})
-  } else {
-    if (seat.launchId) await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
-    seat.keptCheckoutPath = area.checkout
-  }
+  await withMeetingSeatArea(seat, async () => {
+    const area = seat.area
+    seat.area = null
+    if (!area) return
+    const store = reviewReservations()
+    const runner = await meetingGitRunner().catch(() => null)
+    const removal = await removeReviewerAreaDetailed(area, runner).catch((error): ReviewerAreaRemovalResult => ({ outcome: 'kept', reason: 'git-failed', detail: error instanceof Error ? error.message : String(error) }))
+    if (removal.outcome === 'removed') {
+      if (seat.launchId) await store?.release(seat.launchId).catch(() => {})
+    } else {
+      if (seat.launchId) await store?.keep(seat.launchId, removal.reason === 'detached' ? removal.detachedAt : undefined).catch(() => {})
+      seat.keptCheckoutPath = area.checkout
+    }
+  })
 }
 
 /**
@@ -5369,6 +5428,7 @@ function revokeMeetingReviewerSeats(seats: readonly MeetingReviewerSeat[], why: 
   for (const seat of seats) {
     clearMeetingSeatJoinTimer(seat)
     stopMeetingCopilotWatch(seat.generation)
+    abortMeetingSeatLaunch(seat)
     // Every session is told to stop now, also one that has not spawned yet: the teardown below takes the seats one
     // after another, and a CLI must not start for a seat that is waiting its turn to be torn down.
     if (seat.tabId) void managedTabs.get(seat.tabId)?.session.stop().catch(() => {})
@@ -5601,9 +5661,27 @@ async function runMeetingReviewers(group: MeetingReviewerGroup, profile: Workspa
 }
 
 async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: MeetingReviewerSeat, profile: WorkspaceProfile): Promise<void> {
+  const controller = new AbortController()
+  const generation = seat.generation
+  const run = launchMeetingReviewerSeatNow(group, seat, profile, controller.signal)
+  const entry = { settled: run.then(() => {}, () => {}), controller }
+  meetingSeatLaunchesInFlight.set(generation, entry)
+  try {
+    await run
+  } finally {
+    if (meetingSeatLaunchesInFlight.get(generation) === entry) meetingSeatLaunchesInFlight.delete(generation)
+  }
+}
+
+async function launchMeetingReviewerSeatNow(
+  group: MeetingReviewerGroup,
+  seat: MeetingReviewerSeat,
+  profile: WorkspaceProfile,
+  signal: AbortSignal,
+): Promise<void> {
   const generation = seat.generation
   const cancelled = (): boolean => (
-    shuttingDown() || group.stage === 'ended' || group.seats.get(seat.id) !== seat || seat.generation !== generation
+    signal.aborted || shuttingDown() || group.stage === 'ended' || group.seats.get(seat.id) !== seat || seat.generation !== generation
     || seat.lifecycle !== 'starting' || !meetingHub.isOpen(group.meetingId)
   )
   const cli = seat.cli
@@ -5626,7 +5704,7 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     if (cancelled()) throw new Error('The meeting reviewer was stopped while starting')
     if (group.commit) {
       if (!runner) throw new Error('Git is not available')
-      await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit)
+      await prepareMeetingReviewWorktree(runner, group.projectPath, area, group.commit, { signal, isCancelled: cancelled })
     } else {
       // Plan-only: there is nothing to check out, so the reviewer starts in an empty folder of its own.
       await mkdir(area.checkout, { recursive: true, mode: 0o700 })
@@ -5747,8 +5825,8 @@ async function launchMeetingReviewerSeat(group: MeetingReviewerGroup, seat: Meet
     // launch made since is its own to take back, or it would stay with nothing to account for it. The seat's fields
     // hold what was made after the release; the folder is no longer on the seat, so it is taken by its own name.
     if (seat.area !== area) {
-      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.').catch(() => {})
-      await discardMeetingReviewerArea(area, launchId).catch(() => {})
+      await releaseMeetingReviewerSeat(seat, 'This reviewer was stopped while starting.', { fromLaunchCatch: true }).catch(() => {})
+      await withMeetingSeatArea(seat, () => discardMeetingReviewerArea(area, launchId)).catch(() => {})
     }
     throw error
   } finally {
@@ -5980,6 +6058,9 @@ async function meetingReviewerAction(group: MeetingReviewerGroup, action: unknow
   if (typeof payload !== 'string') throw new Error('Invalid reviewer seat')
   if (action === 'dismiss') {
     const removed = meetingReviewers.dismiss(group.id, payload)
+    if (group.stage === 'ended') {
+      meetingHub.release(group.meetingId)
+    }
     await releaseMeetingReviewerSeat(removed, 'The person removed this reviewer.')
     settleMeetingReviewerGate(group)
     broadcastState()
@@ -6157,13 +6238,18 @@ async function advanceGroupTempReviewers(
         const prWorkflows = bundledPrWorkflows()
         if (requiresConsent) {
           for (const seat of [...group.requiredSeats.values()]) {
-            // Behind any handover a newer round has started on this seat, and only while this round still owns it: an
-            // earlier launch still setting up is cancelled and settled first, then its tab (if any) and area go.
+            if (isStaleOrEnded()) break
+            // Close any existing tab outside the per-seat area queue so tab transitions never wait on area locks.
+            const pendingLaunch = cancelTempSeatLaunch(seat)
+            await stopAndCloseTempReviewerTabOnly(seat)
+            if (pendingLaunch) await pendingLaunch
+            if (isStaleOrEnded()) break
+            await stopAndCloseTempReviewerTabOnly(seat)
             await withTempSeatArea(seat, async () => {
               if (isStaleOrEnded()) return
               await settleTempSeatLaunch(seat)
               if (isStaleOrEnded()) return
-              await cleanupTempReviewerSeat(seat)
+              await cleanupTempReviewerAreaOnly(seat)
             })
           }
           if (isStaleOrEnded()) return
@@ -6202,18 +6288,17 @@ async function advanceGroupTempReviewers(
           // below: after each one, this round stops before it cancels or closes anything they started.
           const superseded = (): boolean => isStaleOrEnded() || group.requiredSeats.get(seat.id) !== seat
             || (expectedGeneration !== undefined && seat.generation !== expectedGeneration)
-          // The teardown and handover of the seat's area run one at a time per seat (another round's cleanup included);
-          // the launch itself runs after, guarded by its cancel token.
+          // Close tabs outside the per-seat area queue (`queueTabTransition` -> `withTempSeatArea` one-way order),
+          // then serialize area refresh/removal per seat before launching the next generation.
+          if (superseded()) return
+          const pendingLaunch = cancelTempSeatLaunch(seat)
+          await stopAndCloseTempReviewerTabOnly(seat)
+          if (pendingLaunch) await pendingLaunch
+          if (superseded()) return
+          await stopAndCloseTempReviewerTabOnly(seat)
           const prepared = await withTempSeatArea(seat, async (): Promise<{ reset: TempReviewerSeat; canReuseWorktree: boolean } | null> => {
             if (superseded()) return null
-            await stopAndCloseTempReviewerTabOnly(seat)
-            if (superseded()) return null
-            // An earlier launch of this seat still setting up is cancelled and finishes (or cleans up and releases its
-            // reservation) before its area is touched.
             await settleTempSeatLaunch(seat)
-            if (superseded()) return null
-            // A launch that finished before it saw the cancellation may have opened a tab: close it before the area moves.
-            await stopAndCloseTempReviewerTabOnly(seat)
             if (superseded()) return null
             if (!profile) {
               tempReviewers.revokeSeat(seat, 'failed', 'Workspace profile is no longer available.')
@@ -6235,10 +6320,10 @@ async function advanceGroupTempReviewers(
                 seat.checkedOutBase = revisions.base
                 canReuseWorktree = true
               } else {
-                await cleanupTempReviewerSeat(seat)
+                await cleanupTempReviewerAreaOnly(seat)
               }
             } else {
-              await cleanupTempReviewerSeat(seat)
+              await cleanupTempReviewerAreaOnly(seat)
             }
             if (superseded()) return null
             const reset = tempReviewers.resetSeatGeneration(group.id, seat.id, { keepArea: canReuseWorktree })
@@ -6246,6 +6331,7 @@ async function advanceGroupTempReviewers(
             return { reset, canReuseWorktree }
           })
           if (!prepared || !profile) return
+          if (seat.tabId) await stopAndCloseTempReviewerTabOnly(seat)
           const { reset, canReuseWorktree } = prepared
           const launchedGeneration = reset.generation
           try {
@@ -6467,7 +6553,8 @@ function meetingViews(): MeetingView[] {
   }
   const tabOfSeat = (partyId: string): string | null => {
     const tag = guests.find((guest) => guest.id === partyId)?.desktopTag
-    const tabId = tag ? meetingTabTags.get(tag) : undefined
+    const taggedTabId = tag ? meetingTabTags.get(tag) : undefined
+    const tabId = taggedTabId ?? meetingReviewers.seatByGuest(partyId)?.seat.tabId ?? undefined
     return tabId && tabsState.tabs.some((tab) => tab.id === tabId) ? tabId : null
   }
   const blocked = stalledMeetingDeliveries()
@@ -7083,6 +7170,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       terminalSizes.delete(tabId)
       forgetMeetingSession(tabId)
       meetingControl.forget(tabId)
+      for (const [tag, owner] of meetingTabTags) {
+        if (owner === tabId) {
+          meetingTabTags.delete(tag)
+          void rm(join(meetingTabTagsFolder(), `${tag}.json`), { force: true }).catch(() => {})
+        }
+      }
       // Read before the tab is dropped: its worktree is cleaned up once it is gone.
       const closing = tabsState.tabs.find((tab) => tab.id === tabId)
       const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
@@ -9191,11 +9284,23 @@ ipcMain.handle('desktop:temp-reviewer-action', async (event, groupId: unknown, a
     // progress finishes, before the area goes and the generation moves on.
     // A round that began while this Retry waited owns the seat now: it relaunches it at its own revision.
     const overtaken = (): boolean => group.stage === 'ended' || group.stage === 'starting' || !group.consentGranted || group.round !== retryRound
+    if (overtaken()) {
+      broadcastState()
+      return snapshot()
+    }
+    const pendingLaunch = cancelTempSeatLaunch(previous)
+    await stopAndCloseTempReviewerTabOnly(previous)
+    if (pendingLaunch) await pendingLaunch
+    if (overtaken()) {
+      broadcastState()
+      return snapshot()
+    }
+    await stopAndCloseTempReviewerTabOnly(previous)
     const reset = await withTempSeatArea(previous, async () => {
       if (overtaken()) return null
       await settleTempSeatLaunch(previous)
       if (overtaken()) return null
-      await cleanupTempReviewerSeat(previous)
+      await cleanupTempReviewerAreaOnly(previous)
       if (overtaken()) return null
       return tempReviewers.resetSeatGeneration(groupId, payload, { clearForceSkip: true })
     })
