@@ -54,6 +54,8 @@ interface Harness {
   countBroadcasts(): { count: number }
   /** Keep the usage flush that comes before a CLI install or update waiting until `work` settles. */
   holdUsageFlush(work: Promise<void>): void
+  /** Keep the next config write waiting until `work` settles. */
+  holdConfigWrite(work: Promise<void>): void
   /** Keep the next CLI install or update command running until `work` settles. */
   holdMaintenance(work: Promise<void>): void
   /** Run the startup settings save with every save failing; resolves with what was written to the app log. */
@@ -348,6 +350,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; holdCopilotCommand(work); },
           holdUsageFlush(work) { usageService.noteSourceChanged ??= () => {}; usageService.flush = async () => { await work; }; },
+          holdConfigWrite(work) { const original = persistConfig; persistConfig = async (...args) => { persistConfig = original; await work; return original(...args); }; },
           async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
             try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
           chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
@@ -4623,6 +4626,33 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   assert.equal(findMenuItem('File', 'Restart Active Session').enabled, true, 'switching back to ws1 re-enables Restart Active Session')
   assert.equal(findMenuItem('File', 'Unload Active Session').enabled, true, 'switching back to ws1 re-enables Unload Active Session')
   assert.equal(findMenuItem('Help', 'Show Active Session Log').enabled, true, 'switching back to ws1 re-enables Show Active Session Log')
+
+  // Overlap case: with a side chat retained as ws1's activeTabId, switch to empty ws2, then select ws1 while its
+  // config write is still pending and immediately click ws1's reviewer. The clear-peek-focus-request must precede
+  // desktop:peek-reviewer-request so the earlier workspace switch cannot cancel the later reviewer selection:
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws1.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true, supportedOptions: ['--resume', '--add-dir', '--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+  const ws1SideState = await h.createSide(ws1, ws1TabId)
+  const ws1SideTabId = ws1SideState.activeTabId!
+  assert.notEqual(ws1SideTabId, ws1TabId)
+  h.setUnresolvedCopilot()
+  await h.request('desktop:activate-profile', ws2.id)
+  let releaseConfigWrite!: () => void
+  h.holdConfigWrite(new Promise<void>((resolve) => { releaseConfigWrite = resolve }))
+  const beforeOverlap = win.messages.length
+  const pendingProfileSwitch = h.request('desktop:activate-profile', ws1.id)
+  await h.request('desktop:activate-tab', ws1RevId)
+  releaseConfigWrite()
+  await pendingProfileSwitch
+  const overlapMessages = win.messages.slice(beforeOverlap)
+  const clearIdx = overlapMessages.findIndex(msg => msg.channel === 'desktop:clear-peek-focus-request' && msg.payload === ws1SideTabId)
+  const peekIdx = overlapMessages.findIndex(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === ws1RevId && msg.payload?.peekKey === ws1TabId)
+  assert.ok(clearIdx >= 0, 'overlap switch emits desktop:clear-peek-focus-request for retained side chat')
+  assert.ok(peekIdx > clearIdx, 'reviewer peek request arrives after the earlier workspace switch clear-peek-focus-request')
+  assert.equal(
+    overlapMessages.slice(peekIdx + 1).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    false,
+    'no delayed clear-peek-focus-request arrives after the reviewer peek request once persistConfig resolves',
+  )
 
   // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId:
   h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws2.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })

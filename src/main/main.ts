@@ -7747,14 +7747,17 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   desktopConfig.activeProfileId = profile.id
   focusedPeekTabId = null
   syncWorkspaceState()
-  await persistConfig()
   broadcastState()
   refreshMenus()
   // Tabs from an inactive profile keep running rather than closing, so
   // switching TO a profile that already has tabs must switch the active tab
   // to one of them — otherwise activeProfileId and activeTabId/terminal
   // input can end up pointing at two different profiles.
+  // Publish workspace and focus transitions synchronously before awaiting
+  // persistence so a subsequent reviewer selection made while saving cannot be
+  // cancelled by a delayed clear-peek-focus request.
   const activeTabBelongsToProfile = tabsState.tabs.some((tab) => tab.id === tabsState.activeTabId && !tab.tempReviewer && tab.workspaceProfileId === profile.id)
+  let needsRestore = false
   if (activeTabBelongsToProfile) {
     if (mainWindow && !mainWindow.isDestroyed() && tabsState.activeTabId) {
       mainWindow.webContents.send('desktop:clear-peek-focus-request', tabsState.activeTabId)
@@ -7765,9 +7768,14 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
       selectSessionInMain(firstProfileTab.id)
       const popout = sessionWindows.get(firstProfileTab.id)
       if (popout) focusSessionWindow(popout)
-    } else if (isCopilotResolved()) {
-      await restoreTabsForProfile()
+    } else {
+      needsRestore = true
     }
+  }
+  await persistConfig()
+  if (needsRestore && desktopConfig.activeProfileId === profile.id && isCopilotResolved()
+    && !tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)) {
+    await restoreTabsForProfile()
   }
   return snapshot()
 }
