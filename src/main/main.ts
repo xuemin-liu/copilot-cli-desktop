@@ -468,8 +468,7 @@ let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 /** Set when an unreadable desktop.json could not be preserved: never replace the only copy. */
 let configWritesBlocked = false
-type FallbackWriteGuard = { kind: 'absent' } | { kind: 'copied'; expectedBytes: Buffer; backupPath: string | null }
-let pendingFallbackWriteGuard: FallbackWriteGuard | null = null
+let pendingFallbackExclusiveCreate = false
 class FallbackDestinationChangedError extends Error {}
 let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
@@ -1029,6 +1028,7 @@ function followupViews(): FollowupGrant[] {
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number;tabId:string;session:PtySession}>()
 const knownReviewerSessionIds=new Set<string>()
 const knownUnboundReviewerReservations=new Map<string,{project:string;number:number}>()
+const unverifiedProvenanceLaunchIds=new Set<string>()
 let startupConfigPending=false
 let legacyTabSanitizationUnflushed=false
 let configRecoveryHold=false
@@ -1042,13 +1042,42 @@ function validReviewerTask(taskId:string,tab:DesktopSessionTab|null):boolean {
   const review=reviewerTasks.get(taskId)
   return Boolean(review&&tab&&tab.id===review.tabId&&tab.reviewer===true&&managedTabs.get(tab.id)?.session===review.session)
 }
+type ReservedTaskSessionLookup={status:'resolved';sessionId:string}|{status:'missing'}|{status:'failed'}
+function lookupReservedTaskSession(taskId:string):ReservedTaskSessionLookup {
+  if(!isValidSessionId(taskId))return {status:'missing'}
+  const store=workflowStore??workflows()
+  if(store){
+    try{
+      const sessionId=store.sessionIdForTask(taskId)
+      return sessionId?{status:'resolved',sessionId}:{status:'missing'}
+    }catch{
+      return {status:'failed'}
+    }
+  }
+  const dbPath=join(app.getPath('userData'),'workflows.sqlite')
+  if(!existsSync(dbPath))return {status:'missing'}
+  try{
+    const sessionId=WorkflowStore.sessionIdForTaskFromFile(dbPath,taskId)
+    return sessionId?{status:'resolved',sessionId}:{status:'missing'}
+  }catch{
+    return {status:'failed'}
+  }
+}
 function collectKnownReviewerSessionIds():Set<string> {
-  const store=workflows(),reservationsList=reviewReservations()?.list()??[]
+  const reservationsList=reviewReservations()?.list()??[]
   if(reservationsList.length){
-    const tasksById=store?new Map(store.list().map(t=>[t.id,t])):null
     for(const record of reservationsList){
-      const sessionId=record.taskId?tasksById?.get(record.taskId)?.sessionId:undefined
-      if(sessionId)knownReviewerSessionIds.add(sessionId)
+      let sessionId:string|undefined
+      if(record.taskId){
+        const lookup=lookupReservedTaskSession(record.taskId)
+        if(lookup.status==='resolved'){
+          sessionId=lookup.sessionId
+          knownReviewerSessionIds.add(sessionId)
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }else if(lookup.status==='failed'){
+          unverifiedProvenanceLaunchIds.add(record.launchId)
+        }
+      }
       try{
         for(const entry of readdirSync(join(record.root,'home','session-state'),{withFileTypes:true})){
           if(entry.isDirectory()&&isValidSessionId(entry.name))knownReviewerSessionIds.add(entry.name)
@@ -1060,7 +1089,9 @@ function collectKnownReviewerSessionIds():Set<string> {
     }
   }
   if(followups){
-    for(const grant of followups.list())if(grant.role==='reviewer'&&grant.sessionId)knownReviewerSessionIds.add(grant.sessionId)
+    try{
+      for(const grant of followups.list())if(grant.role==='reviewer'&&grant.sessionId)knownReviewerSessionIds.add(grant.sessionId)
+    }catch{/* Ignore unreadable follow-up rows during startup provenance scan. */}
   }else{
     const followupDbPath=join(app.getPath('userData'),'workflow-followups.sqlite')
     if(existsSync(followupDbPath)){
@@ -1178,6 +1209,23 @@ async function sweepReviewerAreas():Promise<void>{
       // A kept folder a clean removal left behind (`detachedAt`: only deleting it failed) is not the person's: it is tried again here.
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
+      if(unverifiedProvenanceLaunchIds.has(record.launchId)){
+        if(!record.taskId){
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }else{
+          const retryLookup=lookupReservedTaskSession(record.taskId)
+          if(retryLookup.status==='failed')continue
+          if(retryLookup.status==='resolved'){
+            knownReviewerSessionIds.add(retryLookup.sessionId)
+            if(sanitizeLegacyReviewerTabsInConfig(desktopConfig)){
+              legacyTabSanitizationUnflushed=true
+              await persistConfig().catch(()=>{})
+            }
+            if(legacyTabSanitizationUnflushed||configWritesBlocked||configRecoveryHold)continue
+          }
+          unverifiedProvenanceLaunchIds.delete(record.launchId)
+        }
+      }
       if(!currentRunReviewLaunchIds.has(record.launchId)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')){
         if(startupConfigPending||legacyTabSanitizationUnflushed||configWritesBlocked||configRecoveryHold)continue
       }
@@ -1691,53 +1739,21 @@ async function persistConfig(change?: () => void, onFailure?: () => void): Promi
       }
       change?.()
       const nextConfig = structuredClone(desktopConfig)
-      const guard = pendingFallbackWriteGuard
-      if (!guard) {
+      if (!pendingFallbackExclusiveCreate) {
         await writeDesktopConfig(configPath(), nextConfig)
         return
       }
-      if (guard.kind === 'absent') {
-        try {
-          await writeDesktopConfigExclusive(configPath(), nextConfig)
-          pendingFallbackWriteGuard = null
-          return
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-            pendingFallbackWriteGuard = null
-            configWritesBlocked = true
-            throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
-          }
-          throw error
-        }
-      }
-      let currentBytes: Buffer | null = null
       try {
-        currentBytes = await readFile(configPath())
+        await writeDesktopConfigExclusive(configPath(), nextConfig)
+        pendingFallbackExclusiveCreate = false
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
-      if (currentBytes === null) {
-        try {
-          await writeDesktopConfigExclusive(configPath(), nextConfig)
-          pendingFallbackWriteGuard = null
-          return
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-            pendingFallbackWriteGuard = null
-            configWritesBlocked = true
-            throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
-          }
-          throw error
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          pendingFallbackExclusiveCreate = false
+          configWritesBlocked = true
+          throw new FallbackDestinationChangedError('desktop.json was created before fallback settings were written')
         }
+        throw error
       }
-      const backupBytes = guard.backupPath ? await readFile(guard.backupPath).catch(() => null) : null
-      if (!currentBytes.equals(guard.expectedBytes) || !backupBytes || !backupBytes.equals(guard.expectedBytes)) {
-        pendingFallbackWriteGuard = null
-        configWritesBlocked = true
-        throw new FallbackDestinationChangedError('desktop.json or its backup changed before fallback settings were written')
-      }
-      await writeDesktopConfig(configPath(), nextConfig)
-      pendingFallbackWriteGuard = null
     },
     onFailure,
   )
@@ -8419,37 +8435,25 @@ async function loadDesktopConfigWithRecovery(
     }
     recovery = await resolveConfigRecovery(file, recoveryMarker, true, recoveryOperations)
   }
+  let fallbackCanCreateExclusively = false
   if (recovery.newlyPreserved) {
     const postPreserveSnapshot = await readDesktopConfigSnapshot(file)
-    if (postPreserveSnapshot.rawBytes !== null) {
-      if (!postPreserveSnapshot.unparseable) {
-        snapshot = postPreserveSnapshot
+    if (postPreserveSnapshot.rawBytes === null) {
+      fallbackCanCreateExclusively = true
+    } else if (!postPreserveSnapshot.unparseable) {
+      snapshot = postPreserveSnapshot
+      recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
+    } else {
+      const confirmSnapshot = await readDesktopConfigSnapshot(file)
+      if (confirmSnapshot.rawBytes === null) {
+        fallbackCanCreateExclusively = true
+      } else if (!confirmSnapshot.unparseable) {
+        snapshot = confirmSnapshot
         recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
       } else {
-        let staticCopiedOriginal = false
-        if (
-          recovery.preservedMethod === 'copied' &&
-          snapshot.rawBytes !== null &&
-          recovery.preMoveBytes !== undefined &&
-          recovery.preMoveBytes.equals(snapshot.rawBytes)
-        ) {
-          const preservedBytes = recovery.hold
-            ? await readFile(recovery.hold).catch(() => null)
-            : null
-          staticCopiedOriginal =
-            preservedBytes !== null &&
-            preservedBytes.equals(snapshot.rawBytes) &&
-            postPreserveSnapshot.rawBytes.equals(snapshot.rawBytes)
-        }
-        if (!staticCopiedOriginal) {
-          const confirmSnapshot = await readDesktopConfigSnapshot(file)
-          if (confirmSnapshot.rawBytes !== null && !confirmSnapshot.unparseable) {
-            snapshot = confirmSnapshot
-            recovery = { hold: recovery.hold, writesBlocked: false, newlyPreserved: false }
-          } else {
-            recovery = { hold: recovery.hold, writesBlocked: true, newlyPreserved: false }
-          }
-        }
+        // Keep `recovery.hold` and defer publishing defaults whenever an unparseable file remains at
+        // `desktop.json` (whether recreated after a move or left in place by the copy fallback).
+        recovery = { hold: recovery.hold, writesBlocked: true, newlyPreserved: false }
       }
     }
   } else if (snapshot.unparseable && !recovery.writesBlocked) {
@@ -8460,11 +8464,7 @@ async function loadDesktopConfigWithRecovery(
       recovery = { ...recovery, writesBlocked: true }
     }
   }
-  pendingFallbackWriteGuard = recovery.newlyPreserved && !recovery.writesBlocked
-    ? (recovery.preservedMethod === 'copied' && snapshot.rawBytes !== null
-        ? { kind: 'copied', expectedBytes: snapshot.rawBytes, backupPath: recovery.hold }
-        : { kind: 'absent' })
-    : null
+  pendingFallbackExclusiveCreate = fallbackCanCreateExclusively && !recovery.writesBlocked
   for (const message of snapshot.migrations) onMigrated?.(message)
   desktopConfig = snapshot.config
   configRecoveryHold = Boolean(recovery.hold)

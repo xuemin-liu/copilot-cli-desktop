@@ -641,12 +641,16 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             unrestoredProfileTabs.clear();
             knownReviewerSessionIds.clear();
             knownUnboundReviewerReservations.clear();
+            unverifiedProvenanceLaunchIds.clear();
             currentRunReviewLaunchIds.clear();
             startupConfigPending = false;
             legacyTabSanitizationUnflushed = false;
             configRecoveryHold = false;
             configWritesBlocked = false;
-            pendingFallbackWriteGuard = null;
+            pendingFallbackExclusiveCreate = false;
+            workflowStore?.close();
+            workflowStore = null;
+            workflowError = null;
             reservations = null;
             syncTabState();
           },
@@ -5536,6 +5540,25 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       'late restore tabs were sanitized before saving',
     )
     assert.equal(h.reservationList().length, 3, 'recovery hold stays active until the moved corrupt backup is removed')
+    await rm(recoveryOnLateRestoreBeforeSave.hold!, { force: true })
+
+    // (2d) When `rename` fails with `EBUSY` so the copy fallback leaves an existing destination, startup
+    //      defers publishing defaults and retains the recovery hold, so a restore arriving after recovery
+    //      (`maxSessionTabs: 17`) is never overwritten with defaults (`20`):
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-6>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCopyThenLateRestore = await h.runStartupConfigAndSweepForTest({
+      beforeFallbackCopy: async () => {},
+      betweenLoadAndStartupSave: async () => {
+        await writeFile(join(directory, 'desktop.json'), lateRestoredWithCustomTabsRaw)
+      },
+    })
+    assert.ok(recoveryOnCopyThenLateRestore.hold, 'copied backup hold is retained when copy fallback leaves destination')
+    assert.equal(recoveryOnCopyThenLateRestore.writesBlocked, true, 'publishing defaults is deferred when copy fallback leaves destination')
+    const onDiskAfterCopyLateRestore = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(onDiskAfterCopyLateRestore.maxSessionTabs, 17, 'restored maxSessionTabs=17 was not replaced with default 20')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held under copy-fallback hold')
 
     await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
     await h.resetRuntimeForColdStartForTest()
@@ -5545,7 +5568,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     const recoveryAfterCompletedRestore = await h.runStartupConfigAndSweepForTest({
       afterRecoveryRevalidation: async () => {
         await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
-        await rm(recoveryOnLateRestoreBeforeSave.hold!, { force: true })
+        await rm(recoveryOnCopyThenLateRestore.hold!, { force: true })
       },
     })
     assert.deepEqual(
@@ -5627,6 +5650,70 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(afterMixedRestore.tabs.some((t) => t.lastSessionId === genuineUserUuid), true, 'genuine stored user session titled Review #99 is preserved')
     assert.equal(h.spawns.length - spawnsBeforeMixed, 1, 'non-ambiguous stored user session starts automatically')
     await h.sweepReviewerAreasForTest()
+
+    // Finally verify startup resilience when `workflows.sqlite` contains a malformed unrelated task row
+    // alongside a valid bound reviewer reservation (and when task session lookup itself fails):
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
+    const boundMalformedTestUuid = '88888888-8888-4888-8888-888888888888'
+    await h.seedUnboundReviewReservationForTest({
+      number: 96,
+      projectPath: repo,
+      boundTaskSessionId: boundMalformedTestUuid,
+      profileId: profile.id,
+    })
+    profile.tabs = [
+      { title: 'Review #96', lastSessionId: boundMalformedTestUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false },
+    ]
+    await writeFile(
+      join(directory, 'desktop.json'),
+      JSON.stringify({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, null, 2) + '\n',
+    )
+    await h.resetRuntimeForColdStartForTest()
+    const { DatabaseSync } = await import('node:sqlite')
+    const workflowDbPath = join(directory, 'workflows.sqlite')
+    const rawWorkflowDb = new DatabaseSync(workflowDbPath)
+    try {
+      rawWorkflowDb.prepare('INSERT INTO tasks(id, session, active, value) VALUES (?, ?, 1, ?)')
+        .run(randomUUID(), randomUUID(), '{malformed-unrelated-task-payload')
+    } finally {
+      rawWorkflowDb.close()
+    }
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    await h.runStartupConfigAndSweepForTest()
+    const savedAfterMalformedTaskStartup = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterMalformedTaskStartup.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === boundMalformedTestUuid),
+      false,
+      'direct session column lookup sanitized bound reviewer tab despite malformed unrelated workflow task',
+    )
+    assert.equal(
+      savedAfterMalformedTaskStartup.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === genuineUserUuid),
+      true,
+      'genuine user session tab survived startup with malformed unrelated workflow task',
+    )
+    assert.equal(h.reservationList().length, 0, 'bound reservation swept cleanly after sanitization succeeded')
+
+    // Also verify that if the reserved task session lookup itself fails (unreadable/corrupt workflows.sqlite),
+    // startup continues cleanly and holds the affected reservation until provenance can be established:
+    const unverifiedLookupUuid = '99999999-9999-4999-8999-999999999999'
+    await h.seedUnboundReviewReservationForTest({
+      number: 95,
+      projectPath: repo,
+      boundTaskSessionId: unverifiedLookupUuid,
+      profileId: profile.id,
+    })
+    await h.resetRuntimeForColdStartForTest()
+    await writeFile(workflowDbPath, 'corrupt-sqlite-header')
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    await h.runStartupConfigAndSweepForTest()
+    assert.equal(
+      h.reservationList().some((r) => r.number === 95),
+      true,
+      'affected reservation is held when workflows.sqlite lookup fails at startup',
+    )
   } finally {
     h.setGithubApi(null)
     h.setProjectOriginOverride(null)

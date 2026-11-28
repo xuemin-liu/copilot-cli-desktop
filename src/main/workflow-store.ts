@@ -92,6 +92,29 @@ export class WorkflowStore {
     } catch (error) { this.db.close(); throw error }
   }
   close(): void { this.db.close() }
+  sessionIdForTask(id: string): string | null {
+    if (!isValidSessionId(id)) return null
+    const row = this.db.prepare('SELECT session FROM tasks WHERE id=?').get(id) as { session?: unknown } | undefined
+    if (!row) return null
+    if (typeof row.session !== 'string' || !isValidSessionId(row.session)) {
+      throw new Error('Invalid stored workflow task session')
+    }
+    return row.session
+  }
+  static sessionIdForTaskFromFile(path: string, id: string): string | null {
+    if (!isValidSessionId(id)) return null
+    const db = new DatabaseSync(path, { readOnly: true })
+    try {
+      const row = db.prepare('SELECT session FROM tasks WHERE id=?').get(id) as { session?: unknown } | undefined
+      if (!row) return null
+      if (typeof row.session !== 'string' || !isValidSessionId(row.session)) {
+        throw new Error('Invalid stored workflow task session')
+      }
+      return row.session
+    } finally {
+      db.close()
+    }
+  }
   list(): WorkflowTask[] {
     const version=(this.db.prepare('PRAGMA data_version').get() as {data_version:number}).data_version
     if(!this.cachedTasks||this.cachedVersion!==version){
