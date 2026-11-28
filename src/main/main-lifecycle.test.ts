@@ -4414,16 +4414,19 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   assert.equal(afterActivate.tabs.find(tab => tab.id === revId)?.browserProfileId, undefined, 'tempReviewer does not allocate a browserProfileId')
 
   // Clicking File -> Close Session Tab (non-accelerator) while a hosted peek is focused must hide the peek via
-  // desktop:hide-peek-request instead of closing the host session or routing through desktop:tab-shortcut-request:
+  // desktop:hide-peek-request instead of closing the host session or routing through desktop:tab-shortcut-request,
+  // and Restart/Unload Active Session must be disabled while the reviewer peek has focus:
   h.refreshAppMenu()
   await h.request('desktop:focused-peek-tab', revId)
-  const findCloseItem = () => {
+  const findFileMenuItem = (label: string) => {
     const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
     const fileMenu = menu.find(item => item.label === 'File')!
-    return fileMenu.submenu!.find(item => item.label === 'Close Session Tab')!
+    return fileMenu.submenu!.find(item => item.label === label)!
   }
+  assert.equal(findFileMenuItem('Restart Active Session').enabled, false, 'Restart Active Session is disabled while a temporary reviewer peek has focus')
+  assert.equal(findFileMenuItem('Unload Active Session').enabled, false, 'Unload Active Session is disabled while a temporary reviewer peek has focus')
   const beforeHostedClose = win.messages.length
-  findCloseItem().click?.({}, {}, { triggeredByAccelerator: false })
+  findFileMenuItem('Close Session Tab').click?.({}, {}, { triggeredByAccelerator: false })
   await pause(50)
   assert.ok(
     win.messages.slice(beforeHostedClose).some(msg => msg.channel === 'desktop:hide-peek-request'),
@@ -4438,7 +4441,8 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   assert.ok(afterHostedClose.tabs.some(tab => tab.id === tab2Id), 'host tab-2 survives File -> Close Session Tab while hosted peek is focused')
 
   // While the peeked reviewer has focus in a focused main window, notifications from the regular host tab still fire
-  // (only the focused reviewer's own notifications are suppressed):
+  // (only the focused reviewer's own notifications are suppressed), and clicking/activating the host transfers focus
+  // back to the host in both main and renderer even when activeTabId is already tab2Id:
   ;(win as unknown as { isFocused: () => boolean }).isFocused = () => true
   const notices = h.captureWorkflowNotifications()
   const beforeHostNotice = notices.length
@@ -4446,7 +4450,14 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   tab2Spawn.emitExit()
   await pause(50)
   assert.ok(notices.length > beforeHostNotice, 'regular host session completion still notifies while peeked reviewer has focus')
-  await h.request('desktop:focused-peek-tab', null)
+  const beforeHostRefocus = win.messages.length
+  await h.request('desktop:activate-tab', tab2Id)
+  assert.ok(
+    win.messages.slice(beforeHostRefocus).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    'explicit activation of the already-active host clears reviewer focus in the renderer',
+  )
+  assert.equal(findFileMenuItem('Restart Active Session').enabled, true, 'Restart Active Session re-enables once focus returns to host')
+  assert.equal(findFileMenuItem('Unload Active Session').enabled, true, 'Unload Active Session re-enables once focus returns to host')
 
   // Popped-out host A + active tab B: activating A's hosted reviewer selects A in the main window (so A + peeked reviewer
   // display in main instead of only raising A's detached window) and keeps tab-2's docked panel ownership:

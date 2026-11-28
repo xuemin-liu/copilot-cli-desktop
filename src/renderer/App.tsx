@@ -107,6 +107,9 @@ export function App(): JSX.Element {
   useEffect(() => window.copilotDesktop.onHidePeekRequest(() => {
     updatePeekReviewerRef.current(null)
   }), [])
+  useEffect(() => window.copilotDesktop.onClearPeekFocusRequest(() => {
+    setFocusedPeekTabId(null)
+  }), [])
   const handleActivateTab = useCallback((tabId: string): void => {
     const tab = state.tabs.find((candidate) => candidate.id === tabId)
     if (!tab?.tempReviewer) setFocusedPeekTabId(null)

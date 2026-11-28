@@ -153,6 +153,11 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     ipcRenderer.on('desktop:hide-peek-request', handler)
     return () => ipcRenderer.removeListener('desktop:hide-peek-request', handler)
   },
+  onClearPeekFocusRequest: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('desktop:clear-peek-focus-request', handler)
+    return () => ipcRenderer.removeListener('desktop:clear-peek-focus-request', handler)
+  },
   navigateSession: (direction) => ipcRenderer.invoke('desktop:navigate-session', direction),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),
   dockTab: (tabId) => ipcRenderer.invoke('desktop:dock-tab', tabId),

@@ -1804,8 +1804,9 @@ function activeAccessLabel(): string {
 // the tab button) consistently disabled for one instead of only some of them
 // surfacing that as a runtime error.
 function activeTabIsRestartable(): boolean {
-  const tab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
-  return tab !== undefined && !tab.remote
+  const focusedId = activeFocusedPeekTabId() ?? tabsState.activeTabId
+  const tab = tabsState.tabs.find((candidate) => candidate.id === focusedId)
+  return tab !== undefined && !tab.remote && !tab.tempReviewer
 }
 
 /**
@@ -3101,6 +3102,8 @@ function selectSessionInMain(tabId: string): DesktopState {
     return snapshot()
   }
   const previous = tabsState.activeTabId
+  const hadFocusedPeek = focusedPeekTabId !== null
+  focusedPeekTabId = null
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
   // The saved tabs mark the one on screen, which a restart shows again.
@@ -3109,6 +3112,9 @@ function selectSessionInMain(tabId: string): DesktopState {
   restoreMainWindow()
   broadcastState()
   refreshMenus()
+  if (hadFocusedPeek && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:clear-peek-focus-request')
+  }
   return snapshot()
 }
 
@@ -8071,7 +8077,7 @@ async function runCopilotResourceMutation(args: string[]): Promise<void> {
 function installApplicationMenu(): void {
   const focusedWindow = BrowserWindow.getFocusedWindow()
   const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
-  const menuTabId = focusedPopoutId ?? tabsState.activeTabId
+  const menuTabId = focusedPopoutId ?? (activeFocusedPeekTabId() ?? tabsState.activeTabId)
   const mac = process.platform === 'darwin'
   const settingsItem = { label: mac ? 'Settings…' : 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') }
   const quitItem = { label: mac ? 'Quit Copilot CLI Desktop' : 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() }
@@ -8137,7 +8143,7 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer),
           click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
         },
         {
@@ -8148,7 +8154,7 @@ function installApplicationMenu(): void {
         },
         {
           label: 'Unload Active Session',
-          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && tab.status !== 'dormant'),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && !tab.tempReviewer && tab.status !== 'dormant'),
           click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
         ...(mac ? [] : [settingsItem, { type: 'separator' as const }, quitItem]),
