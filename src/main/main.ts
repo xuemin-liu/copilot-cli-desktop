@@ -414,10 +414,10 @@ function activeFocusedPeekTabId(): string | null {
   return focusedPeekTabId
 }
 
-function requestPeekReviewerInMain(tabId: string): void {
+function requestPeekReviewerInMain(tabId: string, peekKey: string): void {
   const window = mainWindow
   if (!window || window.isDestroyed()) return
-  window.webContents.send('desktop:peek-reviewer-request', tabId)
+  window.webContents.send('desktop:peek-reviewer-request', { tabId, peekKey })
 }
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -1402,7 +1402,7 @@ const workflowResources=new WorkflowResources(async path=>{
 let workflowAttentionReady=false
 const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   const popout=sessionWindows.get(item.tabId),window=popout??mainWindow
-  return !window?.isFocused()||(!popout&&tabsState.activeTabId!==item.tabId&&activeFocusedPeekTabId()!==item.tabId)
+  return !window?.isFocused()||(!popout&&(activeFocusedPeekTabId()??tabsState.activeTabId)!==item.tabId)
 },notice=>showNotification(notice.title,notice.body,()=>{
   const item=notice.items.length===1?notice.items[0]:undefined
   if(item?.sessionId){restoreMainWindow();void openSessionFromHistory(item.sessionId).catch(()=>{workflowNotice='The task session could not be opened. Its task record is retained.';broadcastState()})}
@@ -1905,7 +1905,7 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const product = tab?.cli ? sessionCliLabel(tab.cli) : 'Copilot'
   const popout = sessionWindows.get(tabId)
   const window = popout ?? mainWindow
-  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || tabsState.activeTabId === tabId || activeFocusedPeekTabId() === tabId)
+  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || (activeFocusedPeekTabId() ?? tabsState.activeTabId) === tabId)
   if (isFocusedOnThisTab) return
   const openTab = (): void => {
     if (tabsState.tabs.some((candidate) => candidate.id === tabId)) {
@@ -3094,8 +3094,10 @@ function selectSessionInMain(tabId: string): DesktopState {
       broadcastState()
       refreshMenus()
     }
+    const realTarget = realTargetId ? tabsState.tabs.find((tab) => tab.id === realTargetId) : null
+    const targetPeekKey = realTarget ? (realTarget.sideParentTabId ?? realTarget.id) : `profile:${target.workspaceProfileId}`
     restoreMainWindow()
-    requestPeekReviewerInMain(target.id)
+    requestPeekReviewerInMain(target.id, targetPeekKey)
     return snapshot()
   }
   const previous = tabsState.activeTabId
@@ -7735,13 +7737,11 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
+  refreshMenus()
   // Tabs from an inactive profile keep running rather than closing, so
   // switching TO a profile that already has tabs must switch the active tab
   // to one of them — otherwise activeProfileId and activeTabId/terminal
   // input can end up pointing at two different profiles.
-  if (focusedPeekTabId && tabsState.tabs.find((tab) => tab.id === focusedPeekTabId)?.workspaceProfileId !== profile.id) {
-    focusedPeekTabId = null
-  }
   const activeTabBelongsToProfile = tabsState.tabs.some((tab) => tab.id === tabsState.activeTabId && !tab.tempReviewer && tab.workspaceProfileId === profile.id)
   if (!activeTabBelongsToProfile) {
     const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)
@@ -8113,12 +8113,15 @@ function installApplicationMenu(): void {
             if (forwardTabShortcut('w', event?.triggeredByAccelerator)) return
             const focused = BrowserWindow.getFocusedWindow()
             const poppedOut = focused ? sessionWindowId(focused.webContents) : undefined
-            const closeTarget = activeWorkspaceRegularTabId()
-            if (poppedOut) dockSessionTab(poppedOut)
-            else if (closeTarget) observe(closeSessionTab(closeTarget), 'Could not close session tab')
-            else if (activeFocusedPeekTabId() && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('desktop:tab-shortcut-request', 'w')
+            if (poppedOut) { dockSessionTab(poppedOut); return }
+            if (activeFocusedPeekTabId()) {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('desktop:hide-peek-request')
+              }
+              return
             }
+            const closeTarget = activeWorkspaceRegularTabId()
+            if (closeTarget) observe(closeSessionTab(closeTarget), 'Could not close session tab')
           },
         },
         {

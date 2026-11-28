@@ -140,9 +140,18 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
   setFocusedPeekTab: (tabId) => ipcRenderer.invoke('desktop:focused-peek-tab', tabId ?? null),
   onPeekReviewerRequest: (listener) => {
-    const handler = (_event, tabId) => { if (typeof tabId === 'string') listener(tabId) }
+    const handler = (_event, payload) => {
+      if (payload && typeof payload.tabId === 'string' && typeof payload.peekKey === 'string') {
+        listener({ tabId: payload.tabId, peekKey: payload.peekKey })
+      }
+    }
     ipcRenderer.on('desktop:peek-reviewer-request', handler)
     return () => ipcRenderer.removeListener('desktop:peek-reviewer-request', handler)
+  },
+  onHidePeekRequest: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('desktop:hide-peek-request', handler)
+    return () => ipcRenderer.removeListener('desktop:hide-peek-request', handler)
   },
   navigateSession: (direction) => ipcRenderer.invoke('desktop:navigate-session', direction),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),

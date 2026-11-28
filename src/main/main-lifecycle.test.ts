@@ -4398,20 +4398,71 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   revSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
 
   // Attempting to activate the reviewer (e.g. notification click or direct IPC) must keep tab-2 active (not revId, not tab-1),
-  // preserve tab-2's right-side panel ownership, and emit desktop:peek-reviewer-request:
+  // preserve tab-2's right-side panel ownership, and emit desktop:peek-reviewer-request with the resolved peekKey:
   const win = h.windowFor()
   const beforeMessages = win.messages.length
   const afterActivate = await h.request('desktop:activate-tab', revId)
   assert.equal(afterActivate.activeTabId, tab2Id, 'activeTabId stays on tab-2, never moving to reviewer or tab-1')
   assert.ok(
-    win.messages.slice(beforeMessages).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload === revId),
-    'main sends desktop:peek-reviewer-request to reveal the reviewer in the renderer peek pane',
+    win.messages.slice(beforeMessages).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === revId && msg.payload?.peekKey === tab2Id),
+    'main sends desktop:peek-reviewer-request with tabId and resolved peekKey',
   )
   const toolsAfter = await h.request<{ projects: Array<{ profileId: string; ownerId?: string; visible: boolean }> }>('desktop:tools-state', 420)
   const pAfter = toolsAfter.projects.find(project => project.profileId === profile.id)!
   assert.equal(pAfter.ownerId, tab2BrowserProfileId, 'right-side panel stays owned by tab-2')
   assert.equal(pAfter.visible, true)
   assert.equal(afterActivate.tabs.find(tab => tab.id === revId)?.browserProfileId, undefined, 'tempReviewer does not allocate a browserProfileId')
+
+  // Clicking File -> Close Session Tab (non-accelerator) while a hosted peek is focused must hide the peek via
+  // desktop:hide-peek-request instead of closing the host session or routing through desktop:tab-shortcut-request:
+  h.refreshAppMenu()
+  await h.request('desktop:focused-peek-tab', revId)
+  const findCloseItem = () => {
+    const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
+    const fileMenu = menu.find(item => item.label === 'File')!
+    return fileMenu.submenu!.find(item => item.label === 'Close Session Tab')!
+  }
+  const beforeHostedClose = win.messages.length
+  findCloseItem().click?.({}, {}, { triggeredByAccelerator: false })
+  await pause(50)
+  assert.ok(
+    win.messages.slice(beforeHostedClose).some(msg => msg.channel === 'desktop:hide-peek-request'),
+    'hosted focused peek menu click sends dedicated desktop:hide-peek-request',
+  )
+  assert.equal(
+    win.messages.slice(beforeHostedClose).some(msg => msg.channel === 'desktop:tab-shortcut-request'),
+    false,
+    'hosted focused peek menu click does not reuse desktop:tab-shortcut-request',
+  )
+  const afterHostedClose = await h.request('desktop:get-state')
+  assert.ok(afterHostedClose.tabs.some(tab => tab.id === tab2Id), 'host tab-2 survives File -> Close Session Tab while hosted peek is focused')
+
+  // While the peeked reviewer has focus in a focused main window, notifications from the regular host tab still fire
+  // (only the focused reviewer's own notifications are suppressed):
+  ;(win as unknown as { isFocused: () => boolean }).isFocused = () => true
+  const notices = h.captureWorkflowNotifications()
+  const beforeHostNotice = notices.length
+  const tab2Spawn = h.spawns[1]!
+  tab2Spawn.emitExit()
+  await pause(50)
+  assert.ok(notices.length > beforeHostNotice, 'regular host session completion still notifies while peeked reviewer has focus')
+  await h.request('desktop:focused-peek-tab', null)
+
+  // Popped-out host A + active tab B: activating A's hosted reviewer selects A in the main window (so A + peeked reviewer
+  // display in main instead of only raising A's detached window) and keeps tab-2's docked panel ownership:
+  const revOf1 = await h.addBackgroundReviewer(profile.id, tab1Id)
+  await h.request('desktop:pop-out-tab', tab1Id)
+  await h.request('desktop:activate-tab', tab2Id)
+  const beforePopoutRev = win.messages.length
+  const afterPopoutRev = await h.request('desktop:activate-tab', revOf1)
+  assert.equal(afterPopoutRev.activeTabId, tab1Id, 'activating reviewer of popped-out host A selects host A in main window')
+  assert.ok(
+    win.messages.slice(beforePopoutRev).some(msg => msg.channel === 'desktop:peek-reviewer-request' && msg.payload?.tabId === revOf1 && msg.payload?.peekKey === tab1Id),
+    'main emits desktop:peek-reviewer-request anchored to popped-out host A',
+  )
+  const toolsWithPopoutHost = await h.request<{ projects: Array<{ profileId: string; ownerId?: string }> }>('desktop:tools-state', 420)
+  assert.equal(toolsWithPopoutHost.projects.find(project => project.profileId === profile.id)?.ownerId, tab2BrowserProfileId, 'docked right-side panel remains on tab-2 while popped-out host A is selected')
+  await h.request('desktop:activate-tab', tab2Id)
 
   // Reject pop-out and show-browser-in-main for tempReviewer tabs:
   await assert.rejects(async () => h.request('desktop:pop-out-tab', revId), /cannot be opened in a separate window/)
@@ -4451,23 +4502,23 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   const ws3RevId = await h.addBackgroundReviewer(ws3.id, null)
 
   // With Copilot unresolved, switching to ws2 (which only has a standalone reviewer) retains ws1TabId as activeTabId.
-  // Close Session Tab must NOT close the invisible ws1TabId, and focusing the standalone peek enables Close Session Tab to forward 'w'.
+  // activateProfile must refresh the native menu itself (no manual refreshAppMenu call here):
+  h.refreshAppMenu()
   h.setUnresolvedCopilot()
   await h.request('desktop:activate-profile', ws2.id)
-  h.refreshAppMenu()
   const findCloseItem = () => {
     const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: (i: unknown, w: unknown, e?: { triggeredByAccelerator?: boolean }) => void }> }>
     const fileMenu = menu.find(item => item.label === 'File')!
     return fileMenu.submenu!.find(item => item.label === 'Close Session Tab')!
   }
   const closeBeforeFocus = findCloseItem()
-  assert.equal(closeBeforeFocus.enabled, false, 'Close Session Tab is disabled when activeTabId belongs to another workspace and no peek is focused')
+  assert.equal(closeBeforeFocus.enabled, false, 'activateProfile refreshes menu: Close Session Tab is disabled with foreign activeTabId and no focused peek')
   closeBeforeFocus.click?.({}, {}, { triggeredByAccelerator: false })
   await pause(50)
   const afterDirectClick = await h.request('desktop:get-state')
   assert.ok(afterDirectClick.tabs.some(tab => tab.id === ws1TabId), 'retained foreign-workspace session survives Close Session Tab')
 
-  // Reporting focused standalone peek enables Close Session Tab and forwards 'w' to hide peek without closing ws1TabId:
+  // Reporting focused standalone peek enables Close Session Tab and sends desktop:hide-peek-request without closing ws1TabId:
   await h.request('desktop:focused-peek-tab', ws2RevId)
   const closeWithPeek = findCloseItem()
   assert.equal(closeWithPeek.enabled, true, 'Close Session Tab is enabled when standalone peek is focused')
@@ -4475,11 +4526,15 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   const beforeShortcut = win.messages.length
   closeWithPeek.click?.({}, {}, { triggeredByAccelerator: false })
   assert.ok(
-    win.messages.slice(beforeShortcut).some(msg => msg.channel === 'desktop:tab-shortcut-request' && msg.payload === 'w'),
-    'standalone focused peek forwards close shortcut to renderer to hide peek',
+    win.messages.slice(beforeShortcut).some(msg => msg.channel === 'desktop:hide-peek-request'),
+    'standalone focused peek sends dedicated desktop:hide-peek-request to renderer',
   )
   const afterPeekShortcut = await h.request('desktop:get-state')
   assert.ok(afterPeekShortcut.tabs.some(tab => tab.id === ws1TabId), 'foreign-workspace session still survives standalone peek close shortcut')
+
+  // Switching back to ws1 with unresolved Copilot re-enables Close Session Tab automatically:
+  await h.request('desktop:activate-profile', ws1.id)
+  assert.equal(findCloseItem().enabled, true, 'switching back to ws1 refreshes Close Session Tab back to enabled')
 
   // Switching to ws3 with Copilot resolved restores ws3's saved regular tab instead of activating ws3RevId:
   h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [ws1, ws2, ws3], activeProfileId: ws2.id }, { ...EMPTY_COPILOT_CAPABILITIES, supportedOptions: ['--resume', '--add-dir'] })

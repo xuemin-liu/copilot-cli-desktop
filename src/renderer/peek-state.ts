@@ -1,10 +1,5 @@
 import type { DesktopSessionTab } from '../main/types.js'
 
-export interface PendingSidebarPeek {
-  profileId: string
-  reviewerTabId: string
-}
-
 /**
  * The active regular (non-tempReviewer) tab belonging to the selected workspace. A retained `activeTabId` from another
  * workspace is ignored so close shortcuts never terminate an invisible session in a different workspace.
@@ -56,36 +51,4 @@ export function resolveToolPanelPromptTarget(input: {
   if (['dormant', 'completed', 'crashed'].includes(candidate.status)) return undefined
   if ((input.poppedOutTabIds ?? []).includes(candidate.id)) return undefined
   return candidate
-}
-
-/**
- * Reconciles a cross-workspace Sidebar click on a profile-scoped reviewer (`hostTabId: null`) as `activateProfile` and
- * any asynchronous `restoreTabsForProfile` settle. While `peekKey` is still `profile:<id>`, the pending peek remains
- * armed so that if a restored/new regular tab arrives and changes `peekKey` to that tab's ID, the peek automatically
- * re-keys onto the restored host tab.
- */
-export function reconcilePendingSidebarPeek(
-  pending: PendingSidebarPeek | null,
-  state: {
-    tabs: readonly DesktopSessionTab[]
-    activeProfileId: string | null
-    peekKey: string | null
-  },
-): {
-  nextPending: PendingSidebarPeek | null
-  attach: { peekKey: string; reviewerTabId: string } | null
-} {
-  if (!pending) return { nextPending: null, attach: null }
-  const reviewerStillExists = state.tabs.some((tab) => (
-    tab.id === pending.reviewerTabId
-    && Boolean(tab.tempReviewer)
-    && tab.workspaceProfileId === pending.profileId
-  ))
-  if (!reviewerStillExists) return { nextPending: null, attach: null }
-  if (state.activeProfileId !== pending.profileId || !state.peekKey) {
-    return { nextPending: pending, attach: null }
-  }
-  const attach = { peekKey: state.peekKey, reviewerTabId: pending.reviewerTabId }
-  const nextPending = state.peekKey.startsWith('profile:') ? pending : null
-  return { nextPending, attach }
 }
