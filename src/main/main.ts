@@ -1402,7 +1402,7 @@ const workflowResources=new WorkflowResources(async path=>{
 let workflowAttentionReady=false
 const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   const popout=sessionWindows.get(item.tabId),window=popout??mainWindow
-  return !window?.isFocused()||(!popout&&(activeFocusedPeekTabId()??tabsState.activeTabId)!==item.tabId)
+  return !window?.isFocused()||(!popout&&(activeFocusedPeekTabId()??activeWorkspaceRegularTabId())!==item.tabId)
 },notice=>showNotification(notice.title,notice.body,()=>{
   const item=notice.items.length===1?notice.items[0]:undefined
   if(item?.sessionId){restoreMainWindow();void openSessionFromHistory(item.sessionId).catch(()=>{workflowNotice='The task session could not be opened. Its task record is retained.';broadcastState()})}
@@ -1790,7 +1790,7 @@ function trayStatusLabel(): string {
 }
 
 function activeAccessLabel(): string {
-  const activeTab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
+  const activeTab = tabsState.tabs.find((candidate) => candidate.id === activeWorkspaceRegularTabId())
   if (activeTab?.remote) return 'Unknown (remote session)'
   if (activeTab?.cli) return `Set in ${sessionCliLabel(activeTab.cli)}`
   const preset = activeTab?.sessionPermissionPreset
@@ -1823,7 +1823,7 @@ function refreshMenus(): void {
 
 function rebuildTrayMenu(): void {
   if (!tray || tray.isDestroyed()) return
-  const accessLabel = tabsState.activeTabId ? 'Active session access' : 'Profile startup access'
+  const accessLabel = activeWorkspaceRegularTabId() ? 'Active session access' : 'Profile startup access'
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Copilot CLI Desktop', click: restoreMainWindow },
     { label: trayStatusLabel(), enabled: false },
@@ -1912,7 +1912,7 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const product = tab?.cli ? sessionCliLabel(tab.cli) : 'Copilot'
   const popout = sessionWindows.get(tabId)
   const window = popout ?? mainWindow
-  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || (activeFocusedPeekTabId() ?? tabsState.activeTabId) === tabId)
+  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || (activeFocusedPeekTabId() ?? activeWorkspaceRegularTabId()) === tabId)
   if (isFocusedOnThisTab) return
   const openTab = (): void => {
     if (tabsState.tabs.some((candidate) => candidate.id === tabId)) {

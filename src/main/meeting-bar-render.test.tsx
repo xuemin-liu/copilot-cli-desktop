@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { MeetingView } from './meeting.js'
 import type { DesktopSessionTab } from './types.js'
 import { MeetingBar, formatMeetingCost } from '../renderer/components/MeetingBar.js'
+import { activeWorkspaceRegularTab } from '../renderer/peek-state.js'
 
 function tab(id: string, title: string, extra: Partial<DesktopSessionTab> = {}): DesktopSessionTab {
   return {
@@ -100,4 +101,17 @@ test('a meeting an outside agent hosts shows above any tab until a Copilot sessi
   const joined: MeetingView = { ...hosted, participants: [{ tabId: 'tab-b', title: 'reviewer', role: null, replied: false }] }
   const elsewhere = renderToStaticMarkup(<MeetingBar meetings={[joined]} tabs={[tab('tab-a', 'some session'), tab('tab-b', 'reviewer')]} activeTabId="tab-a" onError={() => undefined} />)
   assert.equal(elsewhere, '', 'once a session is in it, it shows above that session only')
+})
+
+test('switching to an empty workspace hides meeting controls from a retained foreign-workspace activeTabId', () => {
+  const tabs = [tab('tab-host', 'host', { workspaceProfileId: 'ws-a' }), tab('tab-b', 'reviewer', { workspaceProfileId: 'ws-a' })]
+  const inWorkspaceA = activeWorkspaceRegularTab(tabs, 'tab-host', 'ws-a')?.id ?? null
+  assert.equal(inWorkspaceA, 'tab-host')
+  const visibleHtml = renderToStaticMarkup(<MeetingBar meetings={[meeting]} tabs={tabs} activeTabId={inWorkspaceA} onError={() => undefined} />)
+  assert.match(visibleHtml, /Stop/)
+
+  const inEmptyWorkspaceB = activeWorkspaceRegularTab(tabs, 'tab-host', 'ws-b')?.id ?? null
+  assert.equal(inEmptyWorkspaceB, null)
+  const hiddenHtml = renderToStaticMarkup(<MeetingBar meetings={[meeting]} tabs={tabs} activeTabId={inEmptyWorkspaceB} onError={() => undefined} />)
+  assert.equal(hiddenHtml, '', 'foreign workspace meeting controls are hidden when active workspace has no regular tab')
 })

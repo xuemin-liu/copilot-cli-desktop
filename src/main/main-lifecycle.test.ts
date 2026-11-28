@@ -4557,6 +4557,16 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
   const afterDirectClick = await h.request('desktop:get-state')
   assert.ok(afterDirectClick.tabs.some(tab => tab.id === ws1TabId), 'retained foreign-workspace session survives Close Session Tab')
 
+  // While the main window is focused on empty workspace ws2 (retaining ws1TabId as activeTabId), a completion event from
+  // the hidden ws1 session is not treated as focused and still delivers its notification:
+  const ws2Win = h.windowFor()
+  ;(ws2Win as unknown as { isFocused: () => boolean }).isFocused = () => true
+  const ws1Notices = h.captureWorkflowNotifications()
+  const beforeWs1Complete = ws1Notices.length
+  h.spawns[0]!.emitExit()
+  await pause(50)
+  assert.ok(ws1Notices.length > beforeWs1Complete, 'completion from inactive workspace session notifies while main window is focused on an empty workspace')
+
   // Reporting focused standalone peek enables Close Session Tab (sending desktop:hide-peek-request) and Show Active
   // Session Log (targeting the standalone reviewer) while keeping Restart/Unload disabled and ws1TabId untouched:
   await h.request('desktop:focused-peek-tab', ws2RevId)
