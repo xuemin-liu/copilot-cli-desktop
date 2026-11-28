@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionNavigation } from './session-navigation.js'
-import { activateTab, createTab, EMPTY_TABS_STATE, type NewTabInput, type TabsState } from './session-tab-machine.js'
+import { activateTab, createBackgroundTab, createTab, EMPTY_TABS_STATE, type NewTabInput, type TabsState } from './session-tab-machine.js'
 
 function addTab(state: TabsState, id: string, sideChat?: Pick<NewTabInput, 'sideChat' | 'sideParentTabId'>): TabsState {
   return createTab(state, {
@@ -69,4 +69,23 @@ test('moving focus between a session and its side chat keeps one history entry',
   assert.equal(navigation.canMove('back', available), false)
   assert.equal(navigation.move('forward', available), 'b')
   assert.equal(navigation.canMove('forward', available), false)
+})
+
+test('focusing a temporary reviewer keeps navigation anchored on its host session', () => {
+  const withReviewer = createBackgroundTab(tabs, {
+    id: 'rev',
+    title: 'Review · Claude Code',
+    cli: 'claude',
+    workspaceProfileId: 'project',
+    cliVersion: '2.1.0',
+    sessionPermissionPreset: null,
+    permissionWarning: null,
+    remote: false,
+    tempReviewer: { groupId: 'g-1', hostTabId: 'a', seatId: 'claude', cli: 'claude', repository: 'o/r', prLabel: 'PR #1', prNumber: 1, prUrl: null },
+  })
+  const navigation = new SessionNavigation()
+  for (const id of ['a', 'rev', 'a', 'b']) navigation.record(activateTab(withReviewer, id))
+  assert.equal(navigation.move('back', open), 'a')
+  assert.equal(navigation.canMove('back', open), false)
+  assert.equal(navigation.move('forward', open), 'b')
 })

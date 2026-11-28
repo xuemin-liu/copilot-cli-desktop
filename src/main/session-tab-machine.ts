@@ -258,10 +258,23 @@ function belongsToHostTab(candidate: DesktopSessionTab, host: DesktopSessionTab)
     || (candidate.tempReviewer.hostTabId === null && candidate.workspaceProfileId === host.workspaceProfileId)
 }
 
-function findHostForReviewer(state: TabsState, reviewerTab: DesktopSessionTab): DesktopSessionTab | null {
+function findHostForReviewer(
+  state: TabsState,
+  reviewerTab: DesktopSessionTab,
+  peekByHost?: Readonly<Record<string, string | null>>,
+): DesktopSessionTab | null {
   if (!reviewerTab.tempReviewer) return null
   if (reviewerTab.tempReviewer.hostTabId !== null) {
     return state.tabs.find((tab) => tab.id === reviewerTab.tempReviewer!.hostTabId && !tab.tempReviewer) ?? null
+  }
+  if (peekByHost) {
+    const peekingHost = state.tabs.find((tab) => (
+      !tab.tempReviewer
+      && !tab.sideChat
+      && tab.workspaceProfileId === reviewerTab.workspaceProfileId
+      && peekByHost[tab.id] === reviewerTab.id
+    ))
+    if (peekingHost) return peekingHost
   }
   return state.tabs.find((tab) => !tab.tempReviewer && !tab.sideChat && tab.workspaceProfileId === reviewerTab.workspaceProfileId) ?? null
 }
@@ -269,18 +282,22 @@ function findHostForReviewer(state: TabsState, reviewerTab: DesktopSessionTab): 
 /**
  * Resolves the peek state key, host tab ID (when a regular tab exists), and active peek reviewer tab ID regardless of
  * whether focus is on the host tab, its side chat, the peeked reviewer terminal itself, or a workspace with no regular
- * tab open (`profile:<profileId>`).
+ * tab open (`profile:<profileId>`). When `activeProfileId` is given, an `activeTabId` belonging to another workspace is
+ * treated as absent in `activeProfileId`.
  */
 export function resolvePeekHostAndTab(
   state: TabsState,
   peekByHost: Readonly<Record<string, string | null>>,
   activeProfileId: string | null = null,
 ): { peekKey: string | null; hostTabId: string | null; peekTabId: string | null } {
-  const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const rawActive = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const active = rawActive && (!activeProfileId || rawActive.workspaceProfileId === activeProfileId) ? rawActive : null
   const hostTabId = active?.tempReviewer
-    ? findHostForReviewer(state, active)?.id ?? null
-    : active?.sideParentTabId ?? state.activeTabId
-  const hostTab = hostTabId ? state.tabs.find((tab) => tab.id === hostTabId && !tab.tempReviewer) ?? null : null
+    ? findHostForReviewer(state, active, peekByHost)?.id ?? null
+    : active?.sideParentTabId ?? active?.id ?? null
+  const hostTab = hostTabId
+    ? state.tabs.find((tab) => tab.id === hostTabId && !tab.tempReviewer && (!activeProfileId || tab.workspaceProfileId === activeProfileId)) ?? null
+    : null
   if (hostTab) {
     const peekKey = hostTab.id
     const candidate = peekByHost[peekKey] ?? null
@@ -289,7 +306,7 @@ export function resolvePeekHostAndTab(
       : null
     return { peekKey, hostTabId: hostTab.id, peekTabId }
   }
-  const profileId = active?.workspaceProfileId ?? activeProfileId
+  const profileId = activeProfileId ?? active?.workspaceProfileId ?? null
   if (!profileId) return { peekKey: null, hostTabId: null, peekTabId: null }
   const peekKey = `profile:${profileId}`
   const candidate = peekByHost[peekKey] ?? null
@@ -308,33 +325,39 @@ export function resolvePeekHostAndTab(
  * `activeTabId` is keyboard focus; a linked pair stays visible for either focus. When `peekTabId` names a live
  * temporary reviewer belonging to `main`, it temporarily occupies the right split pane without mutating `sideParentTabId`,
  * so closing the peek restores any existing `sideChat`. When no regular host tab is open in the workspace, `peekTabId`
- * displays the peeked profile-scoped reviewer as `main` and hides it cleanly when cleared.
+ * displays the peeked profile-scoped reviewer as `main` and hides it cleanly when cleared. When `activeProfileId` is
+ * given, an `activeTabId` belonging to another workspace is treated as absent in `activeProfileId`.
  */
 export function visibleSessionTabs(
   state: TabsState,
   peekTabId: string | null = null,
+  activeProfileId: string | null = null,
 ): { main: DesktopSessionTab | null; side: DesktopSessionTab | null } {
-  const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const rawActive = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const active = rawActive && (!activeProfileId || rawActive.workspaceProfileId === activeProfileId) ? rawActive : null
+  const findStandalone = (): DesktopSessionTab | null => (
+    peekTabId
+      ? state.tabs.find((tab) => (
+        tab.id === peekTabId
+        && Boolean(tab.tempReviewer)
+        && (!activeProfileId || tab.workspaceProfileId === activeProfileId)
+      )) ?? null
+      : null
+  )
   if (active?.tempReviewer) {
     const host = findHostForReviewer(state, active)
     if (!host) {
-      const standalone = peekTabId
-        ? state.tabs.find((tab) => tab.id === peekTabId && Boolean(tab.tempReviewer)) ?? null
-        : null
-      return { main: standalone, side: null }
+      return { main: findStandalone(), side: null }
     }
     const peek = peekTabId
       ? state.tabs.find((tab) => tab.id === peekTabId && belongsToHostTab(tab, host)) ?? null
       : null
     if (peek) return { main: host, side: peek }
-    return { main: active, side: null }
+    return { main: host, side: state.tabs.find((tab) => tab.sideParentTabId === host.id) ?? null }
   }
   const main = state.tabs.find((tab) => tab.id === active?.sideParentTabId) ?? active
   if (!main) {
-    const standalone = peekTabId
-      ? state.tabs.find((tab) => tab.id === peekTabId && Boolean(tab.tempReviewer)) ?? null
-      : null
-    return { main: standalone, side: null }
+    return { main: findStandalone(), side: null }
   }
   const peek = peekTabId
     ? state.tabs.find((tab) => tab.id === peekTabId && belongsToHostTab(tab, main)) ?? null

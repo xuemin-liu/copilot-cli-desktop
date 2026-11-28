@@ -12,6 +12,7 @@ import type { DesktopControlTabView } from '../../main/types.js'
 interface SessionWorkspaceProps {
   tabs: DesktopSessionTab[]
   activeTabId: string | null
+  activeProfileId?: string | null
   canOpenTab: boolean
   onActivate: (tabId: string) => void
   onFork: (tab: DesktopSessionTab) => void
@@ -37,6 +38,9 @@ interface SessionWorkspaceProps {
   desktopControl?: Record<string, DesktopControlTabView>
   /** Optional temporary reviewer tab being peeked in the right-hand split pane without leaving the host tab. */
   peekTabId?: string | null
+  /** Renderer-local keyboard focus when the user focuses a peeked temporary reviewer pane. */
+  focusedPeekTabId?: string | null
+  onFocusPeek?: (tabId: string | null) => void
   onClearPeek?: () => void
 }
 
@@ -47,8 +51,18 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onUseCliSettings, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {}, peekTabId = null, onClearPeek }: SessionWorkspaceProps): JSX.Element {
-  const { main, side } = visibleSessionTabs({ tabs, activeTabId }, peekTabId)
+export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, canOpenTab, onActivate, onFork, onClose, onRestart, onUseCliSettings, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {}, peekTabId = null, focusedPeekTabId = null, onFocusPeek, onClearPeek }: SessionWorkspaceProps): JSX.Element {
+  const { main, side } = visibleSessionTabs({ tabs, activeTabId }, peekTabId, activeProfileId)
+  const effectiveFocusedPeekId = focusedPeekTabId && focusedPeekTabId === peekTabId ? focusedPeekTabId : null
+  const focusedTabId = effectiveFocusedPeekId ?? activeTabId
+  const activatePane = (tab: DesktopSessionTab): void => {
+    if (tab.tempReviewer) {
+      onFocusPeek?.(tab.id)
+      return
+    }
+    if (effectiveFocusedPeekId !== null) onFocusPeek?.(null)
+    if (tab.id !== activeTabId) onActivate(tab.id)
+  }
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
   const toggleDesktopPanel = (tabId: string): void => setDesktopPanels(open => {
@@ -72,6 +86,11 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
   }, [])
   const layout = terminalLayout(available, side !== null, split)
   const showSplit = side !== null && !layout.single
+  const standaloneReviewer = Boolean(main?.tempReviewer && !side)
+  const hasTopBar = Boolean((side && layout.single) || (standaloneReviewer && toolsControl))
+  const compactActiveId = side && layout.single
+    ? (focusedTabId === side.id ? side.id : main?.id ?? null)
+    : null
   const dragging = useRef<number | null>(null)
   const updateSplit = (value: number): void => {
     const next = Math.min(75, Math.max(25, value))
@@ -81,10 +100,15 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
 
   return (
     <div ref={areaRef} className={`terminal-area${showSplit ? ' terminal-area-split' : ''}`}
-      style={{ gridTemplateColumns: showSplit ? `minmax(0, ${layout.split}fr) 6px minmax(0, ${100 - layout.split}fr)` : 'minmax(0, 1fr)', gridTemplateRows: side && layout.single ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)' }}>
+      style={{ gridTemplateColumns: showSplit ? `minmax(0, ${layout.split}fr) 6px minmax(0, ${100 - layout.split}fr)` : 'minmax(0, 1fr)', gridTemplateRows: hasTopBar ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)' }}>
       {side && layout.single && <nav className="compact-session-switch" aria-label="Visible terminal">
-        {[main, side].map(tab => tab && <button type="button" key={tab.id} aria-pressed={tab.id === activeTabId} onClick={() => onActivate(tab.id)}>{tab.sideChat ? 'Side chat: ' : ''}{tab.title}</button>)}
+        {[main, side].map(tab => tab && <button type="button" key={tab.id} aria-pressed={tab.id === compactActiveId} onClick={() => activatePane(tab)}>{tab.tempReviewer ? 'Temp reviewer: ' : tab.sideChat ? 'Side chat: ' : ''}{tab.title}</button>)}
       </nav>}
+      {standaloneReviewer && toolsControl && (
+        <div className="standalone-tools-bar" role="toolbar" aria-label="Workspace tools">
+          {toolsControl}
+        </div>
+      )}
       {!main && !side && (
         <div className="empty-state">
           <p>No sessions are open.</p>
@@ -95,31 +119,31 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
       {/* Keep every terminal under the same keyed parent. Docking, focusing,
           hiding, and closing a neighbor must not remount another xterm. */}
       {tabs.map((tab) => {
-        const visible = layout.single && side ? tab.id === activeTabId : tab.id === main?.id || tab.id === side?.id
-        const focused = tab.id === activeTabId
+        const visible = layout.single && side ? tab.id === compactActiveId : tab.id === main?.id || tab.id === side?.id
+        const focused = tab.id === focusedTabId
         const busy = tab.status === 'starting' || tab.status === 'stopping'
         return (
           <section key={tab.id} className={`session-pane${visible ? ' session-pane-visible' : ''}${focused ? ' session-pane-focused' : ''}`}
-            style={{ gridColumn: showSplit && tab.id === side?.id ? 3 : 1, gridRow: side && layout.single ? 2 : 1 }}
-            aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
-            onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
-            onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
+            style={{ gridColumn: showSplit && tab.id === side?.id ? 3 : 1, gridRow: hasTopBar ? 2 : 1 }}
+            aria-label={`${tab.tempReviewer ? 'Temporary reviewer' : tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
+            onFocusCapture={() => { if (!focused) activatePane(tab) }}
+            onPointerDown={() => { if (!focused) activatePane(tab) }}>
             <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
                 {tab.cli && <span className="session-cli-chip" title={`This tab runs ${sessionCliLabel(tab.cli)}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{sessionCliLabel(tab.cli)}</span>}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
-              {toolsControl}
-              {onToggleGit && !tab.sideChat && (
+              {!tab.tempReviewer && toolsControl}
+              {onToggleGit && !tab.sideChat && !tab.tempReviewer && (
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
-              {onOpenBrowser && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label="Open browser"
+              {onOpenBrowser && !tab.tempReviewer && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label="Open browser"
                 title="Browser" onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
-              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && (
+              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}
-              {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
+              {onPopOut && !tab.tempReviewer && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.tempReviewer ? (
                 <>
                   <span className="side-chat-badge" title={`Temporary reviewer for ${tab.tempReviewer.repository} ${tab.tempReviewer.prLabel}`}>Temp reviewer</span>
@@ -159,7 +183,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 )}
               </div>
             )}
-            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
+            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
             )}
             {/* A popped-out session shows its terminal and its stopped notice in its own window only. */}

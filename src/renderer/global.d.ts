@@ -111,6 +111,8 @@ export interface CopilotDesktopBridge {
   fanOut(profileId: string, label: string, count: number): Promise<FanOutResult>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
+  setFocusedPeekTab(tabId: string | null): Promise<void>
+  onPeekReviewerRequest(listener: (tabId: string) => void): () => void
   navigateSession(direction: SessionNavigationDirection): Promise<DesktopState>
   popOutTab(tabId: string): Promise<DesktopState>
   dockTab(tabId: string): Promise<DesktopState>

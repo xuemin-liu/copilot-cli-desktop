@@ -15,6 +15,7 @@ import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { ReviewerBar } from './components/ReviewerBar.js'
 import { regularTabCount, resolvePeekHostAndTab } from '../main/session-tab-machine.js'
+import { activeWorkspaceRegularTab, reconcilePendingSidebarPeek, resolveCloseShortcutAction, type PendingSidebarPeek } from './peek-state.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -82,20 +83,92 @@ export function App(): JSX.Element {
   const [operationError, setOperationError] = useState<string | null>(null)
   const [fanOutNotice, setFanOutNotice] = useState<string | null>(null)
   const [peekReviewerByHost, setPeekReviewerByHost] = useState<Readonly<Record<string, string | null>>>({})
+  const [focusedPeekTabId, setFocusedPeekTabId] = useState<string | null>(null)
+  const [pendingSidebarPeek, setPendingSidebarPeek] = useState<PendingSidebarPeek | null>(null)
   const openRegularTabCount = regularTabCount(state)
   const canOpenTab = canOpenSessionTab(state.resolution, openRegularTabCount, state.maxSessionTabs)
-  const { peekKey, hostTabId: peekHostTabId, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost, state.activeProfileId)
+  const { peekKey, peekTabId: activePeekTabId } = resolvePeekHostAndTab(state, peekReviewerByHost, state.activeProfileId)
+  const effectiveFocusedPeekTabId = focusedPeekTabId && focusedPeekTabId === activePeekTabId ? focusedPeekTabId : null
+  const activeWorkspaceTabId = activeWorkspaceRegularTab(state.tabs, state.activeTabId, state.activeProfileId)?.id ?? null
+  useEffect(() => {
+    if (state.windowSessionId) return
+    void window.copilotDesktop.setFocusedPeekTab(effectiveFocusedPeekTabId).catch(() => {})
+  }, [effectiveFocusedPeekTabId, state.windowSessionId])
+  useEffect(() => {
+    if (!pendingSidebarPeek) return
+    const reconciled = reconcilePendingSidebarPeek(pendingSidebarPeek, {
+      tabs: state.tabs,
+      activeProfileId: state.activeProfileId,
+      peekKey,
+    })
+    if (reconciled.attach) {
+      const { peekKey: targetKey, reviewerTabId } = reconciled.attach
+      setPeekReviewerByHost((prev) => (prev[targetKey] === reviewerTabId ? prev : { ...prev, [targetKey]: reviewerTabId }))
+      setFocusedPeekTabId(reviewerTabId)
+    }
+    if (reconciled.nextPending !== pendingSidebarPeek) {
+      setPendingSidebarPeek(reconciled.nextPending)
+    }
+  }, [pendingSidebarPeek, peekKey, state.activeProfileId, state.tabs])
   const updatePeekReviewer = useCallback((nextPeekTabId: string | null): void => {
     if (!peekKey) return
+    setPendingSidebarPeek(null)
     setPeekReviewerByHost((prev) => ({ ...prev, [peekKey]: nextPeekTabId }))
-    const activeTabObj = state.tabs.find((tab) => tab.id === state.activeTabId)
-    if (activeTabObj?.tempReviewer) {
-      const targetTabId = nextPeekTabId ?? peekHostTabId
-      if (targetTabId && targetTabId !== state.activeTabId) {
-        void window.copilotDesktop.activateTab(targetTabId).catch((error: unknown) => setOperationError(errorMessage(error)))
+    setFocusedPeekTabId(nextPeekTabId)
+  }, [peekKey])
+  const peekReviewerTab = useCallback((tabId: string): void => {
+    const reviewer = state.tabs.find((tab) => tab.id === tabId && Boolean(tab.tempReviewer))
+    if (!reviewer?.tempReviewer) return
+    const hostId = reviewer.tempReviewer.hostTabId
+    if (hostId && state.tabs.some((tab) => tab.id === hostId && !tab.tempReviewer)) {
+      setPendingSidebarPeek(null)
+      setPeekReviewerByHost((prev) => ({ ...prev, [hostId]: reviewer.id }))
+      setFocusedPeekTabId(reviewer.id)
+      const current = state.tabs.find((tab) => tab.id === state.activeTabId)
+      const alreadyOnHost = current !== undefined && !current.tempReviewer
+        && (current.id === hostId || current.sideParentTabId === hostId)
+      if (!alreadyOnHost) {
+        void window.copilotDesktop.activateTab(hostId).catch((error: unknown) => setOperationError(errorMessage(error)))
       }
+      return
     }
-  }, [peekKey, peekHostTabId, state.activeTabId, state.tabs])
+    if (reviewer.workspaceProfileId === state.activeProfileId) {
+      setPendingSidebarPeek(null)
+      const targetKey = peekKey ?? `profile:${reviewer.workspaceProfileId}`
+      setPeekReviewerByHost((prev) => ({ ...prev, [targetKey]: reviewer.id }))
+      setFocusedPeekTabId(reviewer.id)
+      return
+    }
+    setPendingSidebarPeek({ profileId: reviewer.workspaceProfileId, reviewerTabId: reviewer.id })
+    const existingRegular = state.tabs.find((tab) => !tab.tempReviewer && !tab.sideChat && tab.workspaceProfileId === reviewer.workspaceProfileId)
+    if (existingRegular) {
+      setPeekReviewerByHost((prev) => ({ ...prev, [existingRegular.id]: reviewer.id }))
+      setFocusedPeekTabId(reviewer.id)
+      void window.copilotDesktop.activateTab(existingRegular.id).catch((error: unknown) => setOperationError(errorMessage(error)))
+    } else {
+      setPeekReviewerByHost((prev) => ({ ...prev, [`profile:${reviewer.workspaceProfileId}`]: reviewer.id }))
+      setFocusedPeekTabId(reviewer.id)
+      void window.copilotDesktop.activateProfile(reviewer.workspaceProfileId).catch((error: unknown) => setOperationError(errorMessage(error)))
+    }
+  }, [peekKey, state.activeProfileId, state.activeTabId, state.tabs])
+  const peekReviewerTabRef = useRef(peekReviewerTab)
+  peekReviewerTabRef.current = peekReviewerTab
+  useEffect(() => window.copilotDesktop.onPeekReviewerRequest((tabId) => {
+    peekReviewerTabRef.current(tabId)
+  }), [])
+  const handleActivateTab = useCallback((tabId: string): void => {
+    const tab = state.tabs.find((candidate) => candidate.id === tabId)
+    if (tab?.tempReviewer) {
+      peekReviewerTab(tabId)
+      return
+    }
+    setPendingSidebarPeek(null)
+    setFocusedPeekTabId(null)
+    if (tabId !== state.activeTabId) {
+      setOperationError(null)
+      void window.copilotDesktop.activateTab(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))
+    }
+  }, [peekReviewerTab, state.activeTabId, state.tabs])
   const newSessionProfile = inputDialog?.kind === 'new-session'
     ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
     : null
@@ -341,16 +414,21 @@ export function App(): JSX.Element {
     return () => document.removeEventListener('keydown', handleKeyDown, true)
   }, [dialogOpen, dialogPending])
 
-  const sessionShortcut = (key: 'w' | 't'): void => {
+  const sessionShortcut = useCallback((key: 'w' | 't'): void => {
     if (key === 't') { if (canOpenTab) openNewSession(); return }
-    if (state.activeTabId) window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
+    const action = resolveCloseShortcutAction({ activeWorkspaceTabId, effectiveFocusedPeekTabId })
+    if (action.kind === 'hide-peek') {
+      updatePeekReviewer(null)
+      return
+    }
+    if (action.kind === 'close-tab') window.copilotDesktop.closeTab(action.tabId).catch((error: unknown) => {
       console.error('Failed to close session tab', error)
     })
-  }
+  }, [activeWorkspaceTabId, canOpenTab, effectiveFocusedPeekTabId, updatePeekReviewer])
   // The same keys as a menu accelerator, which reaches the page as a request, not a key event.
   useEffect(() => window.copilotDesktop.onTabShortcutRequest((key) => {
     if (tabShortcutOwner(document.activeElement) === 'session') sessionShortcut(key)
-  }), [canOpenTab, state.activeTabId])
+  }), [sessionShortcut])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -370,7 +448,7 @@ export function App(): JSX.Element {
       if (key === 't') {
         event.preventDefault()
         sessionShortcut('t')
-      } else if (key === 'w' && state.activeTabId) {
+      } else if (key === 'w' && (activeWorkspaceTabId || effectiveFocusedPeekTabId)) {
         event.preventDefault()
         sessionShortcut('w')
       } else if (event.key === ',') {
@@ -381,7 +459,7 @@ export function App(): JSX.Element {
     const capture = Boolean(state.windowSessionId)
     window.addEventListener('keydown', handleKeyDown, capture)
     return () => window.removeEventListener('keydown', handleKeyDown, capture)
-  }, [canOpenTab, state.activeTabId, state.windowSessionId])
+  }, [activeWorkspaceTabId, effectiveFocusedPeekTabId, sessionShortcut, state.windowSessionId])
 
   if (state.windowSessionId) {
     const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
@@ -447,6 +525,7 @@ export function App(): JSX.Element {
         installedOtherCliVersions={installedOtherCliVersions}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
+        peekTabId={activePeekTabId}
         canOpenTab={canOpenTab}
         collapsed={sidebarCollapsed}
         sessionNavigation={<nav className="session-navigation" aria-label="Session navigation">
@@ -468,12 +547,16 @@ export function App(): JSX.Element {
           })
         }}
         onSelectWorkspace={openAddWorkspace}
-        onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
+        onActivateProfile={(profileId) => {
+          setPendingSidebarPeek(null)
+          setFocusedPeekTabId(null)
+          void window.copilotDesktop.activateProfile(profileId)
+        }}
         onRemoveProfile={(profile) => {
           if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?\n\nIts project folder and files are not changed. Saved SSH connections, terminal preferences and default terminal logs for this workspace will be deleted. Logs in a custom folder are kept. Add the workspace again any time.`)) return
           handleOperation(window.copilotDesktop.removeProfile(profile.id))
         }}
-        onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
+        onActivateTab={handleActivateTab}
         onPopOutTab={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
         onRenameTab={requestTabRename}
         onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
@@ -526,8 +609,10 @@ export function App(): JSX.Element {
           />
           <ToolPanelWorkspace desktop={state} tools={tools} act={actOnTools}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}>
-          <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+          <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} activeProfileId={state.activeProfileId} canOpenTab={canOpenTab}
             peekTabId={activePeekTabId}
+            focusedPeekTabId={effectiveFocusedPeekTabId}
+            onFocusPeek={setFocusedPeekTabId}
             onClearPeek={() => updatePeekReviewer(null)}
             toolsControl={<button type="button" className="session-tools-toggle" aria-label={panelButtonLabel(projectPanel)} aria-expanded={dockOpen}
               onClick={() => {
@@ -541,7 +626,7 @@ export function App(): JSX.Element {
             desktopControlReadyTabIds={state.desktopControlReadyTabIds ?? []}
             desktopControl={state.desktopControl ?? {}}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
-            onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
+            onActivate={handleActivateTab}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
             onUseCliSettings={(tabId, keys) => handleOperation(window.copilotDesktop.useCliSettings(tabId, keys))}

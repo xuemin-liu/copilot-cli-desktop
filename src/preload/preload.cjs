@@ -138,6 +138,12 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   fanOut: (profileId, label, count) => ipcRenderer.invoke('desktop:fan-out', profileId, label, count),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
+  setFocusedPeekTab: (tabId) => ipcRenderer.invoke('desktop:focused-peek-tab', tabId ?? null),
+  onPeekReviewerRequest: (listener) => {
+    const handler = (_event, tabId) => { if (typeof tabId === 'string') listener(tabId) }
+    ipcRenderer.on('desktop:peek-reviewer-request', handler)
+    return () => ipcRenderer.removeListener('desktop:peek-reviewer-request', handler)
+  },
   navigateSession: (direction) => ipcRenderer.invoke('desktop:navigate-session', direction),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),
   dockTab: (tabId) => ipcRenderer.invoke('desktop:dock-tab', tabId),

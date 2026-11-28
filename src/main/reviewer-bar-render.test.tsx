@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { build } from 'esbuild'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReviewerBar } from '../renderer/components/ReviewerBar.js'
 import { Sidebar } from '../renderer/components/Sidebar.js'
@@ -285,4 +290,184 @@ test('Sidebar hides tempReviewer tabs from main session lists and tucks them int
   )
   const numberedButtons = collapsedHtml.match(/class="sidebar-session-title"/g) ?? []
   assert.equal(numberedButtons.length, 1, 'collapsed rail only lists the regular host tab, never hidden tempReviewer tabs')
+
+  // Sidebar highlights the peeked reviewer row via peekTabId without requiring activeTabId to move off the host:
+  const peekedSidebarHtml = renderToStaticMarkup(
+    <Sidebar
+      profiles={[PROFILE]}
+      tabs={[host, hiddenReviewer]}
+      installedCliVersion="1.0.114"
+      activeProfileId={PROFILE.id}
+      activeTabId="tab-1"
+      peekTabId="tab-2"
+      canOpenTab
+      collapsed={false}
+      onToggleCollapsed={noop}
+      onSelectWorkspace={noop}
+      onActivateProfile={noop}
+      onRemoveProfile={noop}
+      onActivateTab={noop}
+      onPopOutTab={noop}
+      onRenameTab={noop}
+      onCloseTab={noop}
+      onRestartTab={noop}
+      onUnloadTab={noop}
+      onCreateTab={noop}
+      onCreateTabWithAttachments={noop}
+      onFanOut={noop}
+      onResumePicker={noop}
+      onOpenHistory={noop}
+      onConnectRemote={noop}
+      onOpenSettings={noop}
+    />,
+  )
+  assert.equal((peekedSidebarHtml.match(/sidebar-session-active/g) ?? []).length, 2, 'host tab and peeked reviewer are both marked active in sidebar')
+})
+
+test('SessionWorkspace strips right-panel/tool/pop-out controls from tempReviewer headers, keeps standalone toolsControl outside, and forwards focusedTabId to SessionTerminal', async () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const entry = join(here, '..', 'renderer', 'components', 'SessionWorkspace.js')
+  const tempDir = await mkdtemp(join(tmpdir(), 'session-workspace-render-'))
+  try {
+    const outFile = join(tempDir, 'session-workspace.mjs')
+    await build({
+      entryPoints: [entry],
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      outfile: outFile,
+      plugins: [{
+        name: 'stub-terminal',
+        setup(pluginBuild) {
+          pluginBuild.onResolve({ filter: /^react(\/jsx-runtime)?$/ }, (args) => ({
+            path: import.meta.resolve(args.path),
+            external: true,
+          }))
+          pluginBuild.onResolve({ filter: /SessionTerminal\.js$/ }, () => ({ path: 'stub-session-terminal', namespace: 'stub' }))
+          pluginBuild.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
+            loader: 'js',
+            contents: `import { jsx } from 'react/jsx-runtime'; export function SessionTerminal({ tab, active, focused }) { return jsx('div', { 'data-terminal-for': tab.id, 'data-active': String(active), 'data-focused': String(Boolean(focused)) }); }`,
+          }))
+        },
+      }],
+    })
+    const { SessionWorkspace } = await import(pathToFileURL(outFile).href) as typeof import('../renderer/components/SessionWorkspace.js')
+    const noop = (): void => {}
+    const host = makeTab('tab-host', 'Host Session')
+    const reviewer = makeTab('tab-rev', 'Meeting J984 · Copilot CLI', {
+      tempReviewer: {
+        groupId: 'g-1',
+        hostTabId: 'tab-host',
+        seatId: 'copilot',
+        cli: 'copilot',
+        repository: 'demo-repo',
+        prLabel: 'Meeting J984',
+        prNumber: null,
+        prUrl: null,
+        meetingId: 'J984',
+      },
+    })
+
+    const hostedHtml = renderToStaticMarkup(
+      <SessionWorkspace
+        tabs={[host, reviewer]}
+        activeTabId="tab-host"
+        activeProfileId={PROFILE.id}
+        peekTabId="tab-rev"
+        focusedPeekTabId="tab-rev"
+        canOpenTab
+        toolsControl={<button type="button" className="session-tools-toggle">+ Tools</button>}
+        onActivate={noop}
+        onFork={noop}
+        onClose={noop}
+        onRestart={noop}
+        onShowLog={noop}
+        onCreate={noop}
+        onPopOut={noop}
+        onOpenBrowser={noop}
+        onToggleGit={noop}
+        desktopControlAllowed
+        onClearPeek={noop}
+      />,
+    )
+    assert.match(hostedHtml, /aria-label="Temporary reviewer: Meeting J984 · Copilot CLI"/)
+    const reviewerPane = hostedHtml.slice(hostedHtml.indexOf('aria-label="Temporary reviewer:'))
+    assert.doesNotMatch(reviewerPane, /session-tools-toggle/, 'hosted tempReviewer header omits tools toggle')
+    assert.doesNotMatch(reviewerPane, /session-git-toggle/, 'hosted tempReviewer header omits Git toggle')
+    assert.doesNotMatch(reviewerPane, /session-browser-toggle/, 'hosted tempReviewer header omits Browser toggle')
+    assert.doesNotMatch(reviewerPane, /Open in new window/, 'hosted tempReviewer header omits Pop-out')
+    assert.doesNotMatch(reviewerPane, /Desktop control/i, 'hosted tempReviewer header omits Desktop Control')
+    assert.equal((hostedHtml.match(/session-tools-toggle/g) ?? []).length, 1, 'only the host pane renders the tools toggle')
+
+    // Focused class AND SessionTerminal focused prop move to the reviewer when focusedPeekTabId is set, and return to host on Hide:
+    assert.match(hostedHtml, /session-pane session-pane-visible"[^>]*aria-label="Main session: Host Session"/)
+    assert.match(hostedHtml, /session-pane session-pane-visible session-pane-focused"[^>]*aria-label="Temporary reviewer: Meeting J984 · Copilot CLI"/)
+    assert.match(hostedHtml, /data-terminal-for="tab-host"[^>]*data-focused="false"/, 'host terminal is unfocused while reviewer is focused')
+    assert.match(hostedHtml, /data-terminal-for="tab-rev"[^>]*data-focused="true"/, 'reviewer terminal receives focused=true')
+
+    const returnedToHostHtml = renderToStaticMarkup(
+      <SessionWorkspace
+        tabs={[host, reviewer]}
+        activeTabId="tab-host"
+        activeProfileId={PROFILE.id}
+        peekTabId={null}
+        focusedPeekTabId={null}
+        canOpenTab
+        toolsControl={<button type="button" className="session-tools-toggle">+ Tools</button>}
+        onActivate={noop}
+        onFork={noop}
+        onClose={noop}
+        onRestart={noop}
+        onShowLog={noop}
+        onCreate={noop}
+        onClearPeek={noop}
+      />,
+    )
+    assert.match(returnedToHostHtml, /session-pane session-pane-visible session-pane-focused"[^>]*aria-label="Main session: Host Session"/)
+    assert.match(returnedToHostHtml, /data-terminal-for="tab-host"[^>]*data-focused="true"/, 'host terminal regains focused=true on Hide')
+
+    // Standalone peek renders workspace toolsControl outside the reviewer header in row 1, with the reviewer pane in row 2:
+    const standaloneReviewer = makeTab('tab-solo', 'Meeting J984 · Claude Code', {
+      cli: 'claude',
+      tempReviewer: {
+        groupId: 'g-2',
+        hostTabId: null,
+        seatId: 'claude',
+        cli: 'claude',
+        repository: 'demo-repo',
+        prLabel: 'Meeting J984',
+        prNumber: null,
+        prUrl: null,
+        meetingId: 'J984',
+      },
+    })
+    const standaloneHtml = renderToStaticMarkup(
+      <SessionWorkspace
+        tabs={[standaloneReviewer]}
+        activeTabId={null}
+        activeProfileId={PROFILE.id}
+        peekTabId="tab-solo"
+        focusedPeekTabId="tab-solo"
+        canOpenTab
+        toolsControl={<button type="button" className="session-tools-toggle">+ Tools</button>}
+        onActivate={noop}
+        onFork={noop}
+        onClose={noop}
+        onRestart={noop}
+        onShowLog={noop}
+        onCreate={noop}
+        onPopOut={noop}
+        onOpenBrowser={noop}
+        onToggleGit={noop}
+        onClearPeek={noop}
+      />,
+    )
+    assert.match(standaloneHtml, /class="standalone-tools-bar"[^>]*>.*session-tools-toggle/)
+    assert.match(standaloneHtml, /grid-template-rows:auto minmax\(0, 1fr\)/)
+    assert.match(standaloneHtml, /grid-row:2[^>]*aria-label="Temporary reviewer: Meeting J984 · Claude Code"/)
+    const standalonePane = standaloneHtml.slice(standaloneHtml.indexOf('aria-label="Temporary reviewer:'))
+    assert.doesNotMatch(standalonePane, /session-tools-toggle/, 'standalone reviewer header itself omits tools toggle')
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
 })

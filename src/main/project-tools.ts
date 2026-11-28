@@ -37,7 +37,7 @@ interface Options {
   userData: string
   owner(): BrowserWindow | null
   project(id: string): { name: string; path: string | null } | undefined
-  session(id: string): { workspaceProfileId: string; status: string; browserProfileId?: string; sessionCwd?: string | null; launchWorktreePath?: string; sideChat?: boolean; remote?: boolean; sessionPermissionPreset?: string | null } | undefined
+  session(id: string): { workspaceProfileId: string; status: string; browserProfileId?: string; sessionCwd?: string | null; launchWorktreePath?: string; sideChat?: boolean; remote?: boolean; tempReviewer?: unknown; sessionPermissionPreset?: string | null } | undefined
   currentSession(): string | null
   currentProject?(): string | null
   activateProject?(id: string, ownerId?: string): Promise<unknown>
@@ -161,7 +161,7 @@ export class ProjectToolService {
   private ownerFor(sessionId: string | null, profileId: string): string | undefined {
     if (!sessionId) return undefined
     const session = this.options.session(sessionId)
-    if (!session || session.sideChat || session.remote || session.workspaceProfileId !== profileId) return undefined
+    if (!session || session.sideChat || session.remote || session.tempReviewer || session.workspaceProfileId !== profileId) return undefined
     return session.browserProfileId ?? sessionId
   }
   private foreground(profileId: string): string | undefined {
@@ -829,7 +829,7 @@ export class ProjectToolService {
           this.refreshConnections()
           if (this.bridges.get(sessionId) !== bridge || !bridge.connected) throw new Error('Terminal control requires a live session in its owning project.')
           const session = this.options.session(sessionId)
-          if (session?.sideChat || session?.remote || session?.sessionPermissionPreset === 'read-only') throw new Error('Terminal control is unavailable to read-only, side-chat, or remote sessions')
+          if (session?.sideChat || session?.remote || session?.tempReviewer || session?.sessionPermissionPreset === 'read-only') throw new Error('Terminal control is unavailable to read-only, side-chat, remote, or temporary reviewer sessions')
         }, { ownerId: this.ownerFor(sessionId, profileId), sessionId }); return
       }
       if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it to use the browser.'); return }

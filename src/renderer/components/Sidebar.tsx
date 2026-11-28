@@ -109,6 +109,7 @@ export interface SidebarProps {
   installedOtherCliVersions?: Partial<Record<OtherCli, string | null>>
   activeProfileId: string | null
   activeTabId: string | null
+  peekTabId?: string | null
   canOpenTab: boolean
   collapsed: boolean
   sessionNavigation?: ReactNode
@@ -144,6 +145,7 @@ export function Sidebar({
   installedOtherCliVersions = {},
   activeProfileId,
   activeTabId,
+  peekTabId = null,
   canOpenTab,
   collapsed,
   sessionNavigation,
@@ -369,12 +371,13 @@ export function Sidebar({
     const cliLabel = tab.cli ? sessionCliLabel(tab.cli) : null
     const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${cliLabel && cliLabel !== tab.title ? ` (${cliLabel})` : ''}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
+    const isCurrent = tab.tempReviewer ? tab.id === peekTabId : tab.id === activeTabId
     return <div key={tab.id} className="sidebar-session-row">
     <button
       type="button"
-      className={`sidebar-session${compactIndex !== undefined ? ' sidebar-session-compact' : ''}${tab.id === activeTabId ? ' sidebar-session-active' : ''}`}
+      className={`sidebar-session${compactIndex !== undefined ? ' sidebar-session-compact' : ''}${isCurrent ? ' sidebar-session-active' : ''}`}
       aria-label={label}
-      aria-current={tab.id === activeTabId ? 'true' : undefined}
+      aria-current={isCurrent ? 'true' : undefined}
       title={label}
       onClick={() => onActivateTab(tab.id)}
       onDoubleClick={() => onRenameTab(tab.id, tab.title)}
@@ -397,8 +400,8 @@ export function Sidebar({
       aria-expanded={openActionsTabId === tab.id}
       onClick={() => setOpenActionsTabId((current) => current === tab.id ? null : tab.id)}>⋯</button>
     {openActionsTabId === tab.id && <div className="sidebar-session-actions" role="group" aria-label={`Actions for ${tab.title}`}>
-        <button type="button" className="icon-button" aria-label={`Open ${tab.title} in new window`} title="Open in new window"
-          onClick={() => { setOpenActionsTabId(null); onPopOutTab(tab.id) }}>↗</button>
+        {!tab.tempReviewer && <button type="button" className="icon-button" aria-label={`Open ${tab.title} in new window`} title="Open in new window"
+          onClick={() => { setOpenActionsTabId(null); onPopOutTab(tab.id) }}>↗</button>}
         {!tab.remote && !tab.tempReviewer && <button type="button" className="icon-button session-restart" disabled={busy}
           aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => { setOpenActionsTabId(null); onRestartTab(tab.id) }}>↻</button>}
         {!tab.remote && !tab.tempReviewer && tab.status !== 'dormant' && <button type="button" className="icon-button session-unload" disabled={busy}
