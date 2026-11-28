@@ -5249,36 +5249,65 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       'cleaned active profile.tabs no longer contains the legacy reviewer sessionId',
     )
 
-    // Unbound pre-beforePaste legacy crash filtering:
-    // 1) An unbound reservation whose isolated <root>/home/session-state/<uuid> exists is filtered out.
-    // 2) An unbound reservation where the crash happened even before <root>/home/session-state/<uuid> was created is
-    //    also filtered out when saved as `{ title: "Review #99", autoTitle: false, launchWorktree: false }`.
+    // Unbound pre-beforePaste legacy crash handling:
+    // 1) An unbound reservation whose isolated <root>/home/session-state/<uuid> exists has reviewer-specific evidence
+    //    and is removed on startup restore.
+    // 2) An ambiguous same-title saved tab ("Review #99" with autoTitle: false, launchWorktree: false, and no
+    //    events.jsonl yet — e.g., an ordinary New Session tab saved before its first prompt alongside an unbound PR #99
+    //    reservation) is RETAINED in the saved profile as dormant while withholding automatic launch on startup.
     // 3) A genuine user session stored in normal COPILOT_HOME/session-state/<uuid>/events.jsonl named "Review #99"
-    //    is preserved!
+    //    is preserved and still eligible for automatic startup launch!
     for (const openTab of (await h.request('desktop:get-state')).tabs) {
       await h.request('desktop:close-tab', openTab.id)
     }
     const isolatedUnboundUuid = '11111111-2222-4333-8444-555555555555'
-    const crashedBeforeSpawnUuid = '22222222-3333-4444-8555-666666666666'
+    const ambiguousSameTitleUuid = '22222222-3333-4444-8555-666666666666'
     const genuineUserUuid = '33333333-4444-4555-8666-777777777777'
     await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
     await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+
+    // First verify sole active ambiguous same-title tab without events.jsonl: retained in profile.tabs, not auto-launched!
+    profile.tabs = [
+      { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
+    ]
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    const spawnsBeforeSoleAmbiguous = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+    const afterSoleAmbiguous = await h.request('desktop:get-state')
+    assert.equal(afterSoleAmbiguous.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid), false, 'unbound isolated-home reviewer session is removed')
+    const retainedAmbiguous = afterSoleAmbiguous.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)
+    assert.ok(retainedAmbiguous, 'ambiguous same-title tab without events.jsonl is retained rather than deleted')
+    assert.equal(retainedAmbiguous?.status, 'dormant', 'ambiguous same-title tab withholds automatic startup launch')
+    assert.equal(h.spawns.length, spawnsBeforeSoleAmbiguous, 'withholding automatic launch spawns zero CLI processes')
+    const savedAfterSoleAmbiguous = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterSoleAmbiguous.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === ambiguousSameTitleUuid),
+      true,
+      'ambiguous same-title tab remains persisted in desktop.json',
+    )
+
+    // Next verify mixed restore alongside a genuine stored user session named "Review #99":
+    for (const openTab of afterSoleAmbiguous.tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
     const genuineLog = join(directory, 'session-state', genuineUserUuid, 'events.jsonl')
     await mkdir(dirname(genuineLog), { recursive: true })
     await writeFile(genuineLog, JSON.stringify({ type: 'session.start', data: { sessionId: genuineUserUuid, startTime: new Date().toISOString(), context: { cwd: repo } } }) + '\n')
 
     profile.tabs = [
-      { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
-      { title: 'Review #99', lastSessionId: crashedBeforeSpawnUuid, autoTitle: false, launchWorktree: false },
-      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false, active: true },
+      { title: 'Review #99', lastSessionId: ambiguousSameTitleUuid, autoTitle: false, launchWorktree: false, active: true },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false },
     ]
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    const spawnsBeforeMixed = h.spawns.length
     await h.restoreSaved()
     await h.flushConfig()
-    const afterUnboundRestore = await h.request('desktop:get-state')
-    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid), false, 'unbound isolated-home reviewer session is filtered out')
-    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === crashedBeforeSpawnUuid), false, 'unbound pre-spawn crashed reviewer tab is filtered out')
-    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === genuineUserUuid), true, 'genuine stored user session titled Review #99 is preserved')
+    const afterMixedRestore = await h.request('desktop:get-state')
+    assert.equal(afterMixedRestore.tabs.find((t) => t.lastSessionId === ambiguousSameTitleUuid)?.status, 'dormant', 'ambiguous tab stays dormant')
+    assert.equal(afterMixedRestore.tabs.some((t) => t.lastSessionId === genuineUserUuid), true, 'genuine stored user session titled Review #99 is preserved')
+    assert.equal(h.spawns.length - spawnsBeforeMixed, 1, 'non-ambiguous stored user session starts automatically')
     await h.sweepReviewerAreasForTest()
   } finally {
     h.setGithubApi(null)

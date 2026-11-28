@@ -7798,7 +7798,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   if (pending) return pending
   const reviewerSessionIds = collectKnownReviewerSessionIds()
   const normalSessionRoot = copilotSessionRoot(process.env)
-  const isUnboundLegacyReviewerTab = (saved: RestoredTab): boolean => (
+  const isAmbiguousUnboundReviewerTab = (saved: RestoredTab): boolean => (
     !saved.cli
     && !saved.sideChat
     && !saved.launchWorktreePath
@@ -7810,7 +7810,6 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   )
   const isLegacyReviewerTab = (saved: RestoredTab): boolean => (
     Boolean(saved.lastSessionId && reviewerSessionIds.has(saved.lastSessionId))
-    || isUnboundLegacyReviewerTab(saved)
   )
   let droppedLegacyReviewerTabs = false
   if (profile.tabs.some(isLegacyReviewerTab)) {
@@ -7852,17 +7851,27 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     // The tab that was on screen when it was saved is shown again; a config from an older release shows the last one.
     let last: string | null = null
     let shown: string | null = null
+    let nonAmbiguousLast: string | null = null
+    let nonAmbiguousShown: string | null = null
+    const ambiguousUnboundTabIds = new Set<string>()
     for (const candidate of restored) {
       // Saved tabs come back even above a limit lowered since they were opened; only new tabs follow the setting.
       if (shuttingDown() || tabsState.tabs.length >= MAX_MAX_SESSION_TABS) break
+      const ambiguous = isAmbiguousUnboundReviewerTab(candidate)
       try { last = addDormantSessionTab(profile, candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
+      if (ambiguous) {
+        ambiguousUnboundTabIds.add(last)
+      } else {
+        nonAmbiguousLast = last
+        if (candidate.active) nonAmbiguousShown = last
+      }
       if (candidate.active) shown = last
       const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(saved => saved !== candidate)
       if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
       else unrestoredProfileTabs.delete(profile.id)
     }
-    const target = shown ?? last
+    const target = nonAmbiguousShown ?? nonAmbiguousLast ?? shown ?? last
     if (activate && target) {
       tabsState = activateTab(tabsState, target)
       desktopConfig.activeProfileId = profile.id
@@ -7874,10 +7883,10 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     if (activate && target) carryStandalonePeekToHost(profile.id, target)
     refreshMenus()
     // A restore that showed its tab starts it, with its side chat on screen, and is over once they have started. One
-    // that only listed its tabs starts nothing.
+    // that only listed its tabs starts nothing. Ambiguous pre-beforePaste tabs stay dormant until the person resumes them.
     if (!activate || !target) return
     const visible = visibleSessionTabs(tabsState)
-    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [startDormantTab(id)] : []))
+    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id && !ambiguousUnboundTabIds.has(id) ? [startDormantTab(id)] : []))
   })()
   pendingProfileRestores.set(profile.id, operation)
   try {
