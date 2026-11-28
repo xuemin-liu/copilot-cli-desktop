@@ -111,6 +111,13 @@ interface Harness {
     tabId: string | null
     checkoutPath: string | null
   }>
+  setupTempReviewerForTest(options: { profileId: string; projectPath: string; commit: string; cli?: 'claude' | 'codex' }): Promise<{
+    groupId: string
+    seatId: string
+    tabId: string
+    checkoutPath: string
+  }>
+  seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null }): Promise<string>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -546,6 +553,80 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             syncTabState();
             broadcastState();
             return { meetingId: started.id, groupId: group.id, seatId: seat.id, guestSeatId: guest.id, tabId, checkoutPath: area.checkout };
+          },
+          setupTempReviewerForTest: async ({ profileId, projectPath, commit, cli = 'claude' }) => {
+            app.isReady = () => true;
+            const created = tempReviewers.createGroup({
+              hostTabId: null,
+              hostSessionId: null,
+              profileId,
+              projectPath,
+              repository: 'owner/repo',
+              prLabel: 'PR #1',
+              prNumber: 1,
+              prUrl: 'https://github.com/owner/repo/pull/1',
+              marker: DEFAULT_PR_MARKER,
+              head: commit,
+              base: commit,
+              reviewers: [{ id: cli, name: cli, label: 'Claude Code', tag: '[Claude Code]', cli, config: {} }],
+              allowAll: false,
+              origin: 'https://github.com/owner/repo.git',
+            });
+            const { group } = created;
+            group.consentGranted = true;
+            group.stage = 'active';
+            const seat = group.requiredSeats.get(cli);
+            const store = reviewReservations();
+            const runner = await meetingGitRunner();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            seat.launchId = launchId;
+            seat.area = area;
+            seat.checkedOut = commit;
+            seat.checkedOutBase = commit;
+            await store.reserve({ launchId, repository: 'owner/repo', number: 1, reviewer: 'temp:' + group.id + ':' + seat.id, project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            await prepareMeetingReviewWorktree(runner, projectPath, area, commit);
+            const tabId = 'tab-' + (nextTabSequence++);
+            const session = new PtySession({ file: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: area.checkout, env: process.env, spawnPty: spawnNodePty, discoverSessionIdFromOutput: false, monitorSessionPermissions: false, detectApprovals: false });
+            tabsState = createBackgroundTab(tabsState, {
+              id: tabId,
+              title: 'Review PR #1 · Claude Code',
+              cli,
+              workspaceProfileId: profileId,
+              sessionPermissionPreset: null,
+              sessionPermissionMode: null,
+              permissionWarning: null,
+              remote: false,
+              cliVersion: '1.0.0',
+              lastSessionId: null,
+              privateOverrides: true,
+              canFork: false,
+              launchWorktree: false,
+              autoTitle: false,
+              tempReviewer: { groupId: group.id, seatId: seat.id, hostTabId: null, cli, repository: 'owner/repo', prLabel: 'PR #1', prNumber: 1, prUrl: 'https://github.com/owner/repo/pull/1' },
+            });
+            managedTabs.set(tabId, { session });
+            seat.tabId = tabId;
+            seat.lifecycle = 'running';
+            wireSessionEvents(tabId, session);
+            await queueTabTransition(tabId, () => session.start());
+            syncTabState();
+            broadcastState();
+            return { groupId: group.id, seatId: seat.id, tabId, checkoutPath: area.checkout };
+          },
+          seedUnboundReviewReservationForTest: async ({ number, projectPath, isolatedSessionId = null }) => {
+            app.isReady = () => true;
+            const store = reviewReservations();
+            const area = planReviewerArea(reviewerAreaBase());
+            const launchId = basename(area.root);
+            await store.reserve({ launchId, repository: 'owner/repo', number, reviewer: '77', project: projectPath, root: area.root, checkout: area.checkout, ref: area.ref });
+            await makeReviewerArea(area);
+            if (isolatedSessionId) {
+              await mkdir(join(area.root, 'home', 'session-state', isolatedSessionId), { recursive: true });
+            }
+            collectKnownReviewerSessionIds();
+            return launchId;
           },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
@@ -5167,6 +5248,38 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       false,
       'cleaned active profile.tabs no longer contains the legacy reviewer sessionId',
     )
+
+    // Unbound pre-beforePaste legacy crash filtering:
+    // 1) An unbound reservation whose isolated <root>/home/session-state/<uuid> exists is filtered out.
+    // 2) An unbound reservation where the crash happened even before <root>/home/session-state/<uuid> was created is
+    //    also filtered out when saved as `{ title: "Review #99", autoTitle: false, launchWorktree: false }`.
+    // 3) A genuine user session stored in normal COPILOT_HOME/session-state/<uuid>/events.jsonl named "Review #99"
+    //    is preserved!
+    for (const openTab of (await h.request('desktop:get-state')).tabs) {
+      await h.request('desktop:close-tab', openTab.id)
+    }
+    const isolatedUnboundUuid = '11111111-2222-4333-8444-555555555555'
+    const crashedBeforeSpawnUuid = '22222222-3333-4444-8555-666666666666'
+    const genuineUserUuid = '33333333-4444-4555-8666-777777777777'
+    await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
+    await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
+    const genuineLog = join(directory, 'session-state', genuineUserUuid, 'events.jsonl')
+    await mkdir(dirname(genuineLog), { recursive: true })
+    await writeFile(genuineLog, JSON.stringify({ type: 'session.start', data: { sessionId: genuineUserUuid, startTime: new Date().toISOString(), context: { cwd: repo } } }) + '\n')
+
+    profile.tabs = [
+      { title: 'Review #98', lastSessionId: isolatedUnboundUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: crashedBeforeSpawnUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false, active: true },
+    ]
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    await h.restoreSaved()
+    await h.flushConfig()
+    const afterUnboundRestore = await h.request('desktop:get-state')
+    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === isolatedUnboundUuid), false, 'unbound isolated-home reviewer session is filtered out')
+    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === crashedBeforeSpawnUuid), false, 'unbound pre-spawn crashed reviewer tab is filtered out')
+    assert.equal(afterUnboundRestore.tabs.some((t) => t.lastSessionId === genuineUserUuid), true, 'genuine stored user session titled Review #99 is preserved')
+    await h.sweepReviewerAreasForTest()
   } finally {
     h.setGithubApi(null)
     h.setProjectOriginOverride(null)
@@ -5222,4 +5335,44 @@ test('hidden meeting reviewers link desktopTabId without tab tags, release held 
   assert.equal(existsSync(liveRun.checkoutPath!), false, 'reviewer worktree removed cleanly without race failure')
   assert.equal(h.reservationList().length, 0, 'reviewer reservation released cleanly')
   await h.request('desktop:meeting-action', liveRun.meetingId, 'stop')
+
+  // 3. Delayed tab close during Retry overlapping with Stop (both meetingReviewers and tempReviewers):
+  //    Stop must await the in-flight tab closure before removing the reviewer checkout or resolving!
+  const delayedMeetingRun = await h.setupHiddenMeetingReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  let releaseMeetingStop!: () => void
+  let meetingStopEntered = false
+  const holdMeetingStop = new Promise<void>((resolveHold) => { releaseMeetingStop = resolveHold })
+  h.blockSessionStop(delayedMeetingRun.tabId!, holdMeetingStop, () => { meetingStopEntered = true })
+  const meetingRetry = h.request('desktop:temp-reviewer-action', delayedMeetingRun.groupId, 'retry', delayedMeetingRun.seatId)
+  void meetingRetry.catch(() => {})
+  await waitFor(async () => meetingStopEntered, Boolean, 'meeting Retry entered session.stop')
+  let meetingStopDone = false
+  const meetingStop = h.request('desktop:temp-reviewer-action', delayedMeetingRun.groupId, 'stop').then((res) => { meetingStopDone = true; return res })
+  await pause(80)
+  assert.equal(meetingStopDone, false, 'meeting Stop waits for Retry in-flight tab close before resolving')
+  assert.equal(existsSync(delayedMeetingRun.checkoutPath!), true, 'meeting checkout is not removed while Retry tab close is still in flight')
+  releaseMeetingStop()
+  await Promise.allSettled([meetingRetry, meetingStop])
+  assert.equal(meetingStopDone, true)
+  assert.equal(existsSync(delayedMeetingRun.checkoutPath!), false, 'meeting checkout removed after in-flight tab close finishes')
+  await h.request('desktop:meeting-action', delayedMeetingRun.meetingId, 'stop')
+
+  const delayedTempRun = await h.setupTempReviewerForTest({ profileId: profile.id, projectPath: repo, commit: head })
+  let releaseTempStop!: () => void
+  let tempStopEntered = false
+  const holdTempStop = new Promise<void>((resolveHold) => { releaseTempStop = resolveHold })
+  h.blockSessionStop(delayedTempRun.tabId, holdTempStop, () => { tempStopEntered = true })
+  const tempRetry = h.request('desktop:temp-reviewer-action', delayedTempRun.groupId, 'retry', delayedTempRun.seatId)
+  void tempRetry.catch(() => {})
+  await waitFor(async () => tempStopEntered, Boolean, 'temp Retry entered session.stop')
+  let tempStopDone = false
+  const tempStop = h.request('desktop:temp-reviewer-action', delayedTempRun.groupId, 'stop').then((res) => { tempStopDone = true; return res })
+  await pause(80)
+  assert.equal(tempStopDone, false, 'temp Stop waits for Retry in-flight tab close before resolving')
+  assert.equal(existsSync(delayedTempRun.checkoutPath), true, 'temp checkout is not removed while Retry tab close is still in flight')
+  releaseTempStop()
+  await Promise.allSettled([tempRetry, tempStop])
+  assert.equal(tempStopDone, true)
+  assert.equal(existsSync(delayedTempRun.checkoutPath), false, 'temp checkout removed after in-flight tab close finishes')
+  assert.equal(h.reservationList().length, 0, 'all reviewer reservations released cleanly')
 }))

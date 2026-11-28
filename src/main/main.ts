@@ -23,7 +23,7 @@ import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -1024,6 +1024,7 @@ function followupViews(): FollowupGrant[] {
 /** Review loops started in this run: their worktree, policy, and exact sandboxed tab/session. A restart leaves them for the person (needs-person). */
 const reviewerTasks=new Map<string,{area:ReviewerArea;policy:ReviewerPolicy;origin:string;number:number;tabId:string;session:PtySession}>()
 const knownReviewerSessionIds=new Set<string>()
+const knownUnboundReviewerReservations=new Map<string,{project:string;number:number}>()
 function isReviewerTask(taskId:string):boolean {
   if(reviewerTasks.has(taskId))return true
   if(followups?.list().some(g=>g.taskId===taskId&&g.role==='reviewer'))return true
@@ -1036,11 +1037,19 @@ function validReviewerTask(taskId:string,tab:DesktopSessionTab|null):boolean {
 }
 function collectKnownReviewerSessionIds():Set<string> {
   const store=workflows(),reservationsList=reviewReservations()?.list()??[]
-  if(store&&reservationsList.length){
-    const tasksById=new Map(store.list().map(t=>[t.id,t]))
+  if(reservationsList.length){
+    const tasksById=store?new Map(store.list().map(t=>[t.id,t])):null
     for(const record of reservationsList){
-      const sessionId=record.taskId?tasksById.get(record.taskId)?.sessionId:undefined
+      const sessionId=record.taskId?tasksById?.get(record.taskId)?.sessionId:undefined
       if(sessionId)knownReviewerSessionIds.add(sessionId)
+      try{
+        for(const entry of readdirSync(join(record.root,'home','session-state'),{withFileTypes:true})){
+          if(entry.isDirectory()&&isValidSessionId(entry.name))knownReviewerSessionIds.add(entry.name)
+        }
+      }catch{/* Isolated Copilot home has not written session-state yet or was already removed. */}
+      if(record.taskId===null&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')&&record.project&&Number.isSafeInteger(record.number)){
+        knownUnboundReviewerReservations.set(`${resolve(record.project)}#${record.number}`,{project:record.project,number:record.number})
+      }
     }
   }
   if(followups){
@@ -4023,22 +4032,33 @@ function configuredTempReviewerTimeoutMs(): number {
   return Number.isFinite(raw) && raw >= 500 ? Math.round(raw) : DEFAULT_TEMP_REVIEWER_TIMEOUT_MS
 }
 
-async function stopAndCloseTempReviewerTabOnly(seat: TempReviewerSeat): Promise<void> {
+const tempSeatTabCloses = new Map<string, Promise<void>>()
+
+function stopAndCloseTempReviewerTabOnly(seat: TempReviewerSeat): Promise<void> {
   clearTempSeatTimer(seat)
+  const key = `${seat.groupId}:${seat.id}`
   const tabId = seat.tabId
   seat.tabId = null
-  if (!tabId) return
-  const managed = managedTabs.get(tabId)
-  if (managed?.session.lastSessionId) {
-    seat.lastSessionId = managed.session.lastSessionId
-  }
-  const pid = managed?.session.processId ?? tabsState.tabs.find((t) => t.id === tabId)?.processId ?? null
-  if (pid && pid > 1) {
-    await killProcessTree(pid).catch(() => {})
-  }
-  if (tabsState.tabs.some((tab) => tab.id === tabId)) {
-    await closeSessionTab(tabId).catch(() => {})
-  }
+  const previous = tempSeatTabCloses.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(async () => {
+    if (!tabId) return
+    const managed = managedTabs.get(tabId)
+    if (managed?.session.lastSessionId) {
+      seat.lastSessionId = managed.session.lastSessionId
+    }
+    const pid = managed?.session.processId ?? tabsState.tabs.find((t) => t.id === tabId)?.processId ?? null
+    if (pid && pid > 1) {
+      await killProcessTree(pid).catch(() => {})
+    }
+    if (tabsState.tabs.some((tab) => tab.id === tabId)) {
+      await closeSessionTab(tabId).catch(() => {})
+    }
+  })
+  tempSeatTabCloses.set(key, next)
+  void next.finally(() => {
+    if (tempSeatTabCloses.get(key) === next) tempSeatTabCloses.delete(key)
+  })
+  return next
 }
 
 async function cleanupTempReviewerAreaOnly(seat: TempReviewerSeat): Promise<void> {
@@ -5337,6 +5357,7 @@ function onMeetingReviewerJoined(guestSeatId: string): void {
 
 const meetingSeatLaunchesInFlight = new Map<string, { settled: Promise<void>; controller: AbortController }>()
 const meetingSeatAreaWork = new Map<string, Promise<unknown>>()
+const meetingSeatTabCloses = new Map<string, Promise<void>>()
 
 function meetingSeatAreaKey(seat: Pick<MeetingReviewerSeat, 'groupId' | 'id'>): string {
   return `${seat.groupId}:${seat.id}`
@@ -5359,17 +5380,26 @@ function abortMeetingSeatLaunch(seat: Pick<MeetingReviewerSeat, 'generation'>): 
   return inFlight.settled
 }
 
-async function closeMeetingReviewerSeatTabOnly(seat: MeetingReviewerSeat): Promise<void> {
+function closeMeetingReviewerSeatTabOnly(seat: MeetingReviewerSeat): Promise<void> {
+  const key = meetingSeatAreaKey(seat)
   const tabId = seat.tabId
   seat.tabId = null
-  if (!tabId) return
-  const managed = managedTabs.get(tabId)
-  // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
-  // here aborts that start, so its CLI is not launched for a seat that is already over.
-  void managed?.session.stop().catch(() => {})
-  const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
-  if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
-  if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  const previous = meetingSeatTabCloses.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(async () => {
+    if (!tabId) return
+    const managed = managedTabs.get(tabId)
+    // A session that has not spawned yet has no process to kill, and closing its tab waits behind its start. Stopping it
+    // here aborts that start, so its CLI is not launched for a seat that is already over.
+    void managed?.session.stop().catch(() => {})
+    const pid = managed?.session.processId ?? tabsState.tabs.find((tab) => tab.id === tabId)?.processId ?? null
+    if (pid && pid > 1) await killProcessTree(pid).catch(() => {})
+    if (tabsState.tabs.some((tab) => tab.id === tabId)) await closeSessionTab(tabId).catch(() => {})
+  })
+  meetingSeatTabCloses.set(key, next)
+  void next.finally(() => {
+    if (meetingSeatTabCloses.get(key) === next) meetingSeatTabCloses.delete(key)
+  })
+  return next
 }
 
 /**
@@ -5380,7 +5410,7 @@ async function closeMeetingReviewerSeatTabOnly(seat: MeetingReviewerSeat): Promi
 async function releaseMeetingReviewerSeat(
   seat: MeetingReviewerSeat,
   why: string,
-  options: { keepTab?: boolean; fromLaunchCatch?: boolean } = {},
+  options: { keepTab?: boolean; fromLaunchCatch?: boolean; fromCloseTab?: boolean } = {},
 ): Promise<void> {
   clearMeetingSeatJoinTimer(seat)
   stopMeetingCopilotWatch(seat.generation)
@@ -5397,10 +5427,14 @@ async function releaseMeetingReviewerSeat(
     void rm(guestSeatFolder(guestRoot(), guestSeatId), { recursive: true, force: true }).catch(() => {})
   }
   if (options.keepTab) return
-  await closeMeetingReviewerSeatTabOnly(seat)
-  if (pendingLaunch && !options.fromLaunchCatch) {
-    await pendingLaunch
+  if (!options.fromCloseTab) {
     await closeMeetingReviewerSeatTabOnly(seat)
+    if (pendingLaunch && !options.fromLaunchCatch) {
+      await pendingLaunch
+      await closeMeetingReviewerSeatTabOnly(seat)
+    }
+  } else if (pendingLaunch && !options.fromLaunchCatch) {
+    await pendingLaunch
   }
   await withMeetingSeatArea(seat, async () => {
     const area = seat.area
@@ -6331,7 +6365,7 @@ async function advanceGroupTempReviewers(
             return { reset, canReuseWorktree }
           })
           if (!prepared || !profile) return
-          if (seat.tabId) await stopAndCloseTempReviewerTabOnly(seat)
+          await stopAndCloseTempReviewerTabOnly(seat)
           const { reset, canReuseWorktree } = prepared
           const launchedGeneration = reset.generation
           try {
@@ -6357,6 +6391,7 @@ async function advanceGroupTempReviewers(
               // Refreshed in the seat's queue like any other handover, and only while this round still owns the seat
               // and its area; a relaunch, if needed, runs after (it takes the queue itself).
               const refreshGeneration = plannedGenerations.get(seat.id) ?? seat.generation
+              await tempSeatTabCloses.get(`${seat.groupId}:${seat.id}`)?.catch(() => {})
               const outcome = await withTempSeatArea(seat, async (): Promise<'done' | 'relaunch' | 'stale'> => {
                 // The generation too: a manual Retry moves it on and owns the seat from then.
                 const owned = (): boolean => !isStaleOrEnded() && group.requiredSeats.get(seat.id) === seat && seat.generation === refreshGeneration
@@ -7210,7 +7245,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       // The same for a meeting's hidden reviewer: its seat has no tab any more, and one that was in the meeting has left.
       const closedMeetingSeat = closing?.tempReviewer?.meetingId ? meetingReviewers.tabClosed(tabId) : null
       if (closedMeetingSeat) {
-        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.').catch(() => {})
+        await releaseMeetingReviewerSeat(closedMeetingSeat.seat, 'This reviewer\'s tab was closed.', { fromCloseTab: true }).catch(() => {})
         if (closedMeetingSeat.wasLive) settleMeetingReviewerGate(closedMeetingSeat.group)
       }
       const hostedTempGroup = tempReviewers.activeForHost(tabId)
@@ -7762,7 +7797,21 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
   const reviewerSessionIds = collectKnownReviewerSessionIds()
-  const isLegacyReviewerTab = (saved: { lastSessionId?: string | null }): boolean => Boolean(saved.lastSessionId && reviewerSessionIds.has(saved.lastSessionId))
+  const normalSessionRoot = copilotSessionRoot(process.env)
+  const isUnboundLegacyReviewerTab = (saved: RestoredTab): boolean => (
+    !saved.cli
+    && !saved.sideChat
+    && !saved.launchWorktreePath
+    && saved.launchWorktree !== true
+    && saved.autoTitle !== true
+    && saved.renamePending !== true
+    && [...knownUnboundReviewerReservations.values()].some((r) => sameRealPath(r.project, profile.path) && saved.title === `Review #${r.number}`)
+    && (!saved.lastSessionId || !existsSync(join(normalSessionRoot, saved.lastSessionId, 'events.jsonl')))
+  )
+  const isLegacyReviewerTab = (saved: RestoredTab): boolean => (
+    Boolean(saved.lastSessionId && reviewerSessionIds.has(saved.lastSessionId))
+    || isUnboundLegacyReviewerTab(saved)
+  )
   let droppedLegacyReviewerTabs = false
   if (profile.tabs.some(isLegacyReviewerTab)) {
     profile.tabs = profile.tabs.filter((saved) => !isLegacyReviewerTab(saved))
