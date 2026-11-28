@@ -115,3 +115,53 @@ test('switching to an empty workspace hides meeting controls from a retained for
   const hiddenHtml = renderToStaticMarkup(<MeetingBar meetings={[meeting]} tabs={tabs} activeTabId={inEmptyWorkspaceB} onError={() => undefined} />)
   assert.equal(hiddenHtml, '', 'foreign workspace meeting controls are hidden when active workspace has no regular tab')
 })
+
+test('a focused temporary Copilot reviewer joined to an outside-hosted meeting shows meeting controls with or without a regular tab', () => {
+  const tempReviewerInfo = {
+    groupId: '11111111-1111-4111-8111-111111111111',
+    hostTabId: null,
+    seatId: 'copilot',
+    cli: 'copilot' as const,
+    prLabel: 'Meeting K7QF',
+    prNumber: null,
+    repository: 'local',
+    prUrl: null,
+  }
+  const reviewer = tab('tab-rev', 'Meeting Reviewer', {
+    workspaceProfileId: 'ws-b',
+    tempReviewer: tempReviewerInfo,
+  })
+  const outsideJoined: MeetingView = {
+    ...meeting,
+    hostTabId: 'guest:0123456789abcdef',
+    hostTitle: 'Claude Code (guest)',
+    participants: [{ tabId: 'tab-rev', title: 'Meeting Reviewer', role: 'reviewer', replied: false }],
+    waitingFor: ['tab-rev'],
+  }
+
+  // Standalone peek in an empty workspace (no regular tab):
+  const standaloneHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[outsideJoined]} tabs={[reviewer]} activeTabId={null} focusedPeekTabId="tab-rev" onError={() => undefined} />,
+  )
+  assert.match(standaloneHtml, /Reviewer · round 1 of 6/)
+  assert.match(standaloneHtml, />Transcript</)
+  assert.match(standaloneHtml, />Stop</)
+
+  // With an unrelated regular tab open in the same workspace while the joined reviewer peek has focus:
+  const unrelated = tab('tab-other', 'Other session', { workspaceProfileId: 'ws-b' })
+  const withOtherHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[outsideJoined]} tabs={[unrelated, reviewer]} activeTabId="tab-other" focusedPeekTabId="tab-rev" onError={() => undefined} />,
+  )
+  assert.match(withOtherHtml, /Reviewer · round 1 of 6/)
+  assert.match(withOtherHtml, />Transcript</)
+  assert.match(withOtherHtml, />Stop</)
+
+  // Peeking an unrelated PR reviewer while the active regular tab hosts a meeting keeps the host's meeting bar visible:
+  const host = tab('tab-host', 'host', { workspaceProfileId: 'ws-a' })
+  const prReviewer = tab('tab-pr-rev', 'PR Reviewer', { workspaceProfileId: 'ws-a', tempReviewer: tempReviewerInfo })
+  const hostWithPrPeekHtml = renderToStaticMarkup(
+    <MeetingBar meetings={[meeting]} tabs={[host, prReviewer]} activeTabId="tab-host" focusedPeekTabId="tab-pr-rev" onError={() => undefined} />,
+  )
+  assert.match(hostWithPrPeekHtml, /Host · round 1 of 6/)
+  assert.doesNotMatch(hostWithPrPeekHtml, /<option value="tab-pr-rev">/, 'tempReviewer tabs are not offered in Add session')
+})

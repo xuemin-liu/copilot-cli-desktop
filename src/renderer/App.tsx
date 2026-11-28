@@ -549,7 +549,7 @@ export function App(): JSX.Element {
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
-          <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={activeWorkspaceTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} toolsFallback={state.meetingToolsFallback === true} />
+          <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={activeWorkspaceTabId} focusedPeekTabId={effectiveFocusedPeekTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} toolsFallback={state.meetingToolsFallback === true} />
           <ReviewerBar
             groups={state.tempReviewerGroups ?? []}
             activeTabId={peekHostTabId}
