@@ -19,7 +19,7 @@ import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, set
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { resolveConfigRecovery } from './config-recovery.js'
+import { resolveConfigRecovery, type ConfigRecoveryOutcome } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
@@ -8304,6 +8304,43 @@ async function saveSettingsAtStartup(migrated: boolean): Promise<boolean> {
   }
 }
 
+async function loadDesktopConfigWithRecovery(
+  onMigrated?: (message: string) => void,
+  betweenReadAndRecovery?: () => Promise<void>,
+): Promise<{ migrated: boolean; recovery: ConfigRecoveryOutcome }> {
+  const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
+  const markerExistedBeforeRead = await stat(recoveryMarker).then(
+    () => true,
+    (error) => (error as NodeJS.ErrnoException).code !== 'ENOENT',
+  )
+  let migrated = false
+  let unparseable = false
+  let loaded = await readDesktopConfig(configPath(), (message) => {
+    migrated = true
+    onMigrated?.(message)
+  }, () => { unparseable = true })
+  if (betweenReadAndRecovery) await betweenReadAndRecovery()
+  let recovery = await resolveConfigRecovery(configPath(), recoveryMarker, unparseable)
+  // If a recovery hold existed before readDesktopConfig and just lifted because the backup was restored or removed
+  // before or during readDesktopConfig, re-read desktop.json so the restored tabs (not the stale fallback) are sanitized
+  // and saved before sweepReviewerAreas or pruneBrowserProfiles runs.
+  if (!unparseable && markerExistedBeforeRead && !recovery.hold && !recovery.writesBlocked) {
+    migrated = false
+    unparseable = false
+    loaded = await readDesktopConfig(configPath(), (message) => {
+      migrated = true
+      onMigrated?.(message)
+    }, () => { unparseable = true })
+    if (unparseable) {
+      recovery = await resolveConfigRecovery(configPath(), recoveryMarker, true)
+    }
+  }
+  desktopConfig = loaded
+  configRecoveryHold = Boolean(recovery.hold)
+  configWritesBlocked = recovery.writesBlocked
+  return { migrated, recovery }
+}
+
 const COPILOT_MAINTENANCE_BLOCKS_SESSIONS = 'Copilot CLI is being installed or updated. Start the session when that has finished.'
 /**
  * True only while the install or update command itself runs. The maintenance operation goes on after it, to find the new
@@ -10527,11 +10564,7 @@ if (!app.requestSingleInstanceLock()) {
         if (settingsWindow && !settingsWindow.isDestroyed() && isLauncherShellUrl(settingsWindow.webContents.getURL(), settingsUrl())) settingsWindow.webContents.send('desktop-settings:migration-progress', progress)
       },
       reloaded: async () => {
-        let reloadUnparseable = false
-        desktopConfig = await readDesktopConfig(configPath(), undefined, () => { reloadUnparseable = true })
-        const reloadRecovery = await resolveConfigRecovery(configPath(), join(app.getPath('userData'), 'config-recovery.json'), reloadUnparseable)
-        configRecoveryHold = Boolean(reloadRecovery.hold)
-        configWritesBlocked = reloadRecovery.writesBlocked
+        await loadDesktopConfigWithRecovery((message) => void writeAppLog(message))
         if (sanitizeLegacyReviewerTabsInConfig(desktopConfig)) {
           legacyTabSanitizationUnflushed = true
           await persistConfig().catch(() => {})
@@ -10548,19 +10581,12 @@ if (!app.requestSingleInstanceLock()) {
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
-    let desktopConfigMigrated = false
-    let desktopConfigUnparseable = false
-    desktopConfig = await readDesktopConfig(configPath(), (message) => {
-      desktopConfigMigrated = true
-      void writeAppLog(message)
-    }, () => { desktopConfigUnparseable = true })
-    const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
     // Never replace the unreadable file unless an independent, verified backup exists, and keep
     // browser data (referenced only by that file) until the backup is restored or deleted.
-    const configRecovery = await resolveConfigRecovery(configPath(), recoveryMarker, desktopConfigUnparseable)
+    const { migrated: desktopConfigMigrated, recovery: configRecovery } = await loadDesktopConfigWithRecovery(
+      (message) => void writeAppLog(message),
+    )
     const recoveryHold = configRecovery.hold
-    configRecoveryHold = Boolean(recoveryHold)
-    configWritesBlocked = configRecovery.writesBlocked
     if (configRecovery.newlyPreserved && recoveryHold) {
       void writeAppLog(`desktop.json could not be parsed; defaults are in use. The original was kept at ${recoveryHold}`)
       showNotification(

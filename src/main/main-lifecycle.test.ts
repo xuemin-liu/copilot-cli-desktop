@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean }): Promise<{ hold: string | null; writesBlocked: boolean }>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -656,12 +656,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             if (options.earlySweepBeforeConfigRead) {
               await sweepReviewerAreas();
             }
-            let migrated = false;
-            let unparseable = false;
-            desktopConfig = await readDesktopConfig(configPath(), () => { migrated = true; }, () => { unparseable = true; });
-            const recovery = await resolveConfigRecovery(configPath(), join(app.getPath('userData'), 'config-recovery.json'), unparseable);
-            configRecoveryHold = Boolean(recovery.hold);
-            configWritesBlocked = recovery.writesBlocked;
+            const { migrated, recovery } = await loadDesktopConfigWithRecovery(undefined, options.betweenReadAndRecovery);
             const sanitized = sanitizeLegacyReviewerTabsInConfig(desktopConfig);
             if (sanitized) legacyTabSanitizationUnflushed = true;
             syncWorkspaceState();
@@ -5171,10 +5166,20 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     return [[]]
   })
 
+  const waitSlow = async <T>(probe: () => Promise<T>, accept: (value: T) => boolean, label: string): Promise<T> => {
+    const deadline = Date.now() + 30_000
+    for (;;) {
+      const value = await probe()
+      if (accept(value)) return value
+      if (Date.now() >= deadline) assert.fail(`Timed out waiting for ${label}`)
+      await pause(40)
+    }
+  }
+
   try {
     const reviewPromise = h.startPrReviewForTest('https://github.com/owner/repo/pull/42', profile.id)
     void reviewPromise.catch(() => {})
-    await waitFor(async () => h.spawns.length, (n) => n === 2, 'sandboxed PR review spawns CLI')
+    await waitSlow(async () => h.spawns.length, (n) => n === 2, 'sandboxed PR review spawns CLI')
     const revSpawn = h.spawns[1]!
     const midState = await h.request('desktop:get-state')
     const revTab = midState.tabs.find((t) => t.id !== hostTabId)!
@@ -5252,7 +5257,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(followups.authorized(revGrant), false, 'reviewer grant is no longer authorized after tab close')
 
     // Wait for sweepReviewerAreas triggered by closeSessionTab to remove the reviewer checkout and release the reservation:
-    await waitFor(async () => h.reservationList().length, (n) => n === 0, 'sweepReviewerAreas releases closed reviewer reservation')
+    await waitSlow(async () => h.reservationList().length, (n) => n === 0, 'sweepReviewerAreas releases closed reviewer reservation')
     assert.equal(existsSync(reviewerCheckoutPath), false, 'closed reviewer worktree directory is removed')
 
     // Provenance guard after tab close: even if a regular tab reuses reviewSessionId in the reviewer checkout path,
@@ -5336,9 +5341,8 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     await h.seedUnboundReviewReservationForTest({ number: 98, projectPath: repo, isolatedSessionId: isolatedUnboundUuid })
     await h.seedUnboundReviewReservationForTest({ number: 99, projectPath: repo, isolatedSessionId: null })
 
-    // Simulate a corrupt desktop.json launch WITH an early periodic sweep before readDesktopConfig:
-    // resolveConfigRecovery preserves the corrupt config (hold !== null, writesBlocked === false) and saves defaults,
-    // while both the early pre-read sweep and post-save sweep keep all 3 reviewer reservations intact!
+    // First verify mid-run sweep gap: if backup is restored & removed while Desktop is still running,
+    // periodic sweep still holds reservations until startup/reload reads and saves the sanitized config.
     const validRawConfig = await readFile(join(directory, 'desktop.json'), 'utf8')
     await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail>>>')
     await h.resetRuntimeForColdStartForTest()
@@ -5348,27 +5352,60 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(recoveryOnCorruptLaunch.writesBlocked, false, 'settings writes are allowed while recovery hold is active')
     assert.equal(h.reservationList().length, 3, 'early pre-read sweep and recovery-hold launch both preserve all reviewer reservations')
 
-    // User repairs the preserved backup and restores it to desktop.json (removing the preserved backup file) while
-    // Desktop is still running; a periodic sweep during that gap must still preserve all 3 reservations until a startup
-    // or explicit reload actually reads and saves the sanitized config!
+    // Re-create the active recovery-hold state (fallback desktop.json with current lastRunVersion + backup file + marker)
+    // and test TWO recovery paths:
+    // Path A: Mid-run sweep after backup removal holds reservations until restart.
+    const fallbackSavedOnCorruptLaunch = await readFile(join(directory, 'desktop.json'), 'utf8')
     await writeFile(join(directory, 'desktop.json'), validRawConfig)
     await rm(recoveryOnCorruptLaunch.hold!, { force: true })
     await h.sweepReviewerAreasForTest()
     assert.equal(h.reservationList().length, 3, 'mid-run sweep after backup removal still holds reservations until config is reloaded')
 
-    // Simulate Launch 0 where saveSettingsAtStartup fails (ENOSPC) and Copilot CLI is unresolved:
+    // Path B: Overlap during startup itself — fallback desktop.json (already recording current app version!) is read first,
+    // then between readDesktopConfig and resolveConfigRecovery the user replaces desktop.json with the repaired config
+    // (also recording current app version, so saveSettingsAtStartup would skip writing if not re-read & sanitized!) and
+    // removes the backup:
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-2>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch2 = await h.runStartupConfigAndSweepForTest()
+    assert.ok(recoveryOnCorruptLaunch2.hold, 'second corrupt launch established recovery hold with current-version fallback desktop.json')
+    const repairedSameVersionRaw = JSON.stringify({
+      ...JSON.parse(fallbackSavedOnCorruptLaunch),
+      profiles: [profile],
+      activeProfileId: profile.id,
+    }, null, 2) + '\n'
+
+    // Simulate Launch 0 where restoration happens BETWEEN readDesktopConfig and resolveConfigRecovery, AND save fails (ENOSPC):
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()
-    await h.runStartupConfigAndSweepForTest({ failSave: true })
-    assert.equal(h.reservationList().length, 3, 'failed startup settings write keeps both task-bound and unbound reviewer reservations on disk')
+    await h.runStartupConfigAndSweepForTest({
+      failSave: true,
+      betweenReadAndRecovery: async () => {
+        await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
+        await rm(recoveryOnCorruptLaunch2.hold!, { force: true })
+      },
+    })
+    assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
 
-    // Simulate Launch 1 where Copilot CLI is still unresolved (restoreSaved does nothing), and settings write succeeds:
+    // Also re-stage recovery hold and test mid-startup overlap where settings write SUCCEEDS on unresolved Launch 1:
+    await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-3>>>')
+    await h.resetRuntimeForColdStartForTest()
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest()
+    assert.ok(recoveryOnCorruptLaunch3.hold)
+
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()
     const spawnsBeforeUnresolvedLaunch = h.spawns.length
-    await h.runStartupConfigAndSweepForTest()
+    await h.runStartupConfigAndSweepForTest({
+      betweenReadAndRecovery: async () => {
+        await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
+        await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
+      },
+    })
     await h.restoreSaved()
     await h.flushConfig()
     assert.equal(h.spawns.length, spawnsBeforeUnresolvedLaunch, 'unresolved Launch 1 spawns zero CLI processes')
