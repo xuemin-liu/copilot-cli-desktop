@@ -5389,28 +5389,42 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     })
     assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
 
-    // Also re-stage recovery hold and test mid-startup overlap where settings write SUCCEEDS on unresolved Launch 1:
+    // Also re-stage recovery hold and test mid-startup overlap starting from incomplete/malformed JSON
+    // (simulating an in-progress restore during the first read that completes before resolveConfigRecovery)
+    // where settings write SUCCEEDS on unresolved Launch 1:
     await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-3>>>')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest()
     assert.ok(recoveryOnCorruptLaunch3.hold)
 
+    await writeFile(join(directory, 'desktop.json'), '{\n  "profiles": [\n    { "path": "incomplete')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()
     const spawnsBeforeUnresolvedLaunch = h.spawns.length
-    await h.runStartupConfigAndSweepForTest({
+    const recoveryAfterCompletedRestore = await h.runStartupConfigAndSweepForTest({
       betweenReadAndRecovery: async () => {
         await writeFile(join(directory, 'desktop.json'), repairedSameVersionRaw)
         await rm(recoveryOnCorruptLaunch3.hold!, { force: true })
       },
     })
+    assert.deepEqual(
+      recoveryAfterCompletedRestore,
+      { hold: null, writesBlocked: false, newlyPreserved: false },
+      'completed restore is not moved into a new .corrupt backup',
+    )
+    assert.deepEqual(
+      (await readdir(directory)).filter((name) => name.includes('.corrupt-')),
+      [],
+      'no .corrupt backup files remain after completed restore',
+    )
     await h.restoreSaved()
     await h.flushConfig()
     assert.equal(h.spawns.length, spawnsBeforeUnresolvedLaunch, 'unresolved Launch 1 spawns zero CLI processes')
     assert.equal(h.reservationList().length, 0, 'Launch 1 sweep released reservations after settings write succeeded')
     const savedAfterUnresolvedLaunch = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(savedAfterUnresolvedLaunch.activeProfileId, profile.id, 'restored activeProfileId was loaded instead of defaults')
     assert.equal(
       savedAfterUnresolvedLaunch.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === boundNoFollowupUuid),
       false,

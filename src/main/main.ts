@@ -62,7 +62,7 @@ import {
   isCloseBehavior,
   preferenceRollback,
   queueConfigWrite,
-  readDesktopConfig,
+  readDesktopConfigSnapshot,
   removeWorkspaceProfile,
   restoreWorkspaceProfile,
   recordDesktopVersion,
@@ -8308,37 +8308,41 @@ async function loadDesktopConfigWithRecovery(
   onMigrated?: (message: string) => void,
   betweenReadAndRecovery?: () => Promise<void>,
 ): Promise<{ migrated: boolean; recovery: ConfigRecoveryOutcome }> {
+  const file = configPath()
   const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
   const markerExistedBeforeRead = await stat(recoveryMarker).then(
     () => true,
     (error) => (error as NodeJS.ErrnoException).code !== 'ENOENT',
   )
-  let migrated = false
-  let unparseable = false
-  let loaded = await readDesktopConfig(configPath(), (message) => {
-    migrated = true
-    onMigrated?.(message)
-  }, () => { unparseable = true })
+  let snapshot = await readDesktopConfigSnapshot(file)
   if (betweenReadAndRecovery) await betweenReadAndRecovery()
-  let recovery = await resolveConfigRecovery(configPath(), recoveryMarker, unparseable)
-  // If a recovery hold existed before readDesktopConfig and just lifted because the backup was restored or removed
-  // before or during readDesktopConfig, re-read desktop.json so the restored tabs (not the stale fallback) are sanitized
-  // and saved before sweepReviewerAreas or pruneBrowserProfiles runs.
-  if (!unparseable && markerExistedBeforeRead && !recovery.hold && !recovery.writesBlocked) {
-    migrated = false
-    unparseable = false
-    loaded = await readDesktopConfig(configPath(), (message) => {
-      migrated = true
-      onMigrated?.(message)
-    }, () => { unparseable = true })
-    if (unparseable) {
-      recovery = await resolveConfigRecovery(configPath(), recoveryMarker, true)
+  let recovery = await resolveConfigRecovery(file, recoveryMarker, snapshot.unparseable)
+  // Re-read desktop.json whenever the file changed (for example, a backup restore completed after an initial
+  // partial/malformed or fallback read) or a pre-existing recovery hold lifted without preserving or blocking.
+  for (let attempt = 0; attempt < 3 && !recovery.newlyPreserved && !recovery.writesBlocked; attempt++) {
+    const latest = await readDesktopConfigSnapshot(file)
+    if (latest.raw === snapshot.raw && !snapshot.unparseable && !(markerExistedBeforeRead && !recovery.hold)) {
+      break
+    }
+    snapshot = latest
+    if (!snapshot.unparseable) {
+      break
+    }
+    recovery = await resolveConfigRecovery(file, recoveryMarker, true)
+  }
+  if (snapshot.unparseable && !recovery.newlyPreserved && !recovery.writesBlocked) {
+    const finalSnapshot = await readDesktopConfigSnapshot(file)
+    if (!finalSnapshot.unparseable) {
+      snapshot = finalSnapshot
+    } else {
+      recovery = { ...recovery, writesBlocked: true }
     }
   }
-  desktopConfig = loaded
+  for (const message of snapshot.migrations) onMigrated?.(message)
+  desktopConfig = snapshot.config
   configRecoveryHold = Boolean(recovery.hold)
   configWritesBlocked = recovery.writesBlocked
-  return { migrated, recovery }
+  return { migrated: snapshot.migrations.length > 0, recovery }
 }
 
 const COPILOT_MAINTENANCE_BLOCKS_SESSIONS = 'Copilot CLI is being installed or updated. Start the session when that has finished.'

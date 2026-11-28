@@ -333,23 +333,47 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
   return tabs
 }
 
+export interface DesktopConfigReadSnapshot {
+  raw: string | null
+  config: DesktopConfig
+  migrations: string[]
+  unparseable: boolean
+}
+
+export async function readDesktopConfigSnapshot(filename: string): Promise<DesktopConfigReadSnapshot> {
+  const migrations: string[] = []
+  let raw: string | null = null
+  try {
+    raw = await readFile(filename, 'utf8')
+  } catch (error) {
+    if (!isMissingPath(error)) throw error
+    return { raw: null, config: normalizeDesktopConfig(null), migrations, unparseable: false }
+  }
+  let parsed: unknown
+  try {
+    // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as unknown
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+    return { raw, config: normalizeDesktopConfig(null), migrations, unparseable: true }
+  }
+  return {
+    raw,
+    config: normalizeDesktopConfig(parsed, (message) => { migrations.push(message) }),
+    migrations,
+    unparseable: false,
+  }
+}
+
 export async function readDesktopConfig(
   filename: string,
   reportMigration?: (message: string) => void,
   reportUnparseable?: () => void,
 ): Promise<DesktopConfig> {
-  let parsed: unknown
-  try {
-    // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
-    parsed = JSON.parse((await readFile(filename, 'utf8')).replace(/^﻿/, '')) as unknown
-  } catch (error) {
-    if (!isMissingPath(error) && !(error instanceof SyntaxError)) throw error
-    // Distinguish "no config yet" from "config exists but is unreadable" so
-    // callers do not treat the empty default as the user's real state.
-    if (error instanceof SyntaxError) reportUnparseable?.()
-    return normalizeDesktopConfig(null)
-  }
-  return normalizeDesktopConfig(parsed, reportMigration)
+  const snapshot = await readDesktopConfigSnapshot(filename)
+  if (snapshot.unparseable) reportUnparseable?.()
+  for (const message of snapshot.migrations) reportMigration?.(message)
+  return snapshot.config
 }
 
 /** Shared, side-effect-free normalization for startup and migration previews. */

@@ -69,6 +69,43 @@ export interface ConfigRecoveryOutcome {
   newlyPreserved: boolean
 }
 
+async function isConfigUnparseableOnDisk(configPath: string): Promise<boolean> {
+  try {
+    JSON.parse((await readFile(configPath, 'utf8')).replace(/^\uFEFF/, ''))
+    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    if (error instanceof SyntaxError) return true
+    return true
+  }
+}
+
+async function readExistingHoldPath(markerPath: string, statPath: typeof stat = stat): Promise<string | null> {
+  let preserved: unknown
+  try {
+    preserved = (JSON.parse(await readFile(markerPath, 'utf8')) as { preserved?: unknown }).preserved
+  } catch {
+    return null
+  }
+  if (typeof preserved !== 'string') return null
+  try {
+    await statPath(preserved)
+    return preserved
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : preserved
+  }
+}
+
+async function nextCorruptBackupPath(configPath: string, statPath: typeof stat = stat): Promise<string> {
+  const base = `${configPath}.corrupt-${Date.now()}`
+  let candidate = base
+  for (let suffix = 1; ; suffix++) {
+    const exists = await statPath(candidate).then(() => true, (error) => (error as NodeJS.ErrnoException).code !== 'ENOENT')
+    if (!exists) return candidate
+    candidate = `${base}-${suffix}`
+  }
+}
+
 /** Startup decision: protect the unreadable config and the data only it references, across restarts. */
 export async function resolveConfigRecovery(
   configPath: string,
@@ -76,12 +113,16 @@ export async function resolveConfigRecovery(
   unparseable: boolean,
   operations: RecoveryOperations = {},
 ): Promise<ConfigRecoveryOutcome> {
+  if (unparseable) {
+    unparseable = await isConfigUnparseableOnDisk(configPath)
+  }
   if (!unparseable) {
     return { hold: await activeConfigRecovery(markerPath, operations.stat), writesBlocked: false, newlyPreserved: false }
   }
+  const previousHold = await readExistingHoldPath(markerPath, operations.stat)
   // Publish the hold BEFORE touching the original. If the marker cannot be written the original stays
   // in place untouched; if we are interrupted after the move, the marker already names the backup.
-  const target = `${configPath}.corrupt-${Date.now()}`
+  const target = await nextCorruptBackupPath(configPath, operations.stat)
   const held = await beginConfigRecovery(markerPath, target).then(() => true, () => false)
   if (held) {
     const preserved = await preserveUnreadableFile(
@@ -90,8 +131,12 @@ export async function resolveConfigRecovery(
       target,
     )
     if (preserved) return { hold: preserved, writesBlocked: false, newlyPreserved: true }
-    // Nothing was preserved: the original is intact, so the hold has nothing to protect.
+    // Nothing was preserved: the original is intact, so restore any prior backup hold or remove the new marker.
+    if (previousHold) {
+      await beginConfigRecovery(markerPath, previousHold).catch(() => undefined)
+      return { hold: previousHold, writesBlocked: true, newlyPreserved: false }
+    }
     await rm(markerPath, { force: true }).catch(() => undefined)
   }
-  return { hold: null, writesBlocked: true, newlyPreserved: false }
+  return { hold: previousHold, writesBlocked: true, newlyPreserved: false }
 }

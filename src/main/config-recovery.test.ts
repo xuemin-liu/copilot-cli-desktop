@@ -159,3 +159,44 @@ test('a non-ENOENT stat error keeps the hold and the marker', async () => {
     await assert.rejects(() => stat(marker))
   })
 })
+
+test('resolveConfigRecovery revalidates desktop.json before moving a completed restore aside', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ "profiles": [')
+    const first = await resolveConfigRecovery(file, marker, true)
+    assert.ok(first.hold)
+
+    // Simulate an initial read seeing incomplete JSON while the user restores desktop.json:
+    await writeFile(file, '{ "closeBehavior": ')
+    let unparseable = false
+    await readDesktopConfig(file, undefined, () => { unparseable = true })
+    assert.equal(unparseable, true)
+
+    // Before resolveConfigRecovery runs, the restore completes with valid JSON and removes the backup:
+    const restoredRaw = '{\n  "closeBehavior": "quit"\n}\n'
+    await writeFile(file, restoredRaw)
+    await rm(first.hold!)
+
+    const outcome = await resolveConfigRecovery(file, marker, unparseable)
+    assert.deepEqual(outcome, { hold: null, writesBlocked: false, newlyPreserved: false })
+    assert.equal(await readFile(file, 'utf8'), restoredRaw)
+    assert.deepEqual(await readdir(dir), ['desktop.json'])
+  })
+})
+
+test('resolveConfigRecovery preserves an existing backup hold when a new unreadable file cannot be backed up', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ bad-1')
+    const first = await resolveConfigRecovery(file, marker, true)
+    assert.ok(first.hold)
+
+    await writeFile(file, '{ bad-2')
+    const second = await resolveConfigRecovery(file, marker, true, { rename: lockedRename, copyFile: lockedCopy })
+    assert.deepEqual(second, { hold: first.hold, writesBlocked: true, newlyPreserved: false })
+    assert.equal(await activeConfigRecovery(marker), first.hold)
+  })
+})
