@@ -50,7 +50,14 @@ async function main() {
     itemType,
   })
 
+  // Desktop answers once it has checked the receipt on the PR host, which can wait behind other reviewers' checks. If
+  // it does not answer in time, stop: Desktop keeps checking, and sending the same receipt again gets that result.
+  // COPILOT_DESKTOP_SEAT_RECEIPT_TIMEOUT_MS shortens the wait for tests.
+  const timeoutMs = Number(process.env.COPILOT_DESKTOP_SEAT_RECEIPT_TIMEOUT_MS) > 0 ? Number(process.env.COPILOT_DESKTOP_SEAT_RECEIPT_TIMEOUT_MS) : 120_000
   const answer = await new Promise((resolveReq, rejectReq) => {
+    const settle = (finish) => (value) => { clearTimeout(deadline); finish(value) }
+    const resolveOnce = settle(resolveReq)
+    const rejectOnce = settle(rejectReq)
     const req = request(
       {
         host: '127.0.0.1',
@@ -61,15 +68,19 @@ async function main() {
           'content-type': 'application/json; charset=utf-8',
           'content-length': Buffer.byteLength(payload),
         },
-        timeout: 15_000,
       },
       (res) => {
         const chunks = []
         res.on('data', (c) => chunks.push(c))
-        res.on('end', () => resolveReq({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }))
+        res.on('error', rejectOnce)
+        res.on('end', () => resolveOnce({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }))
       },
     )
-    req.on('error', rejectReq)
+    const deadline = setTimeout(() => {
+      rejectOnce(new Error(`Copilot CLI Desktop did not answer within ${Math.ceil(timeoutMs / 1000)} seconds. It may still be checking the receipt: run the same command again to get the result.`))
+      req.destroy()
+    }, timeoutMs)
+    req.on('error', rejectOnce)
     req.end(payload)
   })
 

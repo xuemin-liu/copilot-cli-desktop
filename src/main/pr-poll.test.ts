@@ -914,6 +914,28 @@ test('pr-seat-receipt.mjs posts seat-scoped token + metadata to loopback /pr-sea
   }
 })
 
+test('pr-seat-receipt.mjs stops at its deadline when the desktop never answers, and says to send the receipt again', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'seat-receipt-stall-'))
+  const stalled = new Set<import('node:http').ServerResponse>()
+  const receiptServer = createServer((req, res) => { req.resume(); stalled.add(res) })
+  const port = await listenServer(receiptServer)
+  try {
+    const cfgPath = join(dir, 'seat-receipt.json')
+    writeFileSync(cfgPath, JSON.stringify({ port, seatToken: 'b'.repeat(64), groupId: 'grp-1', seatId: 'seat-1', cli: 'codex', generation: 'gen-1', round: 1, head: HEAD_1, base: BASE_1 }))
+    const started = Date.now()
+    const res = await runNodeScript(PR_RECEIPT, ['--kind', 'findings', '--id', '42', '--kind-type', 'review'], {
+      env: { COPILOT_DESKTOP_SEAT_RECEIPT: cfgPath, COPILOT_DESKTOP_SEAT_RECEIPT_TIMEOUT_MS: '1500' },
+    })
+    assert.equal(res.code, 1, res.stdout)
+    assert.match(res.stderr, /did not answer within 2 seconds\. It may still be checking the receipt: run the same command again/)
+    assert.ok(Date.now() - started < 10_000, 'the helper exits at its deadline instead of waiting forever')
+  } finally {
+    for (const res of stalled) res.destroy()
+    await closeServer(receiptServer)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('pr-forge-evidence + pr-forge.mjs handle strict approval matching, untagged chatter, round acknowledgements, SSH custom ports, and unknown-host probing', async () => {
   const { evaluateRevisionApprovals, forgePaginateArray, resolveForgeEndpoint } = (await import(
     pathToFileURL(join(TOOLS_DIR, 'pr-forge.mjs')).href

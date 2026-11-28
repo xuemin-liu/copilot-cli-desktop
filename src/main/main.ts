@@ -175,6 +175,7 @@ import {
   parseAnyPullRequestInput,
   prReviewAndFixRequest,
   reconcileSeatWithEvidenceLoader,
+  submitSeatReceipt,
   recoverSweptReviewerCredentials,
   repositoryLabelFromOrigin,
   resolveCopilotReviewerPreset,
@@ -4046,17 +4047,10 @@ async function handleTempSeatReceipt(payload: Record<string, unknown>): Promise<
     return { ok: false, message: 'Stale seat receipt for an earlier round or revision.' }
   }
   const receipt = { kind, remoteId, ...(itemType ? { itemType } : {}) } as const
-  if (seat.lifecycle !== 'starting' && seat.lifecycle !== 'running') {
-    return { ok: false, message: 'This reviewer already has a result for the current round.' }
-  }
-  if (seat.submittedReceipt) return { ok: false, message: 'A receipt is already being checked for this reviewer.' }
-  seat.submittedReceipt = receipt
-  const result = await reconcileTempReviewerSeatEvidence(group, seat, 'receipt', {
+  return submitSeatReceipt(seat, receipt, () => reconcileTempReviewerSeatEvidence(group, seat, 'receipt', {
     expectedRound: round,
     expectedGeneration: generation,
-  })
-  if (!result.ok && seat.submittedReceipt === receipt) seat.submittedReceipt = null
-  return result
+  }))
 }
 
 let interactiveSeatReconciler: NodeJS.Timeout | null = null
