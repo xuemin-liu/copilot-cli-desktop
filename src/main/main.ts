@@ -1902,9 +1902,20 @@ async function copilotSessionStored(sessionId: string): Promise<boolean> {
   try { await access(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl')); return true } catch { return false }
 }
 
+/** Whether Copilot has any session to resume: with none, `--continue` and the picker open a new conversation. */
+async function anyCopilotSessionStored(): Promise<boolean> {
+  const root = copilotSessionRoot(process.env)
+  let entries: string[]
+  try { entries = await readdir(root) } catch { return false }
+  for (const entry of entries) {
+    try { await access(join(root, entry, 'events.jsonl')); return true } catch { /* not a stored session */ }
+  }
+  return false
+}
+
 /** Builds the launch arguments and throws if any options
  * aren't supported by this Copilot CLI. `buildSessionLaunchArgs` is pure/sync
- * (`--worktree` is its only freshSession-dependent flag), so this is cheap
+ * (`--model`, the effort option and `--worktree` apply only to a fresh session), so this is cheap
  * enough to run twice: once as an early, best-guess check in
  * buildSessionSpawnPlan (before touching any existing process), and again
  * inside finalizeSessionArgs against whichever freshSession turns out to be
@@ -2012,7 +2023,8 @@ async function buildSessionSpawnPlan(
 /**
  * Everything that depends on whether the launch is actually starting fresh
  * or resuming a conversation — including which launch flags apply
- * (`--worktree` only makes sense for a fresh session) and the identity
+ * (`--model`, the effort option and `--worktree` apply only to a fresh session; a resume keeps the session's own
+ * model and effort) and the identity
  * segment (`--connect`, or `--session-id`+`--name`, or `--resume...`).
  * Pure and synchronous, so it's safe to call again after an async gap (e.g.
  * once a restart's old process has actually stopped and revealed a fresher
@@ -2445,6 +2457,11 @@ async function startSessionTab(
     resumeSessionId = null
     resumeMode = 'new'
   }
+  // A resume keeps the session's own model and effort, but with nothing stored Copilot starts a new conversation:
+  // start it as one, so it gets the workspace's model and effort. A new conversation started from inside a populated
+  // picker gets Copilot's own default instead: no launch option applies only to it, and `--model` or COPILOT_MODEL
+  // would also replace the model of whichever saved session is picked.
+  if (!connectSessionId && (resumeMode === 'continue' || resumeMode === 'picker') && !await anyCopilotSessionStored()) resumeMode = 'new'
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt.
   const autoTitle = !connectSessionId && !titleOverride?.trim()
@@ -7147,13 +7164,16 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // unavailable resolution, a newly saved but unsupported launch option, a
     // credential-store failure) — that must not cost the user an otherwise
     // healthy, running session. Only the fresh/resume-dependent portion of
-    // the resulting args (including --worktree and which resume id to use)
+    // the resulting args (--model, the effort option, --worktree and which resume id to use)
     // may need refreshing once the old process has actually stopped —
     // finalizeSessionArgs() recomputes just that slice, purely and
     // synchronously, from the *final* freshSession decision below, so
     // refreshing it never reintroduces a second point where this can fail
     // after the healthy process is already gone.
-    const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+    // A tab that never got a prompt has an id Copilot did not store, so it starts fresh below: check the fresh launch's
+    // options (its model and effort, which a resume leaves out) now, while the running session is still there.
+    const bestKnownStored = bestKnownSessionId !== null && await copilotSessionStored(bestKnownSessionId)
+    const plan = await buildSessionSpawnPlan(profile, bestKnownStored ? 'auto-resume' : 'new', bestKnownStored ? bestKnownSessionId : null, [], null, tab.title)
     plan.nameSession = tab.autoTitle !== true
     // A session started in an existing worktree runs there again while it is still one of the project's worktrees.
     const existingWorktree = tab.launchWorktreePath && !tab.sideChat ? await resolveLinkedWorktree(savedProfile.path, tab.launchWorktreePath) : null

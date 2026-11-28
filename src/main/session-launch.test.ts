@@ -38,11 +38,17 @@ test('reasoning effort uses the advertised Copilot option, including the legacy 
   const launch = { ...DEFAULT_SESSION_LAUNCH_CONFIG, reasoningEffort: 'high' as const }
   assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--reasoning-effort']), ['--reasoning-effort', 'high'])
   assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--effort']), ['--effort', 'high'])
-  assert.deepEqual(buildSessionLaunchArgs(launch, false, ['--effort', '--reasoning-effort']), ['--reasoning-effort', 'high'])
+  assert.deepEqual(buildSessionLaunchArgs(launch, true, ['--effort', '--reasoning-effort']), ['--reasoning-effort', 'high'])
 })
 
 test('worktree launch is omitted for resume and remote-connect sessions', () => {
   assert.deepEqual(buildSessionLaunchArgs({ ...DEFAULT_SESSION_LAUNCH_CONFIG, worktree: true }, false), [])
+})
+
+test('a resumed session keeps its own model and effort instead of the workspace default', () => {
+  assert.deepEqual(buildSessionLaunchArgs({ ...DEFAULT_SESSION_LAUNCH_CONFIG, model: 'gpt-5.3-codex', reasoningEffort: 'high', contextTier: 'long_context' }, false), [
+    '--context', 'long_context',
+  ])
 })
 
 test('model and agent values that look like option flags are discarded', () => {

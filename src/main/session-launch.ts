@@ -86,6 +86,10 @@ export function copilotEffortOption(supportedOptions: readonly string[]): string
   return COPILOT_EFFORT_OPTIONS.find((option) => supportedOptions.includes(option))
 }
 
+/**
+ * The workspace's model and effort are only where a session starts: Copilot stores the model and effort a session
+ * uses (including a later `/model` change) and restores them on `--resume`, so passing them again would reset it.
+ */
 export function buildSessionLaunchArgs(
   config: SessionLaunchConfig,
   freshSession: boolean,
@@ -93,8 +97,8 @@ export function buildSessionLaunchArgs(
 ): string[] {
   const normalized = normalizeSessionLaunchConfig(config)
   const args: string[] = []
-  if (normalized.model) args.push('--model', normalized.model)
-  if (normalized.reasoningEffort !== 'default') {
+  if (normalized.model && freshSession) args.push('--model', normalized.model)
+  if (normalized.reasoningEffort !== 'default' && freshSession) {
     args.push(copilotEffortOption(supportedOptions) ?? COPILOT_EFFORT_OPTIONS[0], normalized.reasoningEffort)
   }
   if (normalized.contextTier !== 'default') args.push('--context', normalized.contextTier)
