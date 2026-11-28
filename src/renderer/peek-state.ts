@@ -45,6 +45,28 @@ export function clearPeekForActivatedTab(
 }
 
 /**
+ * Applies a main-process peek request (`{ tabId, peekKey }`). When anchoring a reviewer onto a host tab (rather than
+ * `profile:<id>`), clears any stale `profile:<workspaceProfileId>` entry in the same update so hiding the reviewer and
+ * later closing the host does not resurrect the old standalone peek.
+ */
+export function applyPeekReviewerRequest(
+  peekByHost: Readonly<Record<string, string | null>>,
+  tabs: readonly DesktopSessionTab[],
+  request: { tabId: string; peekKey: string },
+  activeProfileId: string | null = null,
+): Readonly<Record<string, string | null>> {
+  const next: Record<string, string | null> = { ...peekByHost, [request.peekKey]: request.tabId }
+  if (!request.peekKey.startsWith('profile:')) {
+    const workspaceProfileId = tabs.find((candidate) => candidate.id === request.tabId)?.workspaceProfileId ?? activeProfileId
+    if (workspaceProfileId) {
+      const profileKey = `profile:${workspaceProfileId}`
+      if (profileKey in next) next[profileKey] = null
+    }
+  }
+  return next
+}
+
+/**
  * Resolves which terminal is visible in SessionWorkspace's single-pane compact layout.
  */
 export function resolveCompactVisibleTabId(input: {

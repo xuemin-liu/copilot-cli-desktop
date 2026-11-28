@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   activeWorkspaceRegularTab,
+  applyPeekReviewerRequest,
   clearPeekForActivatedTab,
   resolveCloseShortcutAction,
   resolveCompactVisibleTabId,
   resolveToolPanelPromptTarget,
 } from '../renderer/peek-state.js'
-import { resolvePeekHostAndTab, visibleSessionTabs } from './session-tab-machine.js'
+import { closeTab, resolvePeekHostAndTab, visibleSessionTabs } from './session-tab-machine.js'
 import { terminalLayout } from '../renderer/tool-dock-state.js'
 import type { DesktopSessionTab } from './types.js'
 
@@ -151,4 +152,29 @@ test('reselecting a side chat during a reviewer peek clears the host peek so com
 
   // Selecting the host itself preserves the host's peek entry:
   assert.equal(clearPeekForActivatedTab(peekedByHost, tabs, 'tab-host')['tab-host'], 'tab-rev')
+})
+
+test('carrying a standalone reviewer peek to a restored host clears the profile key so Hide + close host stays hidden', () => {
+  const reviewer = makeTab('tab-rev', 'ws-1', {
+    cli: 'claude',
+    tempReviewer: { groupId: 'g1', hostTabId: null, seatId: 's1', cli: 'claude', repository: 'o/r', prLabel: 'PR #1', prNumber: 1, prUrl: null },
+  })
+  const restoredHost = makeTab('tab-host', 'ws-1')
+
+  // 1. Standalone peek is opened under profile:ws-1 before the saved host restores:
+  let peekByHost = applyPeekReviewerRequest({}, [reviewer], { tabId: 'tab-rev', peekKey: 'profile:ws-1' }, 'ws-1')
+  assert.equal(resolvePeekHostAndTab({ tabs: [reviewer], activeTabId: null }, peekByHost, 'ws-1').peekTabId, 'tab-rev')
+
+  // 2. Saved host restores and main re-anchors the peek to tab-host in the same state update (clearing profile:ws-1):
+  peekByHost = applyPeekReviewerRequest(peekByHost, [reviewer, restoredHost], { tabId: 'tab-rev', peekKey: 'tab-host' }, 'ws-1')
+  assert.equal(peekByHost['profile:ws-1'], null, 'stale profile key is cleared when moving peek to host key')
+  assert.equal(resolvePeekHostAndTab({ tabs: [reviewer, restoredHost], activeTabId: 'tab-host' }, peekByHost, 'ws-1').peekTabId, 'tab-rev')
+
+  // 3. User clicks Hide (clears tab-host) and then closes the restored host tab:
+  peekByHost = { ...peekByHost, 'tab-host': null }
+  const afterClose = closeTab({ tabs: [reviewer, restoredHost], activeTabId: 'tab-host' }, 'tab-host')
+  const resolvedAfterClose = resolvePeekHostAndTab(afterClose, peekByHost, 'ws-1')
+  assert.equal(resolvedAfterClose.peekKey, 'profile:ws-1')
+  assert.equal(resolvedAfterClose.peekTabId, null, 'hidden reviewer does not reappear as a standalone pane after host closes')
+  assert.deepEqual(visibleSessionTabs(afterClose, resolvedAfterClose.peekTabId, 'ws-1'), { main: null, side: null })
 })

@@ -15,7 +15,7 @@ import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { ReviewerBar } from './components/ReviewerBar.js'
 import { regularTabCount, resolvePeekHostAndTab } from '../main/session-tab-machine.js'
-import { activeWorkspaceRegularTab, clearPeekForActivatedTab, resolveCloseShortcutAction } from './peek-state.js'
+import { activeWorkspaceRegularTab, applyPeekReviewerRequest, clearPeekForActivatedTab, resolveCloseShortcutAction } from './peek-state.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -98,19 +98,28 @@ export function App(): JSX.Element {
     if (state.windowSessionId) return
     void window.copilotDesktop.setFocusedPeekTab(effectiveFocusedPeekTabId).catch(() => {})
   }, [effectiveFocusedPeekTabId, state.windowSessionId])
+  const tabsRef = useRef(state.tabs)
+  tabsRef.current = state.tabs
+  const activeProfileIdRef = useRef(state.activeProfileId)
+  activeProfileIdRef.current = state.activeProfileId
   const updatePeekReviewer = useCallback((nextPeekTabId: string | null): void => {
     if (!peekKey) return
-    setPeekReviewerByHost((prev) => ({ ...prev, [peekKey]: nextPeekTabId }))
+    setPeekReviewerByHost((prev) => {
+      const next: Record<string, string | null> = { ...prev, [peekKey]: nextPeekTabId }
+      if (!peekKey.startsWith('profile:') && state.activeProfileId) {
+        const profileKey = `profile:${state.activeProfileId}`
+        if (profileKey in next) next[profileKey] = null
+      }
+      return next
+    })
     setFocusedPeekTabId(nextPeekTabId)
-  }, [peekKey])
+  }, [peekKey, state.activeProfileId])
   const updatePeekReviewerRef = useRef(updatePeekReviewer)
   updatePeekReviewerRef.current = updatePeekReviewer
   useEffect(() => window.copilotDesktop.onPeekReviewerRequest(({ tabId, peekKey: requestedKey }) => {
-    setPeekReviewerByHost((prev) => ({ ...prev, [requestedKey]: tabId }))
+    setPeekReviewerByHost((prev) => applyPeekReviewerRequest(prev, tabsRef.current, { tabId, peekKey: requestedKey }, activeProfileIdRef.current))
     setFocusedPeekTabId(tabId)
   }), [])
-  const tabsRef = useRef(state.tabs)
-  tabsRef.current = state.tabs
   useEffect(() => window.copilotDesktop.onHidePeekRequest(() => {
     updatePeekReviewerRef.current(null)
   }), [])
