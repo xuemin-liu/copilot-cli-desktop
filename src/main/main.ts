@@ -1136,6 +1136,23 @@ function sanitizeLegacyReviewerTabsInConfig(config:DesktopConfig=desktopConfig):
   }
   return changed
 }
+async function purgeResolvedLegacyReviewerSession(sessionId:string):Promise<boolean> {
+  let changed=sanitizeLegacyReviewerTabsInConfig(desktopConfig)
+  for(const [profileId,savedTabs] of unrestoredProfileTabs){
+    const filtered=savedTabs.filter(saved=>saved.lastSessionId!==sessionId)
+    if(filtered.length!==savedTabs.length){
+      changed=true
+      if(filtered.length>0)unrestoredProfileTabs.set(profileId,filtered)
+      else unrestoredProfileTabs.delete(profileId)
+    }
+  }
+  const liveMatches=tabsState.tabs.filter(tab=>!tab.reviewer&&!tab.tempReviewer&&tab.lastSessionId===sessionId)
+  for(const liveTab of liveMatches){
+    await closeSessionTab(liveTab.id)
+    changed=true
+  }
+  return changed
+}
 /** Review loops seen running in this run: when one ends, the person is told how the PR left review. */
 const runningReviews=new Set<string>()
 /** Ended reviews whose outcome is being read now: one read at a time each. */
@@ -1217,7 +1234,7 @@ async function sweepReviewerAreas():Promise<void>{
           if(retryLookup.status==='failed')continue
           if(retryLookup.status==='resolved'){
             knownReviewerSessionIds.add(retryLookup.sessionId)
-            if(sanitizeLegacyReviewerTabsInConfig(desktopConfig)){
+            if(await purgeResolvedLegacyReviewerSession(retryLookup.sessionId)){
               legacyTabSanitizationUnflushed=true
               await persistConfig().catch(()=>{})
             }
@@ -1781,7 +1798,7 @@ function persistProfileTabs(): void {
   for (const profile of desktopConfig.profiles) {
     if (!profilesWithSessionTabs.has(profile.id)) continue
     profile.tabs = tabsState.tabs
-      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !tab.tempReviewer && !tab.reviewer)
+      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !tab.tempReviewer && !tab.reviewer && !(tab.lastSessionId && knownReviewerSessionIds.has(tab.lastSessionId)))
       .map((tab) => {
         const parentSessionId = tabsState.tabs.find((parent) => parent.id === tab.sideParentTabId)?.lastSessionId
         return {
@@ -10723,6 +10740,12 @@ if (!app.requestSingleInstanceLock()) {
       showNotification(
         'Copilot CLI Desktop settings were reset',
         `Your settings file was unreadable. It was saved as ${basename(recoveryHold)} in the app data folder. Browser data is kept until you restore or delete that file.`,
+      )
+    } else if (configRecovery.writesBlocked && recoveryHold) {
+      void writeAppLog(`desktop.json could not be parsed; defaults are in use and settings writes are deferred while ${recoveryHold} is kept`)
+      showNotification(
+        'Copilot CLI Desktop settings recovery pending',
+        `Your unreadable settings were backed up as ${basename(recoveryHold)} in the app data folder, and desktop.json was left in place. Settings changes will not be saved this launch until desktop.json is fixed or removed.`,
       )
     } else if (configRecovery.writesBlocked) {
       void writeAppLog('desktop.json could not be parsed and could not be backed up; settings changes will not be saved this launch')

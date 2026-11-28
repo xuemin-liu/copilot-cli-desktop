@@ -636,6 +636,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           resetRuntimeForColdStartForTest: async () => {
             await stopAllSessions();
+            await configWriteQueue.catch(() => {});
             tabsState = { tabs: [], activeTabId: null };
             profilesWithSessionTabs.clear();
             unrestoredProfileTabs.clear();
@@ -5656,6 +5657,7 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     for (const openTab of (await h.request('desktop:get-state')).tabs) {
       await h.request('desktop:close-tab', openTab.id)
     }
+    await h.flushConfig()
     const boundMalformedTestUuid = '88888888-8888-4888-8888-888888888888'
     await h.seedUnboundReviewReservationForTest({
       number: 96,
@@ -5682,6 +5684,12 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       rawWorkflowDb.close()
     }
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
+    const seededFixtureBeforeStartup = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(
+      seededFixtureBeforeStartup.profiles.find((p) => p.id === profile.id)?.tabs.map((t) => t.lastSessionId),
+      [boundMalformedTestUuid, genuineUserUuid],
+      'cold-start fixture retains both seeded tab session IDs before startup runs',
+    )
     await h.runStartupConfigAndSweepForTest()
     const savedAfterMalformedTaskStartup = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
     assert.equal(
@@ -5697,7 +5705,8 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(h.reservationList().length, 0, 'bound reservation swept cleanly after sanitization succeeded')
 
     // Also verify that if the reserved task session lookup itself fails (unreadable/corrupt workflows.sqlite),
-    // startup continues cleanly and holds the affected reservation until provenance can be established:
+    // startup continues cleanly, holds the affected reservation, and once a subsequent sweep resolves the
+    // session ID it removes the tab from live restore state and keeps it out of later tab saves:
     const unverifiedLookupUuid = '99999999-9999-4999-8999-999999999999'
     await h.seedUnboundReviewReservationForTest({
       number: 95,
@@ -5705,7 +5714,16 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       boundTaskSessionId: unverifiedLookupUuid,
       profileId: profile.id,
     })
+    profile.tabs = [
+      { title: 'Review #95', lastSessionId: unverifiedLookupUuid, autoTitle: false, launchWorktree: false },
+      { title: 'Review #99', lastSessionId: genuineUserUuid, autoTitle: false, launchWorktree: false, active: true },
+    ]
+    await writeFile(
+      join(directory, 'desktop.json'),
+      JSON.stringify({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, null, 2) + '\n',
+    )
     await h.resetRuntimeForColdStartForTest()
+    const validWorkflowDbBytes = await readFile(workflowDbPath)
     await writeFile(workflowDbPath, 'corrupt-sqlite-header')
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     await h.runStartupConfigAndSweepForTest()
@@ -5713,6 +5731,36 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
       h.reservationList().some((r) => r.number === 95),
       true,
       'affected reservation is held when workflows.sqlite lookup fails at startup',
+    )
+    await h.restoreSaved()
+    await h.flushConfig()
+    assert.equal(
+      (await h.request('desktop:get-state')).tabs.some((t) => t.lastSessionId === unverifiedLookupUuid && t.status === 'dormant'),
+      true,
+      'unverified same-title tab stays dormant while provenance lookup is unavailable',
+    )
+
+    // Restore valid workflows.sqlite so the next sweep resolves `unverifiedLookupUuid`, removes the live tab,
+    // releases the reservation, and keeps `unverifiedLookupUuid` out of subsequent tab saves:
+    await writeFile(workflowDbPath, validWorkflowDbBytes)
+    await h.sweepReviewerAreasForTest()
+    await h.flushConfig()
+    const stateAfterLateLookupSweep = await h.request('desktop:get-state')
+    assert.equal(
+      stateAfterLateLookupSweep.tabs.some((t) => t.lastSessionId === unverifiedLookupUuid),
+      false,
+      'late-resolved reviewer tab is removed from live tabsState before reservation release',
+    )
+    assert.equal(h.reservationList().some((r) => r.number === 95), false, 'reservation released after live and saved state were sanitized')
+    const remainingUserTab = stateAfterLateLookupSweep.tabs.find((t) => t.lastSessionId === genuineUserUuid)
+    assert.ok(remainingUserTab)
+    await h.request('desktop:activate-tab', remainingUserTab!.id)
+    await h.flushConfig()
+    const savedAfterSubsequentTabSave = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(
+      savedAfterSubsequentTabSave.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === unverifiedLookupUuid),
+      false,
+      'subsequent tab save never writes the purged reviewer session back into desktop.json',
     )
   } finally {
     h.setGithubApi(null)

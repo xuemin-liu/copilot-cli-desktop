@@ -324,3 +324,20 @@ test('resolveConfigRecovery retains a prior backup hold across restarts when mar
     await assert.rejects(() => stat(marker))
   })
 })
+
+test('resolveConfigRecovery reuses an identical active backup across repeated locked-rename launches instead of duplicating backups', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ locked-corrupt')
+
+    const first = await resolveConfigRecovery(file, marker, true, { rename: lockedRename, copyFile })
+    assert.ok(first.hold)
+    assert.equal(first.newlyPreserved, true)
+    assert.equal(first.preservedMethod, 'copied')
+
+    const second = await resolveConfigRecovery(file, marker, true, { rename: lockedRename, copyFile })
+    assert.deepEqual(second, { hold: first.hold, writesBlocked: true, newlyPreserved: false })
+    assert.equal((await readdir(dir)).filter((name) => name.includes('.corrupt-')).length, 1)
+  })
+})

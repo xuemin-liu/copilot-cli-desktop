@@ -262,8 +262,9 @@ export async function resolveConfigRecovery(
   operations: RecoveryOperations = {},
 ): Promise<ConfigRecoveryOutcome> {
   const writeMarker = operations.writeMarker ?? writeFileAtomic
+  let initialProbe: ConfigFileProbe | null = null
   if (unparseable) {
-    const initialProbe = await probeConfigFile(configPath)
+    initialProbe = await probeConfigFile(configPath)
     if (initialProbe.state === 'parseable' || initialProbe.state === 'missing') {
       unparseable = false
     }
@@ -274,6 +275,14 @@ export async function resolveConfigRecovery(
   const existing = await inspectRecoveryMarker(markerPath, operations.stat)
   if (existing.markerReadError) {
     return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
+  }
+  if (initialProbe?.state === 'unparseable' && existing.activeBackups.length > 0) {
+    for (const backupPath of existing.activeBackups) {
+      const backupBytes = await readFile(backupPath).catch(() => null)
+      if (backupBytes && backupBytes.equals(initialProbe.raw)) {
+        return { hold: existing.hold ?? backupPath, writesBlocked: true, newlyPreserved: false }
+      }
+    }
   }
   // Publish the hold BEFORE touching the original, carrying forward any still-active prior backups inside
   // the provisional marker so a failed marker rollback cannot drop an earlier hold on the next launch.
