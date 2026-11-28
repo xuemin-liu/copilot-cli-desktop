@@ -1841,8 +1841,11 @@ function rebuildTrayMenu(): void {
     },
     {
       label: 'Show Active Session Log',
-      enabled: tabsState.activeTabId !== null,
-      click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
+      enabled: (activeFocusedPeekTabId() ?? tabsState.activeTabId) !== null,
+      click: () => {
+        const logTabId = activeFocusedPeekTabId() ?? tabsState.activeTabId
+        if (logTabId) observe(showSessionLog(logTabId), 'Could not show session log')
+      },
     },
     { label: 'Desktop Settings…', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
     { type: 'separator' },
@@ -3102,7 +3105,6 @@ function selectSessionInMain(tabId: string): DesktopState {
     return snapshot()
   }
   const previous = tabsState.activeTabId
-  const hadFocusedPeek = focusedPeekTabId !== null
   focusedPeekTabId = null
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
@@ -3112,7 +3114,7 @@ function selectSessionInMain(tabId: string): DesktopState {
   restoreMainWindow()
   broadcastState()
   refreshMenus()
-  if (hadFocusedPeek && mainWindow && !mainWindow.isDestroyed()) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('desktop:clear-peek-focus-request')
   }
   return snapshot()
@@ -8193,8 +8195,8 @@ function installApplicationMenu(): void {
       submenu: [
         {
           label: 'Show Active Session Log',
-          enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
+          enabled: menuTabId !== null,
+          click: () => menuTabId && observe(showSessionLog(menuTabId), 'Could not show session log'),
         },
         { label: 'Show Application Log', click: () => observe(showApplicationLog(), 'Could not show application log') },
         { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },

@@ -90,6 +90,11 @@ export function App(): JSX.Element {
   const effectiveFocusedPeekTabId = focusedPeekTabId && focusedPeekTabId === activePeekTabId ? focusedPeekTabId : null
   const activeWorkspaceTabId = activeWorkspaceRegularTab(state.tabs, state.activeTabId, state.activeProfileId)?.id ?? null
   useEffect(() => {
+    if (focusedPeekTabId !== null && focusedPeekTabId !== activePeekTabId) {
+      setFocusedPeekTabId(null)
+    }
+  }, [activePeekTabId, focusedPeekTabId])
+  useEffect(() => {
     if (state.windowSessionId) return
     void window.copilotDesktop.setFocusedPeekTab(effectiveFocusedPeekTabId).catch(() => {})
   }, [effectiveFocusedPeekTabId, state.windowSessionId])

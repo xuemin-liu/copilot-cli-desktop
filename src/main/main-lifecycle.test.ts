@@ -4425,6 +4425,21 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   }
   assert.equal(findFileMenuItem('Restart Active Session').enabled, false, 'Restart Active Session is disabled while a temporary reviewer peek has focus')
   assert.equal(findFileMenuItem('Unload Active Session').enabled, false, 'Unload Active Session is disabled while a temporary reviewer peek has focus')
+  // Help -> Show Active Session Log targets the focused reviewer while a peek has focus:
+  const findHelpMenuItem = (label: string) => {
+    const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean; click?: () => void }> }>
+    const helpMenu = menu.find(item => item.label === 'Help')!
+    return helpMenu.submenu!.find(item => item.label === label)!
+  }
+  const beforeLogShellCalls = h.shellCalls.length
+  const showLogItem = findHelpMenuItem('Show Active Session Log')
+  assert.equal(showLogItem.enabled, true, 'Show Active Session Log stays enabled while a temporary reviewer peek has focus')
+  showLogItem.click?.()
+  await pause(50)
+  assert.ok(
+    h.shellCalls.slice(beforeLogShellCalls).some(call => call.action === 'reveal' && call.target.endsWith(`${revId}.log`)),
+    'Show Active Session Log opens the focused reviewer log, not the host log',
+  )
   const beforeHostedClose = win.messages.length
   findFileMenuItem('Close Session Tab').click?.({}, {}, { triggeredByAccelerator: false })
   await pause(50)
@@ -4458,6 +4473,16 @@ test('tempReviewer activation redirects to peek without changing activeTabId, to
   )
   assert.equal(findFileMenuItem('Restart Active Session').enabled, true, 'Restart Active Session re-enables once focus returns to host')
   assert.equal(findFileMenuItem('Unload Active Session').enabled, true, 'Unload Active Session re-enables once focus returns to host')
+
+  // Even when main already saw focusedPeekTabId === null (e.g. after switching to an intervening tab), explicit
+  // regular-tab activation still emits desktop:clear-peek-focus-request so stale renderer focus cannot revive:
+  const beforeSecondSelect = win.messages.length
+  await h.request('desktop:activate-tab', tab1Id)
+  assert.ok(
+    win.messages.slice(beforeSecondSelect).some(msg => msg.channel === 'desktop:clear-peek-focus-request'),
+    'explicit regular-tab activation always emits desktop:clear-peek-focus-request',
+  )
+  await h.request('desktop:activate-tab', tab2Id)
 
   // Popped-out host A + active tab B: activating A's hosted reviewer selects A in the main window (so A + peeked reviewer
   // display in main instead of only raising A's detached window) and keeps tab-2's docked panel ownership:
