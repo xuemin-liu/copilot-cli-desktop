@@ -19,7 +19,7 @@ import { journalMeetingDelivery, meetingDeliverySource, settleClosedMeeting, set
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { activeConfigRecovery, resolveConfigRecovery } from './config-recovery.js'
+import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
@@ -1175,11 +1175,7 @@ async function sweepReviewerAreas():Promise<void>{
       // However, if a kept record still has a pending rotated Codex credential (`codexAuthSync`), retry syncing it first.
       if(reviewLaunches.has(record.launchId)||(record.kept&&!record.codexAuthSync&&record.detachedAt===undefined&&existsSync(record.checkout)))continue
       if(!currentRunReviewLaunchIds.has(record.launchId)&&!record.reviewer.startsWith('temp:')&&!record.reviewer.startsWith('meeting:')){
-        if(startupConfigPending||legacyTabSanitizationUnflushed||configWritesBlocked)continue
-        if(configRecoveryHold){
-          configRecoveryHold=Boolean(await activeConfigRecovery(join(app.getPath('userData'),'config-recovery.json')))
-          if(configRecoveryHold)continue
-        }
+        if(startupConfigPending||legacyTabSanitizationUnflushed||configWritesBlocked||configRecoveryHold)continue
       }
       if(tempReviewers.list().some(g=>g.stage!=='ended'&&[...g.requiredSeats.values()].some(s=>s.launchId===record.launchId)))continue
       if(meetingReviewers.holdsLaunch(record.launchId))continue

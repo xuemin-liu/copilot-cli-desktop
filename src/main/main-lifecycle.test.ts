@@ -5348,9 +5348,13 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     assert.equal(recoveryOnCorruptLaunch.writesBlocked, false, 'settings writes are allowed while recovery hold is active')
     assert.equal(h.reservationList().length, 3, 'early pre-read sweep and recovery-hold launch both preserve all reviewer reservations')
 
-    // User repairs the preserved backup and restores it to desktop.json (removing the preserved backup file):
+    // User repairs the preserved backup and restores it to desktop.json (removing the preserved backup file) while
+    // Desktop is still running; a periodic sweep during that gap must still preserve all 3 reservations until a startup
+    // or explicit reload actually reads and saves the sanitized config!
     await writeFile(join(directory, 'desktop.json'), validRawConfig)
     await rm(recoveryOnCorruptLaunch.hold!, { force: true })
+    await h.sweepReviewerAreasForTest()
+    assert.equal(h.reservationList().length, 3, 'mid-run sweep after backup removal still holds reservations until config is reloaded')
 
     // Simulate Launch 0 where saveSettingsAtStartup fails (ENOSPC) and Copilot CLI is unresolved:
     await h.resetRuntimeForColdStartForTest()
