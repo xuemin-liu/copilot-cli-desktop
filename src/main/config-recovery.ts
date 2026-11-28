@@ -4,7 +4,10 @@ import { copyFile, readFile, rename, rm, stat } from 'node:fs/promises'
 import { writeFileAtomic } from './atomic-file.js'
 
 type PreserveOperations = { rename: typeof rename; copyFile: typeof copyFile }
-export type RecoveryOperations = Partial<PreserveOperations> & { stat?: typeof stat }
+export type RecoveryOperations = Partial<PreserveOperations> & {
+  stat?: typeof stat
+  writeMarker?: typeof writeFileAtomic
+}
 
 /**
  * Move an unreadable file aside, or, if the rename fails (for example a
@@ -30,36 +33,131 @@ export async function preserveUnreadableFile(
   return null
 }
 
+export interface ConfigRecoveryMarkerOptions {
+  previousPreserved?: readonly string[]
+  previousMarkerCorrupt?: boolean
+}
+
 /**
  * The recovery hold outlives the launch that detected the problem: while the
  * preserved file exists, data that only it references (browser profiles) must
  * not be pruned. Deleting or restoring the backup is the explicit
  * acknowledgement that releases the hold.
  */
-export async function beginConfigRecovery(markerPath: string, preserved: string): Promise<void> {
-  await writeFileAtomic(markerPath, `${JSON.stringify({ preserved, createdAt: new Date().toISOString() })}\n`)
+export async function beginConfigRecovery(
+  markerPath: string,
+  preserved: string,
+  options: ConfigRecoveryMarkerOptions = {},
+  writeMarker: typeof writeFileAtomic = writeFileAtomic,
+): Promise<void> {
+  const previousPreserved = Array.from(new Set(
+    (options.previousPreserved ?? []).filter((entry) => typeof entry === 'string' && entry.length > 0 && entry !== preserved),
+  ))
+  await writeMarker(
+    markerPath,
+    `${JSON.stringify({
+      preserved,
+      ...(previousPreserved.length > 0 ? { previousPreserved } : {}),
+      ...(options.previousMarkerCorrupt ? { previousMarkerCorrupt: true } : {}),
+      createdAt: new Date().toISOString(),
+    })}\n`,
+  )
+}
+
+interface RecoveryMarkerInspection {
+  hold: string | null
+  activeBackups: string[]
+  rawMarker: string | null
+  isDirectory: boolean
+  markerReadError: boolean
+  corruptMarker: boolean
+  staleMarkerOnDisk: boolean
+  needsCompaction: boolean
+}
+
+async function inspectRecoveryMarker(markerPath: string, statPath: typeof stat = stat): Promise<RecoveryMarkerInspection> {
+  let rawMarker: string
+  try {
+    rawMarker = await readFile(markerPath, 'utf8')
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      return { hold: null, activeBackups: [], rawMarker: null, isDirectory: false, markerReadError: false, corruptMarker: false, staleMarkerOnDisk: false, needsCompaction: false }
+    }
+    if (code === 'EISDIR') {
+      return { hold: null, activeBackups: [], rawMarker: null, isDirectory: true, markerReadError: false, corruptMarker: false, staleMarkerOnDisk: false, needsCompaction: false }
+    }
+    // An unreadable marker is treated as an active hold: keeping data is the safe side.
+    return { hold: markerPath, activeBackups: [], rawMarker: null, isDirectory: false, markerReadError: true, corruptMarker: false, staleMarkerOnDisk: false, needsCompaction: false }
+  }
+  let parsedValue: unknown
+  try {
+    parsedValue = JSON.parse(rawMarker) as unknown
+  } catch {
+    return { hold: markerPath, activeBackups: [], rawMarker, isDirectory: false, markerReadError: false, corruptMarker: true, staleMarkerOnDisk: false, needsCompaction: false }
+  }
+  if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
+    return { hold: markerPath, activeBackups: [], rawMarker, isDirectory: false, markerReadError: false, corruptMarker: true, staleMarkerOnDisk: false, needsCompaction: false }
+  }
+  const parsed = parsedValue as { preserved?: unknown; previousPreserved?: unknown; previousMarkerCorrupt?: unknown }
+  const primaryPreserved = typeof parsed.preserved === 'string' && parsed.preserved.length > 0 ? parsed.preserved : null
+  const rawCandidates: string[] = []
+  if (primaryPreserved) rawCandidates.push(primaryPreserved)
+  if (typeof parsed.previousPreserved === 'string' && parsed.previousPreserved.length > 0) {
+    rawCandidates.push(parsed.previousPreserved)
+  } else if (Array.isArray(parsed.previousPreserved)) {
+    for (const entry of parsed.previousPreserved) {
+      if (typeof entry === 'string' && entry.length > 0) rawCandidates.push(entry)
+    }
+  }
+  const candidates = Array.from(new Set(rawCandidates))
+  const activeBackups: string[] = []
+  for (const candidate of candidates) {
+    try {
+      await statPath(candidate)
+      activeBackups.push(candidate)
+    } catch (error) {
+      // Only a confirmed missing backup means it was restored or deleted. EACCES/EPERM/I/O errors prove nothing.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        activeBackups.push(candidate)
+      }
+    }
+  }
+  const previousMarkerCorrupt = parsed.previousMarkerCorrupt === true
+  if (activeBackups.length > 0) {
+    const needsCompaction = activeBackups[0] !== primaryPreserved || activeBackups.length !== candidates.length
+    return {
+      hold: activeBackups[0]!,
+      activeBackups,
+      rawMarker,
+      isDirectory: false,
+      markerReadError: false,
+      corruptMarker: previousMarkerCorrupt,
+      staleMarkerOnDisk: false,
+      needsCompaction,
+    }
+  }
+  if (previousMarkerCorrupt) {
+    return { hold: markerPath, activeBackups: [], rawMarker, isDirectory: false, markerReadError: false, corruptMarker: true, staleMarkerOnDisk: false, needsCompaction: false }
+  }
+  return { hold: null, activeBackups: [], rawMarker, isDirectory: false, markerReadError: false, corruptMarker: false, staleMarkerOnDisk: true, needsCompaction: false }
 }
 
 /** The preserved file path while a recovery hold is active, otherwise null (clearing a stale marker). */
 export async function activeConfigRecovery(markerPath: string, statPath: typeof stat = stat): Promise<string | null> {
-  let preserved: unknown
-  try {
-    preserved = (JSON.parse(await readFile(markerPath, 'utf8')) as { preserved?: unknown }).preserved
-  } catch (error) {
-    // An unreadable marker is treated as an active hold: keeping data is the safe side.
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : markerPath
+  const info = await inspectRecoveryMarker(markerPath, statPath)
+  if (info.isDirectory) return markerPath
+  if (info.staleMarkerOnDisk) {
+    await rm(markerPath, { force: true }).catch(() => undefined)
+    return null
   }
-  if (typeof preserved === 'string') {
-    try {
-      await statPath(preserved)
-      return preserved
-    } catch (error) {
-      // Only a confirmed missing backup means it was restored or deleted. EACCES/EPERM/I/O errors prove nothing.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return preserved
-    }
+  if (info.needsCompaction && info.activeBackups.length > 0) {
+    await beginConfigRecovery(markerPath, info.activeBackups[0]!, {
+      previousPreserved: info.activeBackups.slice(1),
+      previousMarkerCorrupt: info.corruptMarker,
+    }).catch(() => undefined)
   }
-  await rm(markerPath, { force: true }).catch(() => undefined)
-  return null
+  return info.hold
 }
 
 export interface ConfigRecoveryOutcome {
@@ -120,42 +218,6 @@ async function restorePreservedValidConfig(preserved: string, configPath: string
   return false
 }
 
-interface ExistingHoldSnapshot {
-  hold: string | null
-  rawMarker: string | null
-  markerUnreadable: boolean
-}
-
-async function snapshotExistingHold(markerPath: string, statPath: typeof stat = stat): Promise<ExistingHoldSnapshot> {
-  let rawMarker: string
-  try {
-    rawMarker = await readFile(markerPath, 'utf8')
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    if (code === 'ENOENT' || code === 'EISDIR') {
-      return { hold: null, rawMarker: null, markerUnreadable: false }
-    }
-    return { hold: markerPath, rawMarker: null, markerUnreadable: true }
-  }
-  let preserved: unknown
-  try {
-    preserved = (JSON.parse(rawMarker) as { preserved?: unknown }).preserved
-  } catch {
-    return { hold: markerPath, rawMarker, markerUnreadable: false }
-  }
-  if (typeof preserved !== 'string') {
-    return { hold: null, rawMarker: null, markerUnreadable: false }
-  }
-  try {
-    await statPath(preserved)
-    return { hold: preserved, rawMarker, markerUnreadable: false }
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? { hold: null, rawMarker: null, markerUnreadable: false }
-      : { hold: preserved, rawMarker, markerUnreadable: false }
-  }
-}
-
 async function nextCorruptBackupPath(configPath: string, statPath: typeof stat = stat): Promise<string | null> {
   const base = `${configPath}.corrupt-${Date.now()}`
   for (let suffix = 0; suffix < 16; suffix++) {
@@ -182,6 +244,7 @@ export async function resolveConfigRecovery(
   unparseable: boolean,
   operations: RecoveryOperations = {},
 ): Promise<ConfigRecoveryOutcome> {
+  const writeMarker = operations.writeMarker ?? writeFileAtomic
   if (unparseable) {
     const initialProbe = await probeConfigFile(configPath)
     if (initialProbe.state === 'parseable' || initialProbe.state === 'missing') {
@@ -191,34 +254,41 @@ export async function resolveConfigRecovery(
   if (!unparseable) {
     return { hold: await activeConfigRecovery(markerPath, operations.stat), writesBlocked: false, newlyPreserved: false }
   }
-  const existing = await snapshotExistingHold(markerPath, operations.stat)
-  if (existing.markerUnreadable) {
+  const existing = await inspectRecoveryMarker(markerPath, operations.stat)
+  if (existing.markerReadError) {
     return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
   }
-  // Publish the hold BEFORE touching the original. If the marker cannot be written the original stays
-  // in place untouched; if we are interrupted after the move, the marker already names the backup.
+  // Publish the hold BEFORE touching the original, carrying forward any still-active prior backups inside
+  // the provisional marker so a failed marker rollback cannot drop an earlier hold on the next launch.
   const target = await nextCorruptBackupPath(configPath, operations.stat)
   if (!target) {
     return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
   }
-  const restorePriorMarkerAndResolveHold = async (): Promise<ConfigRecoveryOutcome> => {
-    if (existing.rawMarker !== null) {
-      const restoredMarker = await writeFileAtomic(markerPath, existing.rawMarker).then(() => true, () => false)
-      if (!restoredMarker) {
-        return { hold: existing.hold, writesBlocked: false, newlyPreserved: false }
-      }
-      return { hold: await activeConfigRecovery(markerPath, operations.stat), writesBlocked: false, newlyPreserved: false }
+  const restorePriorMarkerAndResolve = async (writesBlocked: boolean): Promise<ConfigRecoveryOutcome> => {
+    if (existing.rawMarker !== null && (existing.activeBackups.length > 0 || existing.corruptMarker)) {
+      await writeMarker(markerPath, existing.rawMarker).catch(() => undefined)
+    } else {
+      await rm(markerPath, { force: true }).catch(() => undefined)
     }
-    await rm(markerPath, { force: true }).catch(() => undefined)
-    return { hold: null, writesBlocked: false, newlyPreserved: false }
+    const current = await inspectRecoveryMarker(markerPath, operations.stat)
+    if (current.staleMarkerOnDisk) {
+      await rm(markerPath, { force: true }).catch(() => undefined)
+      return { hold: null, writesBlocked, newlyPreserved: false }
+    }
+    return { hold: current.isDirectory ? null : current.hold, writesBlocked, newlyPreserved: false }
   }
-  const held = await beginConfigRecovery(markerPath, target).then(() => true, () => false)
+  const held = await beginConfigRecovery(
+    markerPath,
+    target,
+    { previousPreserved: existing.activeBackups, previousMarkerCorrupt: existing.corruptMarker },
+    writeMarker,
+  ).then(() => true, () => false)
   if (held) {
     // Revalidate immediately before moving: a settings restore may have completed while the existing hold,
     // candidate backup path, or recovery marker was being prepared.
     const preMoveProbe = await probeConfigFile(configPath)
     if (preMoveProbe.state === 'parseable' || preMoveProbe.state === 'missing') {
-      return restorePriorMarkerAndResolveHold()
+      return restorePriorMarkerAndResolve(false)
     }
     const preserved = await preserveUnreadableFile(
       configPath,
@@ -233,16 +303,11 @@ export async function resolveConfigRecovery(
         if (!restoredInPlace) {
           return { hold: preserved, writesBlocked: true, newlyPreserved: false }
         }
-        return restorePriorMarkerAndResolveHold()
+        return restorePriorMarkerAndResolve(false)
       }
       return { hold: preserved, writesBlocked: false, newlyPreserved: true }
     }
-    // Nothing was preserved: the original is intact, so restore any prior marker hold or remove the new marker.
-    if (existing.hold && existing.rawMarker !== null) {
-      await writeFileAtomic(markerPath, existing.rawMarker).catch(() => undefined)
-      return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
-    }
-    await rm(markerPath, { force: true }).catch(() => undefined)
+    return restorePriorMarkerAndResolve(true)
   }
   return { hold: existing.hold, writesBlocked: true, newlyPreserved: false }
 }

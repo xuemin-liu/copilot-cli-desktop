@@ -274,3 +274,53 @@ test('resolveConfigRecovery keeps a restore that finishes during backup-path loo
     assert.deepEqual(await readdir(dir), ['desktop.json'])
   })
 })
+
+test('resolveConfigRecovery retains a prior backup hold across restarts when marker rollback fails with EPERM', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ "profiles": [')
+    const first = await resolveConfigRecovery(file, marker, true)
+    assert.ok(first.hold)
+
+    // Keep `first.hold` on disk (e.g. user copied/repaired settings without deleting the original backup yet),
+    // complete a valid restore at the rename boundary, and fail the marker rollback with EPERM:
+    await writeFile(file, '{ "trayEnabled": ')
+    const restoredRaw = '{\n  "trayEnabled": false\n}\n'
+    let injectedAtRename = false
+    let markerWrites = 0
+    const renameWithRestore = (async (oldPath: string, newPath: string) => {
+      if (!injectedAtRename && oldPath === file) {
+        injectedAtRename = true
+        await writeFile(file, restoredRaw)
+      }
+      return rename(oldPath, newPath)
+    }) as unknown as typeof rename
+    const writeMarkerFailingRollback = async (targetPath: string, contents: string | Buffer): Promise<void> => {
+      markerWrites += 1
+      if (markerWrites === 2) {
+        throw Object.assign(new Error('rollback blocked'), { code: 'EPERM' })
+      }
+      const { writeFileAtomic } = await import('./atomic-file.js')
+      await writeFileAtomic(targetPath, contents)
+    }
+
+    const rollbackFailed = await resolveConfigRecovery(file, marker, true, {
+      rename: renameWithRestore,
+      writeMarker: writeMarkerFailingRollback,
+    })
+    assert.equal(markerWrites, 2)
+    assert.deepEqual(rollbackFailed, { hold: first.hold, writesBlocked: false, newlyPreserved: false })
+    assert.equal(await readFile(file, 'utf8'), restoredRaw)
+
+    // Fresh recovery load on the next launch must still retain `first.hold` on disk:
+    const nextLaunch = await resolveConfigRecovery(file, marker, false)
+    assert.deepEqual(nextLaunch, { hold: first.hold, writesBlocked: false, newlyPreserved: false })
+    assert.equal(await activeConfigRecovery(marker), first.hold)
+
+    // Deleting the original backup finally releases the hold:
+    await rm(first.hold!)
+    assert.deepEqual(await resolveConfigRecovery(file, marker, false), { hold: null, writesBlocked: false, newlyPreserved: false })
+    await assert.rejects(() => stat(marker))
+  })
+})
