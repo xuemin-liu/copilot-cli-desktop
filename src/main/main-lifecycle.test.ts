@@ -119,7 +119,7 @@ interface Harness {
   }>
   seedUnboundReviewReservationForTest(options: { number: number; projectPath: string; isolatedSessionId?: string | null; boundTaskSessionId?: string | null; profileId?: string }): Promise<string>
   resetRuntimeForColdStartForTest(): Promise<void>
-  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
+  runStartupConfigAndSweepForTest(options?: { failSave?: boolean; earlySweepBeforeConfigRead?: boolean; betweenReadAndRecovery?: () => Promise<void>; afterRecoveryRevalidation?: () => Promise<void>; afterBackupRename?: () => Promise<void> }): Promise<{ hold: string | null; writesBlocked: boolean; newlyPreserved: boolean }>
   meetingIsGathering(meetingId: string): boolean
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
@@ -656,16 +656,29 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             if (options.earlySweepBeforeConfigRead) {
               await sweepReviewerAreas();
             }
-            const recoveryOps = options.afterRecoveryRevalidation ? (() => {
-              let fired = false;
+            const recoveryOps = (options.afterRecoveryRevalidation || options.afterBackupRename) ? (() => {
+              let statFired = false;
+              let renameFired = false;
               return {
-                stat: async (targetPath, ...rest) => {
-                  if (!fired && String(targetPath).includes('desktop.json.corrupt-') && !existsSync(String(targetPath))) {
-                    fired = true;
-                    await options.afterRecoveryRevalidation();
-                  }
-                  return stat(targetPath, ...rest);
-                },
+                ...(options.afterRecoveryRevalidation ? {
+                  stat: async (targetPath, ...rest) => {
+                    if (!statFired && String(targetPath).includes('desktop.json.corrupt-') && !existsSync(String(targetPath))) {
+                      statFired = true;
+                      await options.afterRecoveryRevalidation();
+                    }
+                    return stat(targetPath, ...rest);
+                  },
+                } : {}),
+                ...(options.afterBackupRename ? {
+                  rename: async (oldPath, newPath) => {
+                    const { rename: fsRename } = await import('node:fs/promises');
+                    await fsRename(oldPath, newPath);
+                    if (!renameFired && String(oldPath) === configPath()) {
+                      renameFired = true;
+                      await options.afterBackupRename();
+                    }
+                  },
+                } : {}),
               };
             })() : undefined;
             const { migrated, recovery } = await loadDesktopConfigWithRecovery(undefined, options.betweenReadAndRecovery, recoveryOps);
@@ -5401,16 +5414,25 @@ test('sandboxed PR review tabs enforce full isolation, provenance checks, close 
     })
     assert.equal(h.reservationList().length, 3, 'failed startup settings write after mid-startup recovery overlap keeps all 3 reservations')
 
-    // Also re-stage recovery hold and test mid-startup overlap starting from incomplete/malformed JSON
-    // where the restore completes AFTER resolveConfigRecovery's initial revalidation (during backup preparation)
-    // and settings write SUCCEEDS on unresolved Launch 1:
+    // Also verify the post-backup partial-restore transition: if a restore recreates desktop.json with
+    // partial/incomplete JSON immediately after the actual backup rename, startup blocks settings writes
+    // instead of overwriting the in-progress restore with defaults, keeps all 3 reviewer reservations,
+    // and then loads & sanitizes the restored settings once the restore finishes on the next launch:
+    const partialPostRenameRaw = '{\n  "profiles": [\n    { "path": "incomplete'
     await writeFile(join(directory, 'desktop.json'), validRawConfig + '\n<<<corrupt-tail-3>>>')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
-    const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest()
-    assert.ok(recoveryOnCorruptLaunch3.hold)
+    const recoveryOnCorruptLaunch3 = await h.runStartupConfigAndSweepForTest({
+      afterBackupRename: async () => {
+        await writeFile(join(directory, 'desktop.json'), partialPostRenameRaw)
+      },
+    })
+    assert.ok(recoveryOnCorruptLaunch3.hold, 'original unreadable config backup is held')
+    assert.equal(recoveryOnCorruptLaunch3.writesBlocked, true, 'settings writes are blocked so saveSettingsAtStartup does not overwrite partial restore')
+    assert.equal(recoveryOnCorruptLaunch3.newlyPreserved, false)
+    assert.equal(await readFile(join(directory, 'desktop.json'), 'utf8'), partialPostRenameRaw, 'in-progress partial restore bytes remain untouched on disk')
+    assert.equal(h.reservationList().length, 3, 'all 3 reviewer reservations remain held while partial restore is in progress')
 
-    await writeFile(join(directory, 'desktop.json'), '{\n  "profiles": [\n    { "path": "incomplete')
     await h.resetRuntimeForColdStartForTest()
     h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [], activeProfileId: null }, capabilities)
     h.setUnresolvedCopilot()

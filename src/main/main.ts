@@ -8333,9 +8333,24 @@ async function loadDesktopConfigWithRecovery(
   }
   if (recovery.newlyPreserved) {
     const postPreserveSnapshot = await readDesktopConfigSnapshot(file)
-    if (postPreserveSnapshot.raw !== null && !postPreserveSnapshot.unparseable) {
-      snapshot = postPreserveSnapshot
-      recovery = { ...recovery, newlyPreserved: false }
+    if (postPreserveSnapshot.raw !== null) {
+      if (!postPreserveSnapshot.unparseable) {
+        snapshot = postPreserveSnapshot
+        recovery = { ...recovery, newlyPreserved: false }
+      } else {
+        const preservedRaw = recovery.hold
+          ? await readFile(recovery.hold, 'utf8').catch(() => null)
+          : null
+        if (postPreserveSnapshot.raw !== preservedRaw) {
+          const confirmSnapshot = await readDesktopConfigSnapshot(file)
+          if (confirmSnapshot.raw !== null && !confirmSnapshot.unparseable) {
+            snapshot = confirmSnapshot
+            recovery = { ...recovery, newlyPreserved: false }
+          } else {
+            recovery = { ...recovery, newlyPreserved: false, writesBlocked: true }
+          }
+        }
+      }
     }
   } else if (snapshot.unparseable && !recovery.writesBlocked) {
     const finalSnapshot = await readDesktopConfigSnapshot(file)
