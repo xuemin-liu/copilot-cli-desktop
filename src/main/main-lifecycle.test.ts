@@ -540,6 +540,29 @@ test('resuming a stored session keeps its own model and effort; a new session ge
   assert.deepEqual(fresh.slice(fresh.indexOf('--model'), fresh.indexOf('--model') + 4), ['--model', 'workspace-model', '--effort', 'high'])
 }))
 
+test('Continue and the picker start fresh with the workspace model when Copilot has no session to resume', async () => {
+  for (const mode of ['continue', 'picker'] as const) {
+    await fixture(async (harness, directory) => {
+      const { profile, capabilities } = configure(harness, directory)
+      capabilities.supportedOptions = [...capabilities.supportedOptions, '--model', '--reasoning-effort']
+      profile.launch = { ...profile.launch, model: 'workspace-model', reasoningEffort: 'low' }
+      profile.defaultResumeMode = mode
+      const flag = mode === 'continue' ? '--continue' : '--resume'
+      await harness.createMain()
+      const fresh = harness.spawns[0]!.args
+      assert.ok(!fresh.includes(flag) && fresh.some((arg) => arg.startsWith('--session-id=')), fresh.join(' '))
+      assert.deepEqual(fresh.slice(fresh.indexOf('--model'), fresh.indexOf('--model') + 4), ['--model', 'workspace-model', '--reasoning-effort', 'low'])
+      const path = join(directory, 'session-state', SOURCE, 'events.jsonl')
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, JSON.stringify({ type: 'session.start', data: {} }) + '\n')
+      await harness.request('desktop:create-tab', null, profile.id)
+      const resumed = harness.spawns.at(-1)!.args
+      assert.ok(resumed.includes(flag), resumed.join(' '))
+      assert.ok(!['--model', '--reasoning-effort'].some((option) => resumed.includes(option)), resumed.join(' '))
+    })
+  }
+})
+
 test('meeting start reads pending explicit requests after resume and repeated requests in the same tab', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
@@ -1038,6 +1061,9 @@ test('workspace session creation targets an inactive profile without restoring i
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second], activeProfileId: first.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true })
   const original = await harness.createMain()
   second.tabs = [{ title: 'Saved session', lastSessionId: SOURCE }]
+  // Continue resumes only when Copilot has a session stored.
+  await mkdir(join(directory, 'session-state', SOURCE), { recursive: true })
+  await writeFile(join(directory, 'session-state', SOURCE, 'events.jsonl'), '{"type":"session.start","data":{}}\n')
   const state = await harness.request('desktop:create-tab', null, second.id)
   assert.equal(harness.spawns.length, 2)
   assert.equal(harness.spawns[1]!.cwd, targetPath)

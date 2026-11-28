@@ -1902,6 +1902,17 @@ async function copilotSessionStored(sessionId: string): Promise<boolean> {
   try { await access(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl')); return true } catch { return false }
 }
 
+/** Whether Copilot has any session to resume: with none, `--continue` and the picker open a new conversation. */
+async function anyCopilotSessionStored(): Promise<boolean> {
+  const root = copilotSessionRoot(process.env)
+  let entries: string[]
+  try { entries = await readdir(root) } catch { return false }
+  for (const entry of entries) {
+    try { await access(join(root, entry, 'events.jsonl')); return true } catch { /* not a stored session */ }
+  }
+  return false
+}
+
 /** Builds the launch arguments and throws if any options
  * aren't supported by this Copilot CLI. `buildSessionLaunchArgs` is pure/sync
  * (`--model`, the effort option and `--worktree` apply only to a fresh session), so this is cheap
@@ -2446,6 +2457,9 @@ async function startSessionTab(
     resumeSessionId = null
     resumeMode = 'new'
   }
+  // A resume keeps the session's own model and effort, but with nothing stored Copilot starts a new conversation:
+  // start it as one, so it gets the workspace's model and effort.
+  if (!connectSessionId && (resumeMode === 'continue' || resumeMode === 'picker') && !await anyCopilotSessionStored()) resumeMode = 'new'
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt.
   const autoTitle = !connectSessionId && !titleOverride?.trim()
