@@ -148,48 +148,165 @@ function readListShare(): number {
   return 40
 }
 
-const gitViews = new Map<string, { count: number; latest: Promise<GitProjectView> }>()
+export interface GitPanelIpcClient {
+  gitOpen(profileId: string): Promise<GitProjectView>
+  gitRescan(profileId: string): Promise<GitProjectView>
+  gitClose(profileId: string): Promise<void>
+  onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void
+}
+
+interface SharedGitView {
+  count: number
+  subscribed: boolean
+  inFlight: Promise<GitProjectView> | null
+  latest: Promise<GitProjectView> | null
+  seq: number
+  listeners: Set<(state: { view?: GitProjectView; error?: string | null }) => void>
+}
+
+const gitViews = new Map<string, SharedGitView>()
+
+function openSharedGitView(
+  profileId: string,
+  shared: SharedGitView,
+  ipc: Pick<GitPanelIpcClient, 'gitOpen'>,
+): { promise: Promise<GitProjectView>; seq: number } {
+  if (shared.inFlight) return { promise: shared.inFlight, seq: shared.seq }
+  const seq = ++shared.seq
+  const promise = ipc.gitOpen(profileId)
+  shared.inFlight = promise
+  shared.latest = promise
+  promise.then(
+    next => {
+      if (shared.inFlight === promise) shared.inFlight = null
+      if (shared.seq === seq) {
+        shared.subscribed = true
+        shared.latest = Promise.resolve(next)
+        for (const listener of shared.listeners) listener({ view: next, error: null })
+      }
+    },
+    (cause: unknown) => {
+      if (shared.inFlight === promise) shared.inFlight = null
+      if (shared.seq === seq && !shared.subscribed) {
+        shared.latest = null
+        for (const listener of shared.listeners) listener({ error: errorMessage(cause) })
+      }
+    },
+  )
+  return { promise, seq }
+}
+
+/** Shared subscription lifecycle for `useGitProject`, exported for deterministic unit testing. */
+export function acquireGitProjectSubscription(
+  profileId: string,
+  ipc: GitPanelIpcClient,
+  onUpdate: (state: { view?: GitProjectView; error?: string | null }) => void,
+  store: Map<string, SharedGitView> = gitViews,
+): {
+  rescan(): Promise<void>
+  replace(next: GitProjectView): void
+  dispose(): void
+} {
+  let disposed = false
+  let shared = store.get(profileId)
+  if (!shared) {
+    shared = { count: 0, subscribed: false, inFlight: null, latest: null, seq: 0, listeners: new Set() }
+    store.set(profileId, shared)
+  }
+  const entry = shared
+  entry.count++
+  const listener = (state: { view?: GitProjectView; error?: string | null }): void => {
+    if (!disposed) onUpdate(state)
+  }
+  entry.listeners.add(listener)
+  const off = ipc.onGitChanged(payload => {
+    if (!disposed && payload.profileId === profileId) {
+      entry.seq++
+      entry.subscribed = true
+      entry.latest = Promise.resolve(payload.view)
+      onUpdate({ view: payload.view, error: null })
+    }
+  })
+  if (entry.subscribed && entry.latest) {
+    const initial = entry.latest
+    void initial.then(next => {
+      if (!disposed && entry.latest === initial) onUpdate({ view: next, error: null })
+    })
+  } else {
+    openSharedGitView(profileId, entry, ipc)
+  }
+  return {
+    rescan: async () => {
+      onUpdate({ error: null })
+      if (!entry.subscribed) {
+        await openSharedGitView(profileId, entry, ipc).promise.catch(() => undefined)
+        return
+      }
+      const seq = ++entry.seq
+      try {
+        const next = await ipc.gitRescan(profileId)
+        if (entry.seq === seq) {
+          entry.subscribed = true
+          entry.latest = Promise.resolve(next)
+          for (const sub of entry.listeners) sub({ view: next, error: null })
+        }
+      } catch (cause) {
+        if (!disposed && entry.seq === seq) onUpdate({ error: errorMessage(cause) })
+      }
+    },
+    replace: (next: GitProjectView) => {
+      entry.seq++
+      entry.subscribed = true
+      entry.latest = Promise.resolve(next)
+      for (const sub of entry.listeners) sub({ view: next, error: null })
+    },
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      off()
+      entry.listeners.delete(listener)
+      if (--entry.count === 0) {
+        store.delete(profileId)
+        void ipc.gitClose(profileId).catch(() => undefined)
+      }
+    },
+  }
+}
 
 /** Opens the project in the main process, follows its pushed changes, and closes it again on unmount. */
 function useGitProject(profileId: string): { view: GitProjectView | null; error: string | null; busy: boolean; rescan(): void; replace(view: GitProjectView): void } {
   const [view, setView] = useState<GitProjectView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const handleRef = useRef<ReturnType<typeof acquireGitProjectSubscription> | null>(null)
   useEffect(() => {
-    let disposed = false
     setView(null)
     setError(null)
-    // The first view arrives both as the open's result and as an event; treating both as "latest" is harmless.
-    let subscription = gitViews.get(profileId)
-    if (!subscription) {
-      subscription = { count: 0, latest: window.copilotDesktop.gitOpen(profileId) }
-      gitViews.set(profileId, subscription)
-    }
-    const shared = subscription
-    shared.count++
-    const off = window.copilotDesktop.onGitChanged(payload => {
-      if (!disposed && payload.profileId === profileId) {
-        shared.latest = Promise.resolve(payload.view)
-        setView(payload.view)
-      }
+    const handle = acquireGitProjectSubscription(profileId, window.copilotDesktop, update => {
+      if (update.error !== undefined) setError(update.error)
+      if (update.view !== undefined) setView(update.view)
     })
-    const initial = shared.latest
-    initial.then(next => { if (!disposed && shared.latest === initial) setView(next) })
-      .catch((cause: unknown) => { if (!disposed) setError(errorMessage(cause)) })
+    handleRef.current = handle
     return () => {
-      disposed = true; off()
-      if (--shared.count === 0) {
-        gitViews.delete(profileId)
-        void window.copilotDesktop.gitClose(profileId).catch(() => undefined)
-      }
+      if (handleRef.current === handle) handleRef.current = null
+      handle.dispose()
     }
   }, [profileId])
   const rescan = useCallback(() => {
+    const handle = handleRef.current
+    if (!handle) return
     setBusy(true)
-    setError(null)
-    window.copilotDesktop.gitRescan(profileId).then(setView).catch((cause: unknown) => setError(errorMessage(cause))).finally(() => setBusy(false))
-  }, [profileId])
-  return { view, error, busy, rescan, replace: setView }
+    void handle.rescan().finally(() => setBusy(false))
+  }, [])
+  const replace = useCallback((next: GitProjectView) => {
+    const handle = handleRef.current
+    if (handle) handle.replace(next)
+    else {
+      setError(null)
+      setView(next)
+    }
+  }, [])
+  return { view, error, busy, rescan, replace }
 }
 
 /**

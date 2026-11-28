@@ -1090,3 +1090,32 @@ test('the exported desktop preferences keep each workspace\'s settings for other
   assert.deepEqual(exported.profiles[0]!.otherCli, otherCli)
   assert.equal('otherCli' in exported.profiles[1]!, false)
 })
+
+test('planMigrationImport rejects two archive asset groups mapped to the same destination directory', async (t) => {
+  const { root, target } = await fixture(t)
+  const sharedDest = join(root, 'shared-workspace')
+  await mkdir(sharedDest)
+  const p1 = '1111111111111111'
+  const p2 = '2222222222222222'
+  // Distinct leaf filenames (`a.md` vs `b.md`) bypass file-level `targets`, exercising `groupRoots` collision detection:
+  const entry1 = fileEntry(`projects/${p1}/.github/skills/deploy/a.md`, 'projects', Buffer.from('from p1'))
+  const entry2 = fileEntry(`projects/${p2}/.github/skills/deploy/b.md`, 'projects', Buffer.from('from p2'))
+  const collidingArchive = {
+    manifest: {
+      ...manifest(),
+      projects: [
+        { id: p1, name: 'one', sourcePath: 'C:\\src\\one' },
+        { id: p2, name: 'two', sourcePath: 'C:\\src\\two' },
+      ],
+      entries: [
+        (({ data: _d1, ...m1 }) => m1)(entry1),
+        (({ data: _d2, ...m2 }) => m2)(entry2),
+      ],
+    },
+    files: [entry1, entry2],
+  }
+  await assert.rejects(
+    planMigrationImport(collidingArchive, target, { [p1]: sharedDest, [p2]: sharedDest }, { ...choices, categories: ['projects'], replace: [`projects/${p1}/.github/skills/deploy`, `projects/${p2}/.github/skills/deploy`] }),
+    /Multiple archive entries map to the same destination/,
+  )
+})

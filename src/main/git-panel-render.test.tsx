@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffChangeSignature, diffCommentKey, diffLineKind, numberDiffLines } from '../renderer/components/GitDiffView.js'
-import { GitMarkedBar, GitPanel, RepoRow, canDiscard, draftOf, pickRepo } from '../renderer/components/GitPanel.js'
-import type { GitMarkedBarProps } from '../renderer/components/GitPanel.js'
+import { GitMarkedBar, GitPanel, RepoRow, acquireGitProjectSubscription, canDiscard, draftOf, pickRepo } from '../renderer/components/GitPanel.js'
+import type { GitMarkedBarProps, GitPanelIpcClient } from '../renderer/components/GitPanel.js'
+import { deliverBrowserPrompt } from '../renderer/components/BrowserPanel.js'
 import { markedEntries, nextMarks } from '../renderer/git-marks.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import type { AmendState } from '../renderer/components/GitCommitBox.js'
@@ -534,4 +535,110 @@ test('Commit waits, and says why, while Copilot works on the repository', () => 
   const locked = commitBox({ lockedReason: 'Copilot is working on this repository in “Fix login”. Wait for it to finish.' })
   assert.match(locked, /<button[^>]*disabled[^>]*>Commit 2 files/)
   assert.match(locked, /Copilot is working on this repository/)
+})
+
+test('acquireGitProjectSubscription retries failed gitOpen via single-flight rescan, switches to gitRescan once subscribed, and clears stale errors on push/replace', async () => {
+  let openCalls = 0
+  let rescanCalls = 0
+  let closeCalls = 0
+  let changeListener: ((payload: { profileId: string; view: Parameters<typeof pickRepo>[0] }) => void) | null = null
+  let resolveRetryOpen!: (value: Parameters<typeof pickRepo>[0]) => void
+  const okView = { git: { available: true, version: '2.45.0', supported: true, error: null }, repos: [summary()], truncated: false, notes: [] }
+  const rescannedView = { ...okView, notes: ['rescanned'] }
+
+  const ipc: GitPanelIpcClient = {
+    gitOpen: () => {
+      openCalls += 1
+      if (openCalls === 1) return Promise.reject(new Error('Workspace temporarily unavailable'))
+      return new Promise(resolve => { resolveRetryOpen = resolve })
+    },
+    gitRescan: async () => {
+      rescanCalls += 1
+      return rescannedView
+    },
+    gitClose: async () => { closeCalls += 1 },
+    onGitChanged: listener => {
+      changeListener = listener
+      return () => { changeListener = null }
+    },
+  }
+
+  let currentView: Parameters<typeof pickRepo>[0] | null = null
+  let currentError: string | null = null
+  const store = new Map()
+  const sub = acquireGitProjectSubscription('prof-1', ipc, update => {
+    if (update.error !== undefined) currentError = update.error
+    if (update.view !== undefined) currentView = update.view
+  }, store)
+
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(openCalls, 1)
+  assert.match(currentError ?? '', /Workspace temporarily unavailable/)
+  assert.equal(currentView, null)
+
+  // Clicking Rescan twice while unsubscribed shares a single-flight `gitOpen` retry and never calls `gitRescan`:
+  const retry1 = sub.rescan()
+  const retry2 = sub.rescan()
+  assert.equal(openCalls, 2, 'concurrent rescans share one in-flight gitOpen')
+  assert.equal(rescanCalls, 0, 'gitRescan is not called before gitOpen succeeds')
+  resolveRetryOpen(okView)
+  await Promise.all([retry1, retry2])
+  assert.equal(currentError, null)
+  assert.equal(currentView, okView)
+
+  // Once subscribed, Rescan calls `gitRescan` and clears any transient error on `onGitChanged` / `replace`:
+  await sub.rescan()
+  assert.equal(rescanCalls, 1)
+  assert.equal(currentView, rescannedView)
+
+  const pushedView = { ...okView, notes: ['pushed'] }
+  ;(changeListener as ((payload: { profileId: string; view: Parameters<typeof pickRepo>[0] }) => void) | null)?.({ profileId: 'prof-1', view: pushedView })
+  assert.equal(currentError, null)
+  assert.equal(currentView, pushedView)
+
+  const replacedView = { ...okView, notes: ['replaced'] }
+  sub.replace(replacedView)
+  assert.equal(currentError, null)
+  assert.equal(currentView, replacedView)
+
+  sub.dispose()
+  assert.equal(closeCalls, 1)
+})
+
+test('deliverBrowserPrompt reports failure when no terminal accepts the prompt insert instead of falsely claiming success', () => {
+  const rejectedText = deliverBrowserPrompt({
+    independent: false,
+    currentTarget: null,
+    tabId: 'tab-1',
+    detail: { text: '[Browser element] <button#save>' },
+    done: 'Elements added to the prompt box.',
+    insertText: () => false,
+  })
+  assert.deepEqual(rejectedText, {
+    ok: false,
+    error: 'Open or focus the session terminal in this window to attach browser context.',
+  })
+
+  const rejectedImage = deliverBrowserPrompt({
+    independent: true,
+    currentTarget: 'tab-popped-out',
+    tabId: 'tool:browser',
+    detail: { image: true },
+    done: 'Screenshot attached.',
+    attachImage: () => false,
+  })
+  assert.deepEqual(rejectedImage, {
+    ok: false,
+    error: 'Open or focus the session terminal in this window to attach browser context.',
+  })
+
+  const accepted = deliverBrowserPrompt({
+    independent: true,
+    currentTarget: 'tab-1',
+    tabId: 'tool:browser',
+    detail: { text: 'ok' },
+    done: 'Elements added to the prompt box.',
+    insertText: (dest, text) => dest === 'tab-1' && text === 'ok',
+  })
+  assert.deepEqual(accepted, { ok: true, notice: 'Elements added to the prompt box.' })
 })

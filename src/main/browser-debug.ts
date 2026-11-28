@@ -607,7 +607,7 @@ export class BrowserDebug {
     window.on('close', event => {
       if (contents.isDestroyed() || this.disposed) return
       event.preventDefault()
-      if (this.projectMode) { void this.closePage(contents.id); return }
+      if (this.projectMode) { void this.closePage(contents.id).catch(error => this.reportError(String(error))); return }
       if (asking) return
       closing = true
       contents.close({ waitForBeforeUnload: true })
@@ -1242,7 +1242,7 @@ export class BrowserDebug {
       if (!page) throw new Error('Unknown browser page')
       if (pageAction[1] === 'select-page') this.selectPage(id, true)
       // A popup window can always close; the last tab stays.
-      else if (this.projectMode) void this.closePage(id)
+      else if (this.projectMode) void this.closePage(id).catch(error => this.reportError(String(error)))
       else if (page.window || [...this.pages.values()].filter(entry => !entry.window).length > 1) page.view.webContents.close()
       return this.snapshot
     }

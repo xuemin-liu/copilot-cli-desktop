@@ -113,19 +113,24 @@ export class BrowserReader {
 
   private readonly closeGuards = new Map<number, { confirm(): Promise<boolean>; cancelled(): void; failed(error: unknown): void }>()
   async closePage(id: number, confirm: () => Promise<boolean>): Promise<boolean> {
-    const page = this.page(String(id))
-    // A never-navigated WebContents has no renderer document to enable CDP on or edits to guard.
-    if (!page.contents.getURL() && !page.contents.isLoading()) {
+    const page = this.readers.get(id)
+    if (!page || page.contents.isDestroyed()) return true
+    // A never-navigated or crashed WebContents has no live renderer document to enable CDP on or edits to guard.
+    if ((!page.contents.getURL() && !page.contents.isLoading()) || page.contents.isCrashed()) {
       return new Promise<boolean>(resolve => {
+        if (page.contents.isDestroyed()) { resolve(true); return }
         page.contents.once('destroyed', () => resolve(true))
         page.contents.close({ waitForBeforeUnload: false })
       })
     }
-    await this.attach(page)
     return new Promise<boolean>((resolve, reject) => {
       let settled = false
+      let beforeUnloadShown = false
       let decision: Promise<boolean> | undefined
-      const ask = (): Promise<boolean> => decision ??= confirm()
+      const ask = (): Promise<boolean> => {
+        beforeUnloadShown = true
+        return (decision ??= confirm())
+      }
       const prevented = (): void => {
         void ask().then(leave => {
           if (settled || page.contents.isDestroyed()) return
@@ -143,18 +148,49 @@ export class BrowserReader {
         cleanup(); resolve(value)
       }
       const destroyed = (): void => finish(true)
-      const failed = (error: unknown): void => { if (settled) return; settled = true; cleanup(); reject(error) }
+      const failed = (error: unknown): void => {
+        if (settled) return
+        if (page.contents.isDestroyed()) { finish(true); return }
+        if (beforeUnloadShown && decision) {
+          void decision.then(leave => {
+            if (settled || page.contents.isDestroyed()) { finish(true); return }
+            if (!leave) finish(false)
+            else page.contents.close({ waitForBeforeUnload: false })
+          }, () => finish(false))
+          return
+        }
+        settled = true; cleanup(); reject(error)
+      }
+      const fallbackElectronClose = (): void => {
+        if (settled) return
+        if (page.contents.isDestroyed()) { finish(true); return }
+        if (beforeUnloadShown) return
+        page.contents.off('will-prevent-unload', prevented)
+        page.contents.once('will-prevent-unload', prevented)
+        page.contents.close({ waitForBeforeUnload: true })
+      }
       this.closeGuards.set(id, { confirm: ask, cancelled: () => finish(false), failed })
       page.contents.once('destroyed', destroyed)
-      void this.command(page, 'Page.close').catch(error => {
-        if (page.contents.isDestroyed()) finish(true)
-        else if (error instanceof Error && error.message.includes('Not attached to an active page')) {
-          // Chromium can detach the CDP target when native DevTools moves between windows.
-          // Let Electron run beforeunload and ask the user if that prevents the close.
-          page.contents.once('will-prevent-unload', prevented)
-          page.contents.close({ waitForBeforeUnload: true })
+      void (async () => {
+        await this.attach(page)
+        if (settled || page.contents.isDestroyed()) { finish(true); return }
+        if (page.dialog) {
+          const openDialog = page.dialog
+          page.dialog = null
+          if (openDialog.type === 'beforeunload') {
+            const leave = await ask().catch(() => false)
+            if (settled || page.contents.isDestroyed()) { finish(true); return }
+            await this.command(page, 'Page.handleJavaScriptDialog', { accept: leave }, openDialog.sessionId).catch(() => {})
+            if (!leave) { finish(false); return }
+            page.contents.close({ waitForBeforeUnload: false })
+            return
+          }
+          await this.command(page, 'Page.handleJavaScriptDialog', { accept: false }, openDialog.sessionId).catch(() => {})
         }
-        else failed(error)
+        if (settled || page.contents.isDestroyed()) { finish(true); return }
+        await this.command(page, 'Page.close')
+      })().catch(() => {
+        fallbackElectronClose()
       })
     })
   }

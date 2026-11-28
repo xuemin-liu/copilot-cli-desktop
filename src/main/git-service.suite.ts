@@ -16,6 +16,7 @@ import { createGitFixture, findGitForTests, folderLink, shellPath } from './fixt
 import { TRASH_NAME } from './host-path.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, STATUS_TOO_LARGE_MESSAGE, isIndexLockFailure } from './git-service.js'
+import { discoverRepos } from './git-discovery.js'
 import type { GitServiceOptions } from './git-service.js'
 import { GitTrustStore, scanRepoConfig } from './git-trust.js'
 import type { GitConfirmRequest, GitProjectView, GitRepoStatusView } from './git-types.js'
@@ -2752,4 +2753,81 @@ shardedTest('a merged, unused worktree is removed after confirmation; everything
   assert.ok(!existsSync(done))
   assert.deepEqual((await h.service.getWorktrees(SUBSCRIBER, PROFILE, main.id)).map(entry => entry.branch), ['main', 'desktop-dirty-dddddd', 'desktop-locked-cccccc', 'desktop-wip-bbbbbb'])
   assert.ok((await h.service.getBranches(SUBSCRIBER, PROFILE, main.id)).some(branch => branch.name === 'desktop-done-aaaaaa'), 'the branch is kept')
+})
+
+shardedTest('rescan and trust wait for an in-flight refresh to finish instead of joining a pre-mutation refresh', { skip }, async (t) => {
+  let discoverCalls = 0
+  let releaseSlowStatus: (() => void) | null = null
+  let enteredSlowStatus: (() => void) | null = null
+  const h = await harness(t, (f, project) => {
+    const alpha = join(project, 'alpha')
+    mkdirSync(alpha, { recursive: true })
+    committed(f, alpha, { 'a.txt': 'one\n' })
+  })
+  const slowRunner = {
+    run: async (options: Parameters<typeof h.fixture.runner.run>[0]) => {
+      if (enteredSlowStatus && options.args.includes('status')) {
+        const notify = enteredSlowStatus
+        enteredSlowStatus = null
+        notify()
+        await new Promise<void>(resolve => { releaseSlowStatus = resolve })
+      }
+      return h.fixture.runner.run(options)
+    },
+  } as unknown as typeof h.fixture.runner
+
+  const custom = new GitService({
+    getRuntime: async () => ({ runner: slowRunner, executable: h.fixture.git }),
+    trustStore: h.trustStore,
+    resolveProject: profileId => profileId === PROFILE ? h.project : null,
+    discover: async root => {
+      discoverCalls += 1
+      return discoverRepos(root)
+    },
+    onChanged: () => {},
+    debounceMs: 10,
+    fallbackMs: 60_000,
+  })
+  t.after(() => custom.dispose())
+
+  const initial = await custom.subscribe(SUBSCRIBER, PROFILE)
+  assert.equal(discoverCalls, 1)
+  assert.equal(initial.repos.length, 1)
+
+  // 1. Start a background refresh that is already past discovery (`!project.discovered || project.rescanNext`) and blocked in `git status`:
+  const slowStarted = new Promise<void>(resolve => { enteredSlowStatus = resolve })
+  custom.requestRefresh(PROFILE)
+  await slowStarted
+
+  // Create a sibling repository inside the workspace while the background refresh is already past discovery, then call `rescan()`:
+  const beta = join(h.project, 'beta')
+  mkdirSync(beta, { recursive: true })
+  h.fixture.plain(beta, 'init', '-q')
+  writeFileSync(join(beta, 'b.txt'), 'beta\n')
+  h.fixture.plain(beta, 'config', 'core.sshCommand', 'ssh -i review-key')
+
+  let rescanResolved = false
+  const pendingRescan = custom.rescan(SUBSCRIBER, PROFILE).then(view => { rescanResolved = true; return view })
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(rescanResolved, false, 'rescan waits for the already-in-flight refresh instead of returning its stale view')
+  ;(releaseSlowStatus as (() => void) | null)?.()
+  const rescanned = await pendingRescan
+  assert.equal(discoverCalls, 2, 'rescan runs a fresh discovery pass after the in-flight refresh finishes')
+  const betaRepo = rescanned.repos.find(repo => repo.relativePath === 'beta')
+  assert.ok(betaRepo, 'newly created sibling repo is returned by rescan')
+  assert.equal(betaRepo.state, 'needs-review')
+
+  // 2. Start another background refresh that has already evaluated `beta` as `needs-review` and is blocked in `alpha`'s `git status`,
+  //    then call `trust()` on `beta` and verify `trust()` waits and returns `beta` in `'ready'` state:
+  const slowStarted2 = new Promise<void>(resolve => { enteredSlowStatus = resolve })
+  custom.requestRefresh(PROFILE)
+  await slowStarted2
+
+  let trustResolved = false
+  const pendingTrust = custom.trust(SUBSCRIBER, PROFILE, betaRepo.id, betaRepo.configHash!).then(view => { trustResolved = true; return view })
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(trustResolved, false, 'trust waits for the in-flight refresh instead of returning needs-review')
+  ;(releaseSlowStatus as (() => void) | null)?.()
+  const trustedView = await pendingTrust
+  assert.equal(trustedView.repos.find(repo => repo.id === betaRepo.id)?.state, 'ready', 'trust runs a fresh refresh after persisting trust')
 })
