@@ -388,7 +388,6 @@ let browserZoom: BrowserZoom | null = null
 const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
 const lastDockedToolSession = new Map<string, string>()
 let focusedPeekTabId: string | null = null
-let mainNavigationSeq = 0
 const sessionWindows = new Map<string, BrowserWindow>()
 
 function validatedLastDockedSession(profileId: string | null): string | null {
@@ -423,6 +422,25 @@ function requestPeekReviewerInMain(tabId: string, peekKey: string): void {
   const window = mainWindow
   if (!window || window.isDestroyed()) return
   window.webContents.send('desktop:peek-reviewer-request', { tabId, peekKey })
+}
+
+/**
+ * Carries an active standalone (`hostTabId: null`) reviewer peek onto a newly published host tab in the same workspace
+ * synchronously right after `broadcastState()`, before any async session startup can race with later user Peek/Hide actions.
+ */
+function carryStandalonePeekToHost(profileId: string, hostCandidateId: string | null): void {
+  if (!hostCandidateId || desktopConfig.activeProfileId !== profileId) return
+  const pendingPeekId = activeFocusedPeekTabId()
+  if (!pendingPeekId) return
+  const peekTab = tabsState.tabs.find((tab) => (
+    tab.id === pendingPeekId
+    && Boolean(tab.tempReviewer)
+    && tab.tempReviewer!.hostTabId === null
+    && tab.workspaceProfileId === profileId
+  ))
+  const hostTab = tabsState.tabs.find((tab) => tab.id === hostCandidateId && !tab.tempReviewer && tab.workspaceProfileId === profileId)
+  if (!peekTab || !hostTab) return
+  requestPeekReviewerInMain(peekTab.id, hostTab.sideParentTabId ?? hostTab.id)
 }
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -2473,7 +2491,7 @@ async function startSessionTab(
   titleOverride: string | null = null,
   /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved).
    * `worktreePath`: the existing worktree chosen there, checked against the project's worktrees before anything starts. */
-  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli; carryStandalonePeek?: true
     /** A review loop's session: sandboxed, in the desktop's own clone of the PR, with its own Copilot home (pr-review-launch.ts). */
     reviewer?: { area: ReviewerArea; policy: ReviewerPolicy } } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
@@ -2597,6 +2615,7 @@ async function startSessionTab(
   syncWorkspaceState()
   syncTabState()
   broadcastState()
+  if (sideOptions.carryStandalonePeek) carryStandalonePeekToHost(profile.id, id)
   refreshMenus()
   wireSessionEvents(id, session)
 
@@ -3073,7 +3092,6 @@ function activateSessionTab(tabId: string): DesktopState {
 }
 
 function selectSessionInMain(tabId: string): DesktopState {
-  mainNavigationSeq += 1
   const target = tabsState.tabs.find((tab) => tab.id === tabId)
   if (target?.tempReviewer) {
     const previous = tabsState.activeTabId
@@ -7586,7 +7604,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     }
     // A fresh tab for an empty workspace is not a saved session to retain.
     if (!restored.length) {
-      try { await createSessionTab(profile, 'new', null, [], null, profile.name) }
+      try { await createSessionTab(profile, 'new', null, [], null, profile.name, { carryStandalonePeek: true }) }
       catch (error) { await writeAppLog(`Failed to start a session for ${profile.path}: ${String(error)}`) }
       return
     }
@@ -7612,6 +7630,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
     syncTabState()
     persistProfileTabs()
     broadcastState()
+    if (activate && target) carryStandalonePeekToHost(profile.id, target)
     refreshMenus()
     // A restore that showed its tab starts it, with its side chat on screen, and is over once they have started. One
     // that only listed its tabs starts nothing.
@@ -7750,7 +7769,6 @@ async function openAddedWorkspace(profile: WorkspaceProfile): Promise<DesktopSta
 async function activateProfile(profileId: string): Promise<DesktopState> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  mainNavigationSeq += 1
   desktopConfig.activeProfileId = profile.id
   focusedPeekTabId = null
   syncWorkspaceState()
@@ -7782,22 +7800,7 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   await persistConfig()
   if (needsRestore && desktopConfig.activeProfileId === profile.id && isCopilotResolved()
     && !tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id && !tab.tempReviewer)) {
-    const pendingStandalonePeekId = activeFocusedPeekTabId()
-    const seqBeforeRestore = mainNavigationSeq
     await restoreTabsForProfile()
-    if (pendingStandalonePeekId && desktopConfig.activeProfileId === profile.id && mainNavigationSeq === seqBeforeRestore) {
-      const peekTab = tabsState.tabs.find((tab) => (
-        tab.id === pendingStandalonePeekId
-        && Boolean(tab.tempReviewer)
-        && tab.tempReviewer!.hostTabId === null
-        && tab.workspaceProfileId === profile.id
-      ))
-      const restoredId = activeWorkspaceRegularTabId()
-      const restoredTab = restoredId ? tabsState.tabs.find((tab) => tab.id === restoredId) : null
-      if (peekTab && restoredTab) {
-        requestPeekReviewerInMain(peekTab.id, restoredTab.sideParentTabId ?? restoredTab.id)
-      }
-    }
   }
   return snapshot()
 }
