@@ -2458,7 +2458,9 @@ async function startSessionTab(
     resumeMode = 'new'
   }
   // A resume keeps the session's own model and effort, but with nothing stored Copilot starts a new conversation:
-  // start it as one, so it gets the workspace's model and effort.
+  // start it as one, so it gets the workspace's model and effort. A new conversation started from inside a populated
+  // picker gets Copilot's own default instead: no launch option applies only to it, and `--model` or COPILOT_MODEL
+  // would also replace the model of whichever saved session is picked.
   if (!connectSessionId && (resumeMode === 'continue' || resumeMode === 'picker') && !await anyCopilotSessionStored()) resumeMode = 'new'
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt.
