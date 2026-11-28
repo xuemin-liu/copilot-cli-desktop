@@ -132,17 +132,17 @@ export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, ca
                 {tab.cli && <span className="session-cli-chip" title={`This tab runs ${sessionCliLabel(tab.cli)}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{sessionCliLabel(tab.cli)}</span>}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
-              {!tab.tempReviewer && toolsControl}
-              {onToggleGit && !tab.sideChat && !tab.tempReviewer && (
+              {!tab.tempReviewer && !tab.reviewer && toolsControl}
+              {onToggleGit && !tab.sideChat && !tab.tempReviewer && !tab.reviewer && (
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
-              {onOpenBrowser && !tab.tempReviewer && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label="Open browser"
+              {onOpenBrowser && !tab.tempReviewer && !tab.reviewer && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label="Open browser"
                 title="Browser" onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
-              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && (
+              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && !tab.reviewer && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}
-              {onPopOut && !tab.tempReviewer && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
+              {onPopOut && !tab.tempReviewer && !tab.reviewer && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.tempReviewer ? (
                 <>
                   <span className="side-chat-badge" title={`Temporary reviewer for ${tab.tempReviewer.repository} ${tab.tempReviewer.prLabel}`}>Temp reviewer</span>
@@ -151,6 +151,8 @@ export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, ca
                       aria-label={`Hide ${tab.title}`} title="Hide reviewer pane — keep the review running in the background">Hide</button>
                   )}
                 </>
+              ) : tab.reviewer ? (
+                <span className="side-chat-badge" title="Sandboxed pull request review session">PR reviewer</span>
               ) : tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && !tab.cli && (
@@ -158,7 +160,7 @@ export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, ca
                   title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
                   onClick={() => onFork(tab)}><SideChatIcon /></button>
               )}
-              {!tab.remote && !tab.tempReviewer && (
+              {!tab.remote && !tab.tempReviewer && !tab.reviewer && (
                 <button type="button" className="icon-button session-restart" disabled={busy} onClick={() => onRestart(tab.id)}
                   aria-label={`Restart ${tab.title}`}
                   title="Restart this session with its saved settings, keeping the same conversation">↻</button>
@@ -182,7 +184,7 @@ export function SessionWorkspace({ tabs, activeTabId, activeProfileId = null, ca
                 )}
               </div>
             )}
-            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
+            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && !tab.tempReviewer && !tab.reviewer && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
             )}
             {/* A popped-out session shows its terminal and its stopped notice in its own window only. */}

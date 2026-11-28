@@ -484,7 +484,50 @@ test('SessionWorkspace strips right-panel/tool/pop-out controls from tempReviewe
     assert.match(standaloneHtml, /grid-row:2[^>]*aria-label="Temporary reviewer: Meeting J984 · Claude Code"/)
     const standalonePane = standaloneHtml.slice(standaloneHtml.indexOf('aria-label="Temporary reviewer:'))
     assert.doesNotMatch(standalonePane, /session-tools-toggle/, 'standalone reviewer header itself omits tools toggle')
+
+    // Sandboxed PR review loop tab (`reviewer: true`) hides tools, Git, Browser, Desktop Control, Pop-out, Fork, and Restart, and shows PR reviewer badge:
+    const sandboxedReviewer = makeTab('tab-pr-loop', 'Review #42', { reviewer: true, canFork: false })
+    const sandboxedHtml = renderToStaticMarkup(
+      <SessionWorkspace
+        tabs={[sandboxedReviewer]}
+        activeTabId="tab-pr-loop"
+        activeProfileId={PROFILE.id}
+        canOpenTab
+        toolsControl={<button type="button" className="session-tools-toggle">+ Tools</button>}
+        onActivate={noop}
+        onFork={noop}
+        onClose={noop}
+        onRestart={noop}
+        onShowLog={noop}
+        onCreate={noop}
+        onPopOut={noop}
+        onOpenBrowser={noop}
+        onToggleGit={noop}
+        desktopControlAllowed
+      />,
+    )
+    assert.match(sandboxedHtml, /PR reviewer/, 'sandboxed reviewer shows PR reviewer badge')
+    assert.doesNotMatch(sandboxedHtml, /session-tools-toggle/, 'sandboxed reviewer omits tools toggle')
+    assert.doesNotMatch(sandboxedHtml, /session-git-toggle/, 'sandboxed reviewer omits Git toggle')
+    assert.doesNotMatch(sandboxedHtml, /session-browser-toggle/, 'sandboxed reviewer omits Browser toggle')
+    assert.doesNotMatch(sandboxedHtml, /Open Review #42 in new window/, 'sandboxed reviewer omits Pop-out')
+    assert.doesNotMatch(sandboxedHtml, /Desktop control/i, 'sandboxed reviewer omits Desktop Control')
+    assert.doesNotMatch(sandboxedHtml, /session-fork/, 'sandboxed reviewer omits Fork')
+    assert.doesNotMatch(sandboxedHtml, /session-restart/, 'sandboxed reviewer omits Restart')
   } finally {
     await rm(tempDir, { recursive: true, force: true })
   }
+})
+
+test('stoppedNoticeContent omits Restart action for reviewer and tempReviewer tabs', async () => {
+  const { stoppedNoticeContent } = await import('../renderer/components/SessionStoppedNotice.js')
+  const crashedPrLoop = stoppedNoticeContent({ status: 'crashed', remote: false, reviewer: true })
+  assert.equal(crashedPrLoop?.action, null)
+  assert.equal(crashedPrLoop?.showLog, true)
+  const endedTemp = stoppedNoticeContent({
+    status: 'completed',
+    remote: false,
+    tempReviewer: { groupId: 'g-1', hostTabId: 'h', seatId: 'claude', cli: 'claude', repository: 'o/r', prLabel: 'PR #1', prNumber: 1, prUrl: null },
+  })
+  assert.equal(endedTemp?.action, null)
 })

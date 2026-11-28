@@ -125,6 +125,22 @@ export class WorkflowFollowups {
         PRAGMA user_version=1;`)
     } catch(error){this.db.close();throw error}
   }
+  static reviewerSessionIds(path:string):string[] {
+    let db:DatabaseSync|null=null
+    try {
+      db=new DatabaseSync(path,{readOnly:true})
+      const rows=db.prepare('SELECT value FROM followups LIMIT 1000').all() as {value:string}[]
+      const ids:string[]=[]
+      for(const row of rows){
+        try{
+          const parsed=JSON.parse(row.value) as {role?:unknown;sessionId?:unknown}|null
+          if(parsed?.role==='reviewer'&&typeof parsed.sessionId==='string'&&parsed.sessionId)ids.push(parsed.sessionId)
+        }catch{/* Ignore unreadable row during startup provenance scan. */}
+      }
+      return ids
+    } catch { return [] }
+    finally { try{db?.close()}catch{/* Ignore close errors. */} }
+  }
   list():FollowupGrant[] {
     return (this.db.prepare('SELECT value FROM followups ORDER BY rowid DESC LIMIT 1000').all() as {value:string}[]).map(row=>this.decode(row.value))
   }

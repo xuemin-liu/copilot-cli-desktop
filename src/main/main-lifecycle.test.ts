@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -89,6 +91,18 @@ interface Harness {
   workflowBroadcastReads(active:boolean):number
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
+  launchRuleEvent(rule:{id:string;revision:string;projectId:string;repository:string;scopeKey?:string},eventKey:string,version:string,title:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
+  interruptAutomaticTurn(tabId:string):void
+  pauseAutomaticProject(projectId?:string):void
+  setGithubApi(fn:((path:string,paged?:boolean)=>Promise<unknown>)|null):void
+  setProjectOriginOverride(origin:string|null):void
+  startPrReviewForTest(url:string,profileId?:string):Promise<{profileId:string}>
+  sweepReviewerAreasForTest():Promise<void>
+  openFollowupsForTest():Promise<import('./workflow-followups.js').WorkflowFollowups>
+  seedHeldInputForTest(tabId:string,items:string[]):void
+  readHeldInputForTest(tabId:string):string[]|undefined
+  reviewerTaskHas(taskId:string):boolean
+  reservationList():import('./pr-review-reservations.js').ReviewReservation[]
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   holdMeetingWrite(predicate:(path:string)=>boolean,work:()=>Promise<void>,started?:()=>void):void
@@ -103,7 +117,7 @@ interface Harness {
   corruptHandoff(tabId:string,corrupt?:boolean):void
   followupReadyFor(tabId:string):boolean
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
-  configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
+  configureBinding(tabId: string, rootPid: number, ownedPids: number[], envOverride?: NodeJS.ProcessEnv): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
   queueMeetingDelivery(tabId: string, kind: 'post' | 'add-dir',text?:string): void
@@ -292,6 +306,30 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           return real.writeMeetingFile(root, meetingId, path, text);
         }
       `,
+      './workflow-github.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'workflow-github.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'workflow-github.js'))};
+        let customApi = null;
+        export function setTestGithubApi(fn) { customApi = fn; }
+        export async function githubCliApi(dir) {
+          if (customApi) return customApi;
+          return real.githubCliApi(dir);
+        }
+        export async function githubCliWrite(dir) {
+          if (customApi) return async (_method, path) => ({ id: 9001, html_url: 'https://github.com/owner/repo/pull/1#r9001', path });
+          return real.githubCliWrite(dir);
+        }
+      `,
+      './pr-review-launch.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'pr-review-launch.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'pr-review-launch.js'))};
+        let originOverride = null;
+        export function setTestProjectOrigin(value) { originOverride = value; }
+        export async function projectOrigin(runner, project, repository) {
+          if (originOverride !== null) return originOverride;
+          return real.projectOrigin(runner, project, repository);
+        }
+      `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
@@ -321,6 +359,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
         import { holdMeetingWrite } from './meeting-session.js';
+        import { setTestGithubApi } from './workflow-github.js';
+        import { setTestProjectOrigin } from './pr-review-launch.js';
         import { browserStorageClears } from 'electron';
         import { SessionBindingReader as BindingReaderForTest } from './session-binding.js';
         const diagnosticWrites = [];
@@ -403,6 +443,36 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             const rule={id:randomUUID(),revision:randomUUID(),projectId,repository:'owner/repo',scopeKey:automationScope(projectId)};
             return launchAutomationTask(rule,{key:'github/owner/repo/issue/1',version:'a'.repeat(64),actorId:7,at:Date.now(),title:'Investigate issue',body:'Investigate token=fixture-secret',head,branch:'main'},authorized);
           },
+          launchRuleEvent: (rule,eventKey,version,title,head,authorized) => {
+            app.isReady=()=>true;state.resolution.version='1.0.105';refreshCopilotResolutionIfChanged=async()=>{};workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
+            return launchAutomationTask({...rule,scopeKey:rule.scopeKey??automationScope(rule.projectId)},{key:eventKey,version,actorId:7,at:Date.now(),title,body:'Investigate concurrent run',head,branch:'main'},authorized);
+          },
+          interruptAutomaticTurn: (tabId) => {
+            const run = automaticTurns.get(tabId);
+            if (run) interruptAutomatic(run.grant);
+          },
+          pauseAutomaticProject: (projectId) => interruptAutomaticProject(projectId),
+          setGithubApi: (fn) => setTestGithubApi(fn),
+          setProjectOriginOverride: (origin) => setTestProjectOrigin(origin),
+          startPrReviewForTest: (url, profileId) => {
+            app.isReady = () => true;
+            state.resolution.version = '1.0.105';
+            refreshCopilotResolutionIfChanged = async () => {};
+            workflows();
+            deliveryJournal ??= new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite'));
+            return startPrReview(url, profileId);
+          },
+          sweepReviewerAreasForTest: () => { app.isReady = () => true; return sweepReviewerAreas(); },
+          openFollowupsForTest: () => {
+            app.isReady = () => true;
+            workflows();
+            deliveryJournal ??= new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite'));
+            return openFollowups();
+          },
+          seedHeldInputForTest: (tabId, items) => { heldInput.set(tabId, [...items]); },
+          readHeldInputForTest: (tabId) => heldInput.get(tabId),
+          reviewerTaskHas: (taskId) => reviewerTasks.has(taskId),
+          reservationList: () => { app.isReady = () => true; return reviewReservations()?.list() ?? []; },
           interruptOwnedTurn: (tabId,foreign) => {
             const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
             const grant={id:randomUUID(),sessionId:tab.lastSessionId,projectId:tab.workspaceProfileId};
@@ -428,8 +498,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           followupReadyFor: tabId=>{app.isReady=()=>true;const tab=tabsState.tabs.find(t=>t.id===tabId),task=workflows().submitted(tab.lastSessionId,tab.workspaceProfileId,'Readiness fixture');return followupReady({taskId:task.id,sessionId:task.sessionId,projectId:task.projectId})},
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
-          configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
-            copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
+          configureBinding: (tabId, rootPid, pids, envOverride) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
+            copilotSessionRoot(envOverride ?? process.env), rootPid, async () => new Set(pids), () => true); },
           bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
           queueMeetingDelivery: (tabId, kind,text='automatic meeting material') => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text }); },
@@ -475,7 +545,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await desktopControl?.dispose();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();if(prPostTimer){clearInterval(prPostTimer);prPostTimer=null;}if(reviewQueueTimer){clearInterval(reviewQueueTimer);reviewQueueTimer=null;}reviewQueue=null;followups?.close();followups=null;prPosts?.close();prPosts=null;while(sweeping)await new Promise(r=>setTimeout(r,20));automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await desktopControl?.dispose();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -483,7 +553,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
       banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|pr-workflow-skills|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|pr-workflow-skills|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery|meeting-session|workflow-github|pr-review-launch)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
@@ -4759,4 +4829,272 @@ test('foreign-workspace activeTabId survives Close Session Tab menu while standa
     h.shellCalls.slice(beforeSecondLog).some(call => call.action === 'reveal' && call.target.endsWith(`${ws3Rev2Id}.log`)),
     'Show Active Session Log targets the second reviewer selected during startup',
   )
+}))
+
+test('concurrent automation runs under one rule isolate single-run cancellation and send Ctrl+C to both on project pause', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const repo = join(directory, 'auto-repo')
+  await mkdir(repo, { recursive: true })
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'a.txt'), 'one')
+  plain('add', '.')
+  plain('commit', '-qm', 'init')
+  plain('remote', 'add', 'origin', 'https://github.com/owner/repo.git')
+  const head = plain('rev-parse', 'HEAD').trim()
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+
+  const sharedRule = { id: randomUUID(), revision: randomUUID(), projectId: profile.id, repository: 'owner/repo' }
+  const sessionIds = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
+
+  const startOneRun = async (idx: number, pid: number) => {
+    let authorized = true
+    const launch = h.launchRuleEvent(
+      sharedRule,
+      `github/owner/repo/issue/${idx + 1}`,
+      String(idx + 1).repeat(64),
+      `Investigate #${idx + 1}`,
+      head,
+      () => authorized,
+    )
+    await waitFor(async () => h.spawns.length, (n) => n === idx + 1, `spawn ${idx + 1}`)
+    const spawn = h.spawns[idx]!
+    const stateNow = await h.request('desktop:get-state')
+    const tabId = stateNow.tabs[idx]!.id
+    const wtName = spawn.args.find((a) => a.startsWith('--worktree='))!.slice('--worktree='.length)
+    const worktree = join(`${repo}.worktrees`, wtName)
+    plain('worktree', 'add', '-q', '-b', wtName, worktree, 'HEAD')
+    const sessionId = sessionIds[idx]!
+    const log = join(directory, 'session-state', sessionId, 'events.jsonl')
+    await mkdir(dirname(log), { recursive: true })
+    await writeFile(log, JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } }) + '\n')
+    await writeFile(join(dirname(log), `inuse.${pid}.lock`), '')
+    h.configureBinding(tabId, pid, [pid])
+    spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+    const receipt = await launch
+    await pause(350)
+    return { tabId, spawn, receipt, stopAuth: () => { authorized = false } }
+  }
+
+  // (a) Two concurrent runs under the same rule.revision: interrupting run 1 leaves run 2 untouched.
+  const run1 = await startOneRun(0, 7801)
+  const run2 = await startOneRun(1, 7802)
+  const beforeCancel1 = run1.spawn.written.length
+  const beforeCancel2 = run2.spawn.written.length
+
+  h.interruptAutomaticTurn(run1.tabId)
+  assert.deepEqual(run1.spawn.written.slice(beforeCancel1), ['\x03'], 'timed-out/cancelled run 1 receives Ctrl+C')
+  assert.deepEqual(run2.spawn.written.slice(beforeCancel2), [], 'sibling run 2 under the same rule is not cancelled')
+  const afterSingleCancel = await h.request('desktop:get-state')
+  assert.equal(afterSingleCancel.workflowDeliveries?.find((d) => d.sessionId === sessionIds[0])?.state, 'uncertain')
+  assert.equal(afterSingleCancel.workflowDeliveries?.find((d) => d.sessionId === sessionIds[1])?.state, 'submitted')
+
+  // (b) Project pause sends Ctrl+C to BOTH concurrent runs using each run's own sessionId.
+  const sessionIdsB = ['33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444']
+  sessionIds[0] = sessionIdsB[0]!
+  sessionIds[1] = sessionIdsB[1]!
+  // End run2's previous turn first so project has 2 free automatic slots again:
+  h.pauseAutomaticProject(profile.id)
+  assert.deepEqual(run2.spawn.written.slice(beforeCancel2), ['\x03'], 'project pause sends Ctrl+C to active run 2')
+
+  // Launch two fresh concurrent runs under one rule and pause the project while both are active:
+  await h.request('desktop:close-tab', run1.tabId)
+  await h.request('desktop:close-tab', run2.tabId)
+  h.spawns.length = 0
+  const runA = await startOneRun(0, 7803)
+  const runB = await startOneRun(1, 7804)
+  const beforePauseA = runA.spawn.written.length
+  const beforePauseB = runB.spawn.written.length
+  h.pauseAutomaticProject(profile.id)
+  assert.deepEqual(runA.spawn.written.slice(beforePauseA), ['\x03'], 'project pause interrupts concurrent run A')
+  assert.deepEqual(runB.spawn.written.slice(beforePauseB), ['\x03'], 'project pause interrupts concurrent run B')
+  runA.stopAuth()
+  runB.stopAuth()
+}))
+
+test('sandboxed PR review tabs enforce full isolation, provenance checks, close cleanup, and legacy startup filtering', async () => fixture(async (h, directory) => {
+  const gitExe = await findGitForTests()
+  if (!gitExe) return
+  const bare = join(directory, 'origin.git')
+  const repo = join(directory, 'review-project')
+  await mkdir(bare, { recursive: true })
+  await mkdir(repo, { recursive: true })
+  execFileSync(gitExe.path, ['init', '--bare', '-q', bare])
+  const plain = (...args: string[]): string => execFileSync(gitExe.path, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd: repo, encoding: 'utf8' })
+  plain('init', '-q', '-b', 'main')
+  await writeFile(join(repo, 'file.txt'), 'base\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'base')
+  const baseSha = plain('rev-parse', 'HEAD').trim()
+  plain('checkout', '-qb', 'pr-42')
+  await writeFile(join(repo, 'file.txt'), 'pr change\n')
+  plain('add', '.')
+  plain('commit', '-qm', 'pr head')
+  const headSha = plain('rev-parse', 'HEAD').trim()
+  plain('push', '-q', bare, 'main:refs/heads/main', 'pr-42:refs/pull/42/head')
+  execFileSync(gitExe.path, ['config', 'uploadpack.allowAnySHA1InWant', 'true'], { cwd: bare })
+  plain('checkout', '-q', 'main')
+  plain('remote', 'add', 'origin', 'https://github.com/owner/repo.git')
+  h.setProjectOriginOverride(bare)
+
+  const { capabilities } = configure(h, directory)
+  const profile = createWorkspaceProfile(repo, 'default')
+  h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  h.createTestWindow()
+  await h.startTestDesktopControl()
+
+  // Open a normal host tab first so we can verify persistProfileTabs active fallback and tool isolation:
+  const hostState = await h.createMain()
+  const hostTabId = hostState.activeTabId!
+  assert.ok(hostState.tabs[0]?.browserProfileId, 'normal tab allocates a browserProfileId')
+
+  h.setGithubApi(async (path) => {
+    if (path === 'user') return { id: 77, login: 'me' }
+    if (path === 'repos/owner/repo/pulls/42') {
+      return {
+        state: 'open',
+        merged: false,
+        user: { id: 77, login: 'me' },
+        head: { sha: headSha, ref: 'pr-42', repo: { full_name: 'owner/repo' } },
+        base: { sha: baseSha, ref: 'main', repo: { full_name: 'owner/repo' } },
+      }
+    }
+    return [[]]
+  })
+
+  try {
+    const reviewPromise = h.startPrReviewForTest('https://github.com/owner/repo/pull/42', profile.id)
+    void reviewPromise.catch(() => {})
+    await waitFor(async () => h.spawns.length, (n) => n === 2, 'sandboxed PR review spawns CLI')
+    const revSpawn = h.spawns[1]!
+    const midState = await h.request('desktop:get-state')
+    const revTab = midState.tabs.find((t) => t.id !== hostTabId)!
+    const reviewSessionId = revTab.lastSessionId!
+    assert.ok(reviewSessionId, 'sandboxed reviewer receives a deterministic sessionId')
+    assert.equal(revTab.reviewer, true, 'startPrReview marks tab.reviewer = true')
+    assert.equal(revTab.canFork, false, 'sandboxed reviewer sets canFork = false')
+    assert.equal(revTab.browserProfileId, undefined, 'sandboxed reviewer never allocates a browserProfileId')
+
+    // Bind the reviewer session inside its own reviewer COPILOT_HOME so startPrReview completes enrollment:
+    const reviewerHome = revSpawn.env?.COPILOT_HOME!
+    assert.ok(reviewerHome, 'sandboxed reviewer uses isolated COPILOT_HOME')
+    const revLog = join(reviewerHome, 'session-state', reviewSessionId, 'events.jsonl')
+    await mkdir(dirname(revLog), { recursive: true })
+    await writeFile(revLog, JSON.stringify({ type: 'session.start', data: { sessionId: reviewSessionId, startTime: new Date().toISOString(), context: { cwd: revSpawn.cwd } } }) + '\n')
+    await writeFile(join(dirname(revLog), 'inuse.8842.lock'), '')
+    h.configureBinding(revTab.id, 8842, [8842], revSpawn.env)
+    await h.refreshRecords(revTab.id)
+    revSpawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+    await reviewPromise
+    await pause(350)
+
+    // No browser bridge endpoint file was created for the sandboxed reviewer tab:
+    const bridgeFiles = await readdir(join(directory, 'browser-sessions')).catch(() => [] as string[])
+    assert.equal(bridgeFiles.some((entry) => entry.includes(revTab.id)), false, 'sandboxed reviewer never starts a browser bridge')
+
+    // Persisted desktop.json omits tab.reviewer and falls back active=true onto the surviving regular host tab:
+    await h.flushConfig()
+    const savedConfig = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    const savedTabs = savedConfig.profiles.find((p) => p.id === profile.id)!.tabs
+    assert.equal(savedTabs.length, 1, 'sandboxed reviewer tab is never persisted to desktop.json')
+    assert.equal(savedTabs[0]?.active, true, 'persistProfileTabs falls back active=true to regular workspace tab')
+
+    // Reject restart, unload (preserving held input!), forkSideChat (both reviewer and tempReviewer), popOut, browser-show-main, desktop-control, and gitCursorContext:
+    h.seedHeldInputForTest(revTab.id, ['buffered-key'])
+    await assert.rejects(() => h.request('desktop:unload-tab', revTab.id), /cannot be unloaded/)
+    assert.deepEqual(h.readHeldInputForTest(revTab.id), ['buffered-key'], 'rejected unload-tab does not cancel held input')
+    h.seedHeldInputForTest(revTab.id, [])
+
+    await assert.rejects(() => h.request('desktop:restart-tab', revTab.id), /cannot be restarted/)
+    await assert.rejects(() => h.request('desktop:fork-side-chat', revTab.id, reviewSessionId, 'Fork'), /Select a local main Copilot session/)
+    const tempRevId = await h.addBackgroundReviewer(profile.id, hostTabId)
+    await assert.rejects(() => h.request('desktop:fork-side-chat', tempRevId, reviewSessionId, 'Fork'), /Select a local main Copilot session/)
+    await assert.rejects(async () => h.request('desktop:pop-out-tab', revTab.id), /cannot be opened in a separate window/)
+    await assert.rejects(async () => h.request('desktop:browser-show-main', revTab.id), /do not have a tools panel or browser/)
+    await assert.rejects(async () => h.request('desktop:desktop-control-set', revTab.id, true), /sandboxed|Allow desktop control/i)
+    const writeRes = await h.request<{ gitCursorContextAttached: boolean }>('desktop:write-tab', revTab.id, '\r', 'secret host diff')
+    assert.equal(writeRes.gitCursorContextAttached, false)
+    assert.equal(revSpawn.written.some((chunk) => chunk.includes('secret host diff')), false)
+
+    // Menu items Restart Active Session and Unload Active Session are disabled when the sandboxed reviewer is active:
+    h.focusMainWindow(true)
+    await h.request('desktop:activate-tab', revTab.id)
+    h.refreshAppMenu()
+    const findMenuItem = (menuLabel: string, itemLabel: string) => {
+      const menu = h.windowFor().menu as Array<{ label: string; submenu?: Array<{ label: string; enabled?: boolean }> }>
+      return menu.find((item) => item.label === menuLabel)!.submenu!.find((item) => item.label === itemLabel)!
+    }
+    assert.equal(findMenuItem('File', 'Restart Active Session').enabled, false)
+    assert.equal(findMenuItem('File', 'Unload Active Session').enabled, false)
+
+    // Follow-up provenance guard: followups.authorized(grant) is true while bound to the exact sandboxed tab/session,
+    // and immediately becomes false + revokes grant & cleans up the reviewer area when the reviewer tab is closed:
+    const followups = await h.openFollowupsForTest()
+    const revGrant = followups.list().find((g) => g.role === 'reviewer')!
+    assert.ok(revGrant?.enabled)
+    assert.equal(followups.authorized(revGrant), true)
+    const reservationsBeforeClose = h.reservationList()
+    assert.equal(reservationsBeforeClose.length, 1)
+    const reviewerCheckoutPath = reservationsBeforeClose[0]!.checkout
+
+    await h.request('desktop:close-tab', revTab.id)
+    assert.equal(h.reviewerTaskHas(revGrant.taskId), false, 'closing tab.reviewer immediately clears reviewerTasks provenance')
+    assert.equal(followups.grant(revGrant.id)?.enabled, false, 'closing tab.reviewer immediately disables its reviewer grant')
+    assert.equal(followups.authorized(revGrant), false, 'reviewer grant is no longer authorized after tab close')
+
+    // Wait for sweepReviewerAreas triggered by closeSessionTab to remove the reviewer checkout and release the reservation:
+    await waitFor(async () => h.reservationList().length, (n) => n === 0, 'sweepReviewerAreas releases closed reviewer reservation')
+    assert.equal(existsSync(reviewerCheckoutPath), false, 'closed reviewer worktree directory is removed')
+
+    // Provenance guard after tab close: even if a regular tab reuses reviewSessionId in the reviewer checkout path,
+    // followupPermission and role:'reviewer' re-enrollment are rejected because reviewerTasks no longer authorizes it:
+    await h.request('desktop:close-tab', tempRevId)
+    await h.request('desktop:close-tab', hostTabId)
+
+    // Legacy startup provenance filter: if an older version persisted a reviewer sessionId in desktop.json (both in an
+    // active workspace that becomes empty and an inactive workspace), restoreSavedWorkspaceTabs filters them out,
+    // opens a fresh default tab ONLY for the emptied active workspace, leaves the emptied inactive workspace without
+    // spawning a tab, and persists cleaned empty profile.tabs!
+    const inactiveRepo = join(directory, 'inactive-project')
+    await mkdir(inactiveRepo, { recursive: true })
+    const inactiveProfile = createWorkspaceProfile(inactiveRepo, 'default')
+    profile.tabs = [{ title: 'Review #42', lastSessionId: reviewSessionId, active: true }]
+    inactiveProfile.tabs = [{ title: 'Review #42', lastSessionId: reviewSessionId, active: true }]
+    h.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile, inactiveProfile], activeProfileId: profile.id }, capabilities)
+    const spawnsBeforeRestore = h.spawns.length
+    await h.restoreSaved()
+    await h.flushConfig()
+
+    const afterLegacyRestore = await h.request('desktop:get-state')
+    assert.equal(
+      afterLegacyRestore.tabs.some((t) => t.lastSessionId === reviewSessionId || t.title === 'Review #42'),
+      false,
+      'legacy saved reviewer tabs are filtered out on startup restore',
+    )
+    assert.equal(
+      afterLegacyRestore.tabs.filter((t) => t.workspaceProfileId === profile.id).length,
+      1,
+      'emptied active workspace falls through to opening one fresh default tab',
+    )
+    assert.equal(
+      afterLegacyRestore.tabs.filter((t) => t.workspaceProfileId === inactiveProfile.id).length,
+      0,
+      'emptied inactive workspace does not spawn a live tab during background restore',
+    )
+    assert.equal(h.spawns.length - spawnsBeforeRestore, 1, 'only the active workspace spawned a fresh session')
+    const cleanedConfig = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(cleanedConfig.profiles.find((p) => p.id === inactiveProfile.id)?.tabs, [], 'cleaned inactive profile.tabs is persisted')
+    assert.equal(
+      cleanedConfig.profiles.find((p) => p.id === profile.id)?.tabs.some((t) => t.lastSessionId === reviewSessionId),
+      false,
+      'cleaned active profile.tabs no longer contains the legacy reviewer sessionId',
+    )
+  } finally {
+    h.setGithubApi(null)
+    h.setProjectOriginOverride(null)
+  }
 }))

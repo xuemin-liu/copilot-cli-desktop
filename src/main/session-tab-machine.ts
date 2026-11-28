@@ -42,6 +42,7 @@ export interface NewTabInput {
   launchWorktreePath?: string
   privateOverrides?: boolean
   tempReviewer?: TempReviewerTabInfo
+  reviewer?: true
 }
 
 export function regularTabCount(state: Pick<TabsState, 'tabs'>): number {
@@ -108,6 +109,7 @@ function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleSt
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
     ...(input.tempReviewer ? { tempReviewer: input.tempReviewer } : {}),
+    ...(input.reviewer ? { reviewer: true as const } : {}),
   }
 }
 

@@ -19,7 +19,7 @@ import {
   type DaemonState,
   type PublicDaemonState,
 } from './runtime-state.js'
-import { findWorkspaceArgument } from './start-arguments.js'
+import { parseStartArguments } from './start-arguments.js'
 import { buildProgrammaticCopilotArgs, parseProgrammaticRunArguments } from './run-arguments.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
@@ -83,6 +83,7 @@ async function waitForStartup(timeoutMs = 60_000): Promise<DaemonState> {
 }
 
 async function start(workspaceArgument: string | undefined, extraArgs: string[]): Promise<void> {
+  const parsed = parseStartArguments(extraArgs, { allowWorkspace: false })
   const existing = await getLiveState()
   if (existing) {
     const current = await sendControl(existing, '/status')
@@ -111,7 +112,7 @@ async function start(workspaceArgument: string | undefined, extraArgs: string[])
     const logHandle = openSync(paths.logPath, 'a', 0o600)
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(process.execPath, [daemonEntry, workspace, ...extraArgs], {
+      child = spawn(process.execPath, [daemonEntry, workspace, ...parsed.normalizedOptionArgs], {
         detached: true,
         windowsHide: true,
         stdio: ['ignore', logHandle, logHandle],
@@ -289,9 +290,8 @@ async function main(): Promise<void> {
   const command = args[0] ?? 'help'
   switch (command) {
     case 'start': {
-      const rest = args.slice(1)
-      const workspace = findWorkspaceArgument(rest)
-      await start(workspace, rest)
+      const parsed = parseStartArguments(args.slice(1))
+      await start(parsed.workspace, parsed.normalizedOptionArgs)
       break
     }
     case 'status': await status(args.includes('--json')); break

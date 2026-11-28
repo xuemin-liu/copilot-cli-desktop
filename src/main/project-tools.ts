@@ -37,7 +37,7 @@ interface Options {
   userData: string
   owner(): BrowserWindow | null
   project(id: string): { name: string; path: string | null } | undefined
-  session(id: string): { workspaceProfileId: string; status: string; browserProfileId?: string; sessionCwd?: string | null; launchWorktreePath?: string; sideChat?: boolean; remote?: boolean; tempReviewer?: unknown; sessionPermissionPreset?: string | null } | undefined
+  session(id: string): { workspaceProfileId: string; status: string; browserProfileId?: string; sessionCwd?: string | null; launchWorktreePath?: string; sideChat?: boolean; remote?: boolean; tempReviewer?: unknown; reviewer?: boolean; sessionPermissionPreset?: string | null } | undefined
   currentSession(): string | null
   currentProject?(): string | null
   activateProject?(id: string, ownerId?: string): Promise<unknown>
@@ -161,8 +161,11 @@ export class ProjectToolService {
   private ownerFor(sessionId: string | null, profileId: string): string | undefined {
     if (!sessionId) return undefined
     const session = this.options.session(sessionId)
-    if (!session || session.sideChat || session.remote || session.tempReviewer || session.workspaceProfileId !== profileId) return undefined
+    if (!session || session.sideChat || session.remote || session.tempReviewer || session.reviewer || session.workspaceProfileId !== profileId) return undefined
     return session.browserProfileId ?? sessionId
+  }
+  private bridgeAllowed(session: ReturnType<Options['session']>): boolean {
+    return Boolean(session && !session.sideChat && !session.remote && !session.tempReviewer && !session.reviewer && session.sessionPermissionPreset !== 'read-only')
   }
   private foreground(profileId: string): string | undefined {
     return this.ownerFor(this.options.currentSession(), profileId)
@@ -194,7 +197,7 @@ export class ProjectToolService {
     for (const [id, bridge] of this.bridges) {
       const session = this.options.session(id)
       const owner = this.ownerFor(id, bridge.profileId)
-      const connected = Boolean(owner && session && liveSession(session.status) && !this.releasing.has(owner))
+      const connected = Boolean(owner && session && this.bridgeAllowed(session) && liveSession(session.status) && !this.releasing.has(owner))
       const project = this.projects.get(bridge.profileId), group = this.groups.get(bridge.profileId)
       const focused = this.focusPages.get(owner ?? bridge.profileId) ?? this.focusPages.get(bridge.profileId)
       const pages = project?.tabs.filter(tab => tab.pageId !== undefined && this.canAccess(tab, owner, bridge.profileId)) ?? []
@@ -827,12 +830,14 @@ export class ProjectToolService {
       if (request.url === '/terminal') {
         void this.serveTerminal(request, response, profileId, () => {
           this.refreshConnections()
-          if (this.bridges.get(sessionId) !== bridge || !bridge.connected) throw new Error('Terminal control requires a live session in its owning project.')
           const session = this.options.session(sessionId)
-          if (session?.sideChat || session?.remote || session?.tempReviewer || session?.sessionPermissionPreset === 'read-only') throw new Error('Terminal control is unavailable to read-only, side-chat, remote, or temporary reviewer sessions')
+          if (!this.bridgeAllowed(session)) throw new Error('Terminal control is unavailable to read-only, side-chat, remote, or reviewer sessions')
+          if (this.bridges.get(sessionId) !== bridge || !bridge.connected) throw new Error('Terminal control requires a live session in its owning project.')
         }, { ownerId: this.ownerFor(sessionId, profileId), sessionId }); return
       }
-      if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it to use the browser.'); return }
+      const session = this.options.session(sessionId)
+      if (!this.bridgeAllowed(session)) { fail(403, 'Browser control is unavailable to read-only, side-chat, remote, or reviewer sessions.'); return }
+      if (!liveSession(session?.status)) { fail(409, 'CLI session is not running; resume it to use the browser.'); return }
       const group = this.groups.get(profileId), revision = bridge.revision
       if (!bridge.connected) { fail(409, 'Browser control requires a live session in its owning project.'); return }
       if (!group) { fail(409, 'No browser pages open. Add a Browser tab, then run tabs and select a page ID.'); return }
@@ -845,7 +850,13 @@ export class ProjectToolService {
         allowsPage,
         active: () => bridge.pageId ?? 0,
         select: id => { if (!allowsPage(id) || !group.browser.hasPage(id)) throw new Error('Browser page closed'); bridge.pageId = id; this.options.changed() },
-        validate: () => { this.syncConnections(); if (!liveSession(this.options.session(sessionId)?.status) || this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) throw new Error('Current session or browser page changed; retry from the active session.') },
+        validate: () => {
+          this.syncConnections()
+          const currentSession = this.options.session(sessionId)
+          if (!this.bridgeAllowed(currentSession) || !liveSession(currentSession?.status) || this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) {
+            throw new Error('Current session or browser page changed; retry from the active session.')
+          }
+        },
       }
       try { group.browser.serveControl(request, response, { port, token, cursor }) }
       catch (error) { fail(409, error instanceof Error ? error.message : 'Browser unavailable') }

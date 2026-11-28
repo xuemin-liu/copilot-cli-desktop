@@ -362,22 +362,55 @@ if (!process.versions.electron) {
     await action({ type: 'close', id: restored.id })
     assert.equal(state().activeId, neighbor.id)
     assert.ok(state().tabs[0].pageId, 'closing active restored page opens its selected saved neighbor')
-    // Temporary reviewer sessions (even with a browserProfileId or without one) must never own the panel or persist a layout.
+    // Temporary and sandboxed reviewer sessions must never own the panel or persist a layout; read-only sessions keep human panel ownership & releaseSession while blocking the CLI bridge.
     const revProfileId = '33333333-3333-4333-8333-333333333333'
+    const roProfileId = '44444444-4444-4444-8444-444444444444'
     sessions.set('rev-hosted', { browserProfileId: revProfileId, workspaceProfileId: 'p1', status: 'running', tempReviewer: { groupId: 'g1', hostTabId: 'restored-s2' } })
     sessions.set('rev-standalone', { workspaceProfileId: 'p1', status: 'running', tempReviewer: { groupId: 'g2', hostTabId: null } })
+    sessions.set('rev-sandboxed', { workspaceProfileId: 'p1', status: 'running', reviewer: true })
+    sessions.set('ro-session', { browserProfileId: roProfileId, workspaceProfileId: 'p1', status: 'running', sessionPermissionPreset: 'read-only' })
     currentSession = 'rev-hosted'; tools.refreshConnections()
     assert.equal(state().ownerId, undefined, 'hosted tempReviewer never becomes panel owner')
     currentSession = 'rev-standalone'; tools.refreshConnections()
     assert.equal(state().ownerId, undefined, 'standalone tempReviewer never becomes panel owner')
+    currentSession = 'rev-sandboxed'; tools.refreshConnections()
+    assert.equal(state().ownerId, undefined, 'sandboxed reviewer never becomes panel owner')
+    currentSession = 'ro-session'; tools.refreshConnections()
+    assert.equal(state().ownerId, roProfileId, 'read-only session keeps human panel ownership')
+    const roBridgePath = join(out, 'ro-control.json')
+    await tools.startBridge('ro-session', 'p1', roBridgePath)
+    const roEndpoint = JSON.parse(await readFile(roBridgePath, 'utf8'))
+    const roCall = async (route, method = 'GET', body = undefined) => {
+      const response = await fetch(`http://127.0.0.1:${roEndpoint.port}${route}`, {
+        method,
+        headers: { authorization: `Bearer ${roEndpoint.token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+      return { status: response.status, body: await response.json() }
+    }
+    assert.equal((await roCall('/status')).status, 403, 'read-only session browser control bridge route is blocked with 403')
+    assert.equal((await roCall('/terminal', 'POST', { action: 'list' })).status, 409, 'read-only session terminal bridge route is blocked with 409')
+    const roRelease = await tools.releaseSession('ro-session', false)
+    assert.equal(typeof roRelease, 'function', 'read-only session still participates in releaseSession cleanup')
+    roRelease()
+    await tools.stopBridge('ro-session')
     currentSession = 'restored-s2'; tools.refreshConnections()
     assert.equal(state().ownerId, '22222222-2222-4222-8222-222222222222')
+    const s2RestoredCall = await bridge('restored-s2')
+    assert.equal((await s2RestoredCall('/status')).status, 200, 'default-preset session accesses browser bridge')
+    sessions.get('restored-s2').sessionPermissionPreset = 'read-only'
+    assert.equal((await s2RestoredCall('/status')).status, 403, 'changing preset to read-only immediately revokes browser bridge access')
+    delete sessions.get('restored-s2').sessionPermissionPreset
+    tools.refreshConnections()
+    assert.equal((await s2RestoredCall('/status')).status, 200, 'restoring non-read-only preset reconnects browser bridge')
     await tools.dispose()
     const savedManifest = JSON.parse(await readFile(join(options.userData, 'workspace-tool-tabs-v2.json'), 'utf8'))
     const savedP1 = savedManifest.projects.find(project => project.profileId === 'p1')
     assert.equal(revProfileId in savedP1.layouts, false, 'tempReviewer browserProfileId is never persisted as a layout owner')
     assert.equal('rev-hosted' in savedP1.layouts, false, 'tempReviewer runtime id is never persisted as a layout owner')
     assert.equal('rev-standalone' in savedP1.layouts, false, 'standalone tempReviewer id is never persisted as a layout owner')
+    assert.equal('rev-sandboxed' in savedP1.layouts, false, 'sandboxed reviewer id is never persisted as a layout owner')
+    assert.equal(roProfileId in savedP1.layouts, true, 'read-only session human panel layout is preserved')
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, checks: ['zero tabs', 'add/focus Git', 'hide retention', 'independent cursors', 'session cookie survival', 'popup opener', 'beforeunload cancellation', 'true last close', 'no resurrection', 'bridge survives group disposal', 'lazy restart', 'separate project cookies', 'pop-out retention', 'pop-out leaves the strip', 'agent stays on popped page', 'blank panel', 'global cap', 'workspace removal', 'explicit disconnect', 'tempReviewer owner exclusion'] }, null, 2))
     console.log('Project tool lifecycle checks passed.')
     win.destroy(); server.close(); app.exit(0)

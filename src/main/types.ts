@@ -127,6 +127,8 @@ export interface DesktopSessionTab {
   renamePending?: true
   /** Ephemeral PR reviewer session owned by `hostTabId`; hidden from the main sidebar list and never persisted. */
   tempReviewer?: TempReviewerTabInfo
+  /** Sandboxed PR review loop session (`startPrReview`); runtime-only and never persisted. */
+  reviewer?: true
 }
 
 export interface TempReviewerTabInfo {

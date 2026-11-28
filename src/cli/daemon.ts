@@ -8,14 +8,13 @@ import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES, type CopilotCa
 import {
   assertPermissionPresetSupported,
   buildPermissionArgs,
-  isPermissionPreset,
   needsToolAllowlistProbe,
   permissionCompatibilityWarning,
   type PermissionPreset,
 } from '../main/permission-presets.js'
 import { PtySession, type PtySessionExit } from '../main/pty-session.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
-import { buildResumeArgs, isResumeMode, type ResumeMode } from '../main/resume-args.js'
+import { buildResumeArgs, type ResumeMode } from '../main/resume-args.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
 import type { CopilotResolution } from '../main/types.js'
 import {
@@ -29,16 +28,14 @@ import {
   writeDaemonState,
   type DaemonState,
 } from './runtime-state.js'
-import { START_OPTION_FLAGS, flagValue } from './start-arguments.js'
+import { parseStartArguments } from './start-arguments.js'
 
 const paths = getCliPaths()
 const workspace = resolve(process.argv[2] ?? process.cwd())
-const rawArgs = process.argv.slice(3)
-const presetArgument = flagValue(rawArgs, START_OPTION_FLAGS.preset)
-const preset: PermissionPreset = isPermissionPreset(presetArgument) ? presetArgument : 'default'
-const resumeModeArgument = flagValue(rawArgs, START_OPTION_FLAGS.resumeMode)
-const resumeMode: ResumeMode = isResumeMode(resumeModeArgument) ? resumeModeArgument : 'new'
-const lastSessionId = flagValue(rawArgs, START_OPTION_FLAGS.sessionId) ?? null
+const parsedStart = parseStartArguments(process.argv.slice(3), { allowWorkspace: false })
+const preset: PermissionPreset = parsedStart.preset
+const resumeMode: ResumeMode = parsedStart.resumeMode
+const lastSessionId = parsedStart.sessionId
 
 const lockToken: string = process.env.COPILOT_DESKTOP_LOCK_TOKEN ?? ''
 if (!lockToken) throw new Error('The controller startup lock token is missing')
@@ -130,6 +127,7 @@ function createSession(): PtySession {
 }
 
 async function startSession(status: 'starting' | 'restarting', instance: PtySession): Promise<void> {
+  if (stoppingRequested) return
   await updateState({ status, processId: null, error: null })
   try {
     await instance.start()
@@ -207,8 +205,20 @@ const server = createServer((request, response) => {
         return
       }
       const activeSession = session
-      if (!activeSession) throw new Error('No session is initialized')
       stoppingRequested = true
+      if (!activeSession) {
+        try {
+          await enqueueMutation(async () => {
+            await updateState({ status: 'stopping', processId: null, error: null })
+          })
+        } catch (error) {
+          stoppingRequested = false
+          throw error
+        }
+        writeJson(response, 202, toPublicState(currentState()))
+        setImmediate(() => void shutdown(0))
+        return
+      }
       const cancellation = activeSession.stop().then(
         () => ({ ok: true as const }),
         (error: unknown) => ({ ok: false as const, error }),
@@ -329,27 +339,33 @@ async function initialize(): Promise<void> {
     error: null,
     warning: null,
   }
-  await writeDaemonState(paths, state)
+  await updateState({})
   await log(`Controller started (PID ${process.pid}) for ${workspace}`)
+  if (stoppingRequested) return
   const resolution = await resolveCopilotBinary()
+  if (stoppingRequested) return
   if (resolution.version === null) throw new Error(resolution.error ?? 'The copilot CLI could not be resolved')
   copilotResolution = resolution
   copilotCapabilities = needsToolAllowlistProbe(preset)
     ? await discoverCopilotCapabilities(resolution)
     : { ...EMPTY_COPILOT_CAPABILITIES }
+  if (stoppingRequested) return
   // Before anything is started: a probe that failed says nothing about the CLI, so Restricted mode is refused.
   assertPermissionPresetSupported(preset, copilotCapabilities)
   const compatibilityWarning = permissionCompatibilityWarning(preset, copilotCapabilities)
   if (compatibilityWarning) {
+    if (stoppingRequested) return
     await updateState({ warning: compatibilityWarning })
     await log(`Warning: ${compatibilityWarning}`)
   }
+  if (stoppingRequested) return
   const instance = createSession()
   session = instance
   await enqueueMutation(() => startSession('starting', instance))
 }
 
 void initialize().catch((error: unknown) => {
+  if (stoppingRequested || shuttingDown) return
   void log(`Controller initialization failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
     .catch(() => undefined)
     .finally(() => void shutdown(1, error))

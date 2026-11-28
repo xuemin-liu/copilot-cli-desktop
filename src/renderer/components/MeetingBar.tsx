@@ -126,7 +126,7 @@ export function MeetingBar({ meetings, tabs, activeTabId, focusedPeekTabId = nul
         const pending = meeting.invited ?? []
         // Only a session whose CLI is running can take the material; a stopped one has to be resumed first.
         // A tab running another CLI joins as an outside agent, by the meeting's id, not from this list.
-        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !tab.tempReviewer && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
+        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !tab.tempReviewer && !tab.reviewer && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
         const roleFor = (tabId: string | null): 'Host' | 'Reviewer' | null => (
           !tabId ? null
             : meeting.hostTabId === tabId ? 'Host'
